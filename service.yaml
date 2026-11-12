@@ -1,0 +1,56 @@
+# 设计说明；不是可执行部署文件。服务部署以 fertile/deploy 为唯一准绳。
+version: 2
+system: fertile
+component: finance
+status: design
+deployment_source: "viramoon/fertile:deploy/service.yaml"
+profile: TBD # 由 FERTILE_PROFILE 选 cloudbox 或 stable
+environment:
+  FERTILE_PROFILE: TBD # 部署环境，与运行模式独立
+  FERTILE_DATA_ROOT: /home/box/fertile/data # 配置默认，实际从配置读取
+  IB_GATEWAY_ADDRESS: TBD # 联调确认 host；paper 端口 4002
+paths:
+  root: /home/box/fertile # 配置默认
+  catalog: /home/box/fertile/data/catalog
+  state: /home/box/fertile/data/finance-state
+  logs: /home/box/fertile/logs/finance
+dependencies:
+  ib_gateway:
+    host: TBD
+    paper_port: 4002
+    account: paper
+  parquet_catalog:
+    path_from: config.paths.catalog
+  node_state:
+    backend: TBD # Nautilus 缓存与恢复状态持久化，不能依赖 web 在线
+processes:
+  - name: trader
+    command: TBD # 待节点入口实现
+    port: TBD # 待健康端口分配
+    mode: Live
+    account: paper
+    dependencies: [ib_gateway, parquet_catalog, node_state]
+    health:
+      path: /healthz
+      live: 进程存活
+      ready: Gateway 认证、行情新鲜、订阅恢复且对账可信
+    restart_policy: TBD # 由 fertile 运维设计确认
+  - name: collector
+    command: TBD # 待采集入口实现
+    port: TBD
+    dependencies: [ib_gateway, parquet_catalog]
+    health:
+      path: /healthz
+      live: 进程存活
+      ready: 订阅有效、数据新鲜且目录可写
+    restart_policy: TBD
+  - name: api
+    command: TBD # 待 HTTP 入口实现
+    port: TBD
+    dependencies: [parquet_catalog, node_state]
+    health:
+      path: /healthz
+      live: 进程存活
+      ready: 查询依赖可用、数据新鲜且节点状态可信
+    restart_policy: TBD
+runbook: RUNBOOK.md
