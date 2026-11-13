@@ -10,7 +10,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      FINANCE_BUILD_ROOT: ${{ runner.temp }}/finance-build
       CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@v4
@@ -21,6 +20,7 @@ jobs:
         id: versions
         run: |
           source toolchain.env
+          echo "FINANCE_BUILD_ROOT=$RUNNER_TEMP/finance-build" >> "$GITHUB_ENV"
           echo "rust=$RUST_VERSION" >> "$GITHUB_OUTPUT"
           echo "python=$PYTHON_VERSION" >> "$GITHUB_OUTPUT"
           echo "uv=$UV_VERSION" >> "$GITHUB_OUTPUT"
