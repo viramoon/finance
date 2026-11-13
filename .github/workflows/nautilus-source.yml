@@ -1,7 +1,7 @@
 name: Nautilus 源码构建
 on:
   pull_request:
-    types: [opened, synchronize, reopened, edited]
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
 permissions:
   contents: read
@@ -40,6 +40,8 @@ jobs:
         with:
           version: ${{ steps.versions.outputs.uv }}
           python-version: ${{ steps.versions.outputs.python }}
+          cache-local-path: ${{ runner.temp }}/finance-build/uv-cache
+          cache-dependency-glob: uv.lock
       - uses: actions/setup-python@v5
         with:
           python-version-file: .python-version
