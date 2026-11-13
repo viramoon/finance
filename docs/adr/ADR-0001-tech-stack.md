@@ -6,6 +6,8 @@
 
 适用范围：finance
 
+依赖获取和源码维护方式已由 [ADR-0003](ADR-0003-nautilus-source-submodule.md) 调整为源码 submodule；下文保留初始选型背景。
+
 ## 背景与决策
 
 交易、回测、模拟需要复用成熟执行与数据能力，云电脑资源与网络受限。采用 **NautilusTrader 作为依赖**，使用 Rust 内核加 Python（PyO3）接口，不自研交易核心，不选择 C，也不 fork。finance 聚焦策略、做市商数据 adapter、配置、入口、运维和研究。
