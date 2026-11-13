@@ -1,6 +1,6 @@
 # ADR-0002：Nautilus 依赖与替换策略
 
-状态：已采纳（设计，尚未实现）
+状态：被 [ADR-0003](ADR-0003-nautilus-source-submodule.md) 取代。下文保留 issue #1 的历史决定；当前源码获取与补丁流程以 ADR-0003 为准。
 
 依据：issue #1 方案 v2 的方案 C
 

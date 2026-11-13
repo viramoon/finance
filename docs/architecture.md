@@ -1,6 +1,6 @@
 # finance 架构与边界
 
-finance 是 fertile 的主项目与 submodule，交易核心作为 NautilusTrader 依赖使用，不 fork。Rust 内核与 PyO3 Python 接口提供统一回测、模拟和实盘基础；我们只管理策略、做市商数据 adapter、配置、进程入口、运维和研究。
+finance 是 fertile 的主项目与 submodule，交易核心以 vendor/nautilus_trader 源码 submodule 引入并从源码构建，补丁维护遵守 ADR-0003。Rust 内核与 PyO3 Python 接口提供统一回测、模拟和实盘基础；我们只管理策略、做市商数据 adapter、配置、进程入口、运维和研究。
 
 ```text
 IB Gateway / 数据源 → Nautilus IB adapter / mm_api → collector → Parquet catalog

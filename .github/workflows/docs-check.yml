@@ -21,7 +21,7 @@ jobs:
       - name: 准备 Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version-file: .python-version
       - name: 准备 YAML 解析器
         run: python -m pip install --disable-pip-version-check PyYAML==6.0.3
       - name: 检查文档与 PR 描述

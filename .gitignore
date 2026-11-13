@@ -1,0 +1,8 @@
+# 源码只保留锁文件和 submodule 指针；环境及产物位于持久缓存。
+.venv/
+__pycache__/
+*.pyc
+target/
+dist/
+.env
+*.env.local

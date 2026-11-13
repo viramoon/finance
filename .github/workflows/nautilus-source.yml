@@ -1,0 +1,83 @@
+name: Nautilus 源码构建
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: 读取派生版本
+        id: versions
+        run: |
+          source toolchain.env
+          echo "FINANCE_BUILD_ROOT=$RUNNER_TEMP/finance-build" >> "$GITHUB_ENV"
+          echo "rust=$RUST_VERSION" >> "$GITHUB_OUTPUT"
+          echo "python=$PYTHON_VERSION" >> "$GITHUB_OUTPUT"
+          echo "uv=$UV_VERSION" >> "$GITHUB_OUTPUT"
+          echo "llvm=$LLVM_VERSION" >> "$GITHUB_OUTPUT"
+          echo "source=$(git -C vendor/nautilus_trader rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: 系统编译依赖
+        run: |
+          # 托管的一次性 VM：清理本任务不用的预装 SDK，为源码编译留出磁盘。
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h "$RUNNER_TEMP"
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install -y libssl-dev pkg-config libtinfo6 libxml2 libz3-4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.versions.outputs.rust }}
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ steps.versions.outputs.uv }}
+          python-version: ${{ steps.versions.outputs.python }}
+          cache-local-path: ${{ runner.temp }}/finance-build/uv-cache
+          cache-dependency-glob: uv.lock
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/finance-build/tools
+            ${{ runner.temp }}/finance-build/downloads
+          key: llvm-${{ runner.os }}-${{ runner.arch }}-${{ steps.versions.outputs.llvm }}
+      - uses: actions/cache@v4
+        id: compiled
+        with:
+          path: |
+            ${{ runner.temp }}/finance-build/wheels
+            ${{ runner.temp }}/finance-build/cargo-target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: nautilus-${{ runner.os }}-${{ runner.arch }}-${{ steps.versions.outputs.source }}-${{ hashFiles('toolchain.env', 'uv.lock', 'scripts/build.sh') }}
+      - name: 从源码构建（或校验缓存）并跑上游回测
+        run: |
+          set -o pipefail
+          rustc --version
+          python3 --version
+          uv --version
+          bash scripts/build.sh | tee first-build.log
+          bash scripts/smoke.sh
+          bash scripts/build.sh | tee second-build.log
+          grep -q '^BUILD_CACHE_HIT=true$' second-build.log
+          echo "GitHub cache hit: ${{ steps.compiled.outputs.cache-hit }}" >> "$GITHUB_STEP_SUMMARY"
+          grep '^BUILD_SECONDS=' first-build.log second-build.log >> "$GITHUB_STEP_SUMMARY"
+      - name: 保存构建来源、耗时与回测日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nautilus-source-evidence
+          path: |
+            first-build.log
+            second-build.log
+            ${{ runner.temp }}/finance-build/logs

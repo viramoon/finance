@@ -1,8 +1,8 @@
 # finance
 
-fertile 的主项目与 submodule，基于 NautilusTrader 的交易与数据系统。负责策略、做市商数据 adapter、配置、trader / collector / backtest / api 入口、运维和研究；不 fork 或自研交易核心。
+fertile 的主项目与 submodule，基于 NautilusTrader 的交易与数据系统。负责策略、做市商数据 adapter、配置、trader / collector / backtest / api 入口、运维和研究；以源码 submodule 引入上游，不自研交易核心。
 
-本仓库按 [issue #1 方案 v2](https://github.com/viramoon/finance/issues/1#issuecomment-6834604073) 初始化。目前只有中文文档、组织结构与最小文档检查 CI，没有业务实现；TBD 项都需后续 issue 明确后再实施。开发从 [AGENTS.md](AGENTS.md) 开始。
+本仓库按 [issue #1 方案 v2](https://github.com/viramoon/finance/issues/1#issuecomment-6834604073) 初始化。当前已实现 [Nautilus 源码构建](docs/build.md) 和上游离线回测冒烟，仍没有策略或业务服务实现；TBD 项都需后续 issue 明确后再实施。开发从 [AGENTS.md](AGENTS.md) 开始。
 
 ## 系统中的位置
 
@@ -32,7 +32,7 @@ finance/
 └── .github/                模板与文档检查
 ```
 
-目录中的 README 说明职责和边界。未来源码目录只含 README，不创建源码、构建配置或伪造生成文件。
+目录中的 README 说明职责和边界。策略和业务服务目录目前仍只有 README；vendor 源码与构建入口按 issue #3 实现，不伪造接口快照或生成客户端。
 
 ## 文档索引
 
@@ -53,3 +53,14 @@ finance/
 ## 协作与检查
 
 一个任务对应一个 issue，使用 issue-<号>-<简述> 分支和 PR，CI 通过后合并，禁止直接推送 main。PR 需含 Closes #<号>、测试结果和逐条验收自检；开发问题在原分支解决，文档随行为在同一 PR 更新。文档 CI 检查必需文件、非空内容、YAML、相对链接及 PR 描述，不编译业务代码；这不代表已经完成运行或真实交易验证。
+
+## 源码构建入口
+
+```sh
+git clone --recurse-submodules https://github.com/viramoon/finance.git
+cd finance
+bash scripts/build.sh
+bash scripts/smoke.sh
+```
+
+先准备与 fertile/deploy/toolchain.env 一致的工具链；方法、持久缓存、耗时证据见 [构建](docs/build.md)。源码位置 vendor/nautilus_trader，升级和私有镜像见 [Nautilus 维护](docs/nautilus.md) 与 [ADR-0003](docs/adr/ADR-0003-nautilus-source-submodule.md)。

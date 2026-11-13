@@ -27,7 +27,7 @@ issue #1 只写中文文档和仓库组织结构，允许最小文档检查 CI�
 
 ## finance 专属规则
 
-- 禁止 fork 或修改 NautilusTrader 源码；把它作为依赖使用，改动前先查 Nautilus 是否已有组件，优先使用扩展点或向上游提 PR。
+- Nautilus 以 vendor/nautilus_trader 源码 submodule 引入，按 ADR-0003 从源码构建。不得直接在 submodule 内改代码并提交 finance；补丁必须先提交并推送私有镜像的 fertile/main，再通过 PR 更新 URL / 指针。改动前仍先查现成组件和扩展点。
 - 价格、数量、金额必须用定点 / Decimal / Nautilus 精确领域类型，不用浮点；序列化也保留精度。
 - 测试不得依赖真实账户环境变量、实盘账户或真实下单；使用隔离配置和可控替身，当前联调仅限另行授权的 paper 环境。
 - 先阅读 [Nautilus 边界](docs/nautilus.md)、[连接职责](docs/connectivity.md) 及 [依赖 ADR](docs/adr/ADR-0002-nautilus-dependency.md)。本 issue 不新增任何交易实现或自研核心 crate。
