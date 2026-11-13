@@ -40,6 +40,9 @@ jobs:
         with:
           version: ${{ steps.versions.outputs.uv }}
           python-version: ${{ steps.versions.outputs.python }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
       - uses: actions/cache@v4
         with:
           path: |
@@ -58,6 +61,9 @@ jobs:
       - name: 从源码构建（或校验缓存）并跑上游回测
         run: |
           set -o pipefail
+          rustc --version
+          python3 --version
+          uv --version
           bash scripts/build.sh | tee first-build.log
           bash scripts/smoke.sh
           bash scripts/build.sh | tee second-build.log
