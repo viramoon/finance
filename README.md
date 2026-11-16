@@ -2,7 +2,7 @@
 
 fertile 的主项目与 submodule，基于 NautilusTrader 的交易与数据系统。负责策略、做市商数据 adapter、配置、trader / collector / backtest / api 入口、运维和研究；以源码 submodule 引入上游，不自研交易核心。
 
-本仓库按 [issue #1 方案 v2](https://github.com/viramoon/finance/issues/1#issuecomment-6834604073) 初始化。当前已实现 [Nautilus 源码构建](docs/build.md) 、上游离线回测批任务及 [只读 HTTP API](docs/api.md)，交易策略与交易服务仍未实现；TBD 项都需后续 issue 明确后再实施。开发从 [AGENTS.md](AGENTS.md) 开始。
+本仓库按 [issue #1 方案 v2](https://github.com/viramoon/finance/issues/1#issuecomment-6834604073) 初始化。当前已实现 [Nautilus 源码构建](docs/build.md)、上游离线回测批任务及 [只读 HTTP API](docs/api.md)，交易策略与交易服务仍未实现；TBD 项都需后续 issue 明确后再实施。开发从 [AGENTS.md](AGENTS.md) 开始。
 
 ## 系统中的位置
 

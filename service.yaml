@@ -45,7 +45,7 @@ processes:
       ready: 订阅有效、数据新鲜且目录可写
     restart_policy: TBD
   - name: api
-    command: ./target/release/finance-api # cargo build --release --locked -p finance-api
+    command: cargo run --release --locked -p finance-api # 开发启动；部署产物命令由 fertile 定义
     working_directory: finance # 需可读取 config/，或设 FINANCE_CONFIG_DIR
     bind_host: 127.0.0.1
     port: 8081 # FINANCE_API_PORT / config.api.port 可覆盖
