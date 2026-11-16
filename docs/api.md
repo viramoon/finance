@@ -1,9 +1,52 @@
 # 面向 web 的 HTTP API
 
-web 通过 HTTP 调用 finance 的 api 进程，frontend 只调用 web。TBD：查询、回测任务、策略状态与受控交易操作的具体资源、路由、认证、错误模型及权限，后续接口 issue 确定；本次不手写接口契约或响应样例。
+finance-api 是独立的 Rust / axum 只读进程；web 通过 HTTP 调用，frontend 只调用 web。当前不启动 Nautilus、trader、collector 或 IBKR，也不在 HTTP 请求中执行回测。服务部署唯一来源仍为 fertile deploy/，本仓库 service.yaml 记录组件接口。
 
-Rust handler 使用 utoipa / utoipa-axum 导出 OpenAPI，生成快照为 fertile `contracts/finance.openapi.json`。更新顺序：改 finance 代码并验证 → 从同一 commit 导出 → 在 fertile PR 更新快照及子模块指针 → CI 比对差异 → 更新 web 生成客户端。禁止手改快照和生成客户端；破坏性改动要有兼容与迁移计划，规则见 [fertile contracts](https://github.com/viramoon/fertile/tree/main/contracts)。
+## 运行与配置
 
-价格、数量、金额使用精确类型，序列化格式和客户端精度规则 TBD，不能默认为浮点。写操作以唯一请求 / 客户端订单 ID 关联状态，超时先查后试；健康接口 /healthz 区分 live / ready。实时流若有另定消息协议，不假设 OpenAPI 覆盖。
+```sh
+cargo build --locked -p finance-api
+# 先建立可读数据根目录；API 不会自动创建它掩盖挂载错误。
+mkdir -p /home/box/fertile/data
+FERTILE_PROFILE=cloudbox cargo run --locked -p finance-api
+```
 
-导出命令、工具版本和 API 进程与 Nautilus 的内部边界 TBD；这些在实现时明确，当前不生成空的 OpenAPI 文件。
+从仓库根运行；其他工作目录须设置 FINANCE_CONFIG_DIR 为 config 的绝对路径。默认监听 127.0.0.1:8081，覆盖顺序为 config/base.yaml → config/<FERTILE_PROFILE>.yaml → 环境变量。profile 默认 cloudbox，只允许 cloudbox / stable，不决定运行模式或实盘权限。
+
+| 环境变量 | 作用 |
+| --- | --- |
+| FINANCE_CONFIG_DIR | 配置目录，默认当前工作目录下 config |
+| FERTILE_PROFILE | cloudbox / stable |
+| FINANCE_API_BIND_HOST | IP 地址，默认 127.0.0.1 |
+| FINANCE_API_PORT | 1～65535，默认 8081 |
+| FERTILE_DATA_ROOT | 绝对数据根目录，默认 /home/box/fertile/data |
+
+未知 YAML 字段、未知 profile、非法 IP / 端口、相对数据根路径在启动时拒绝。配置不读取账户密钥。当前无认证，默认 loopback；部署方只在受控内网显式覆盖绑定地址，不能作为公网写操作入口。更丰富的查询、认证和受控交易接口由后续独立 issue 确定。
+
+## 接口与状态
+
+- GET /healthz/live：进程存活返回 200，status=ok，checks 含 process=true。
+- GET /healthz/ready：实际 read_dir 数据根目录成功返回 200 / ready，否则 503 / not_ready；checks 含 data_root_readable 布尔值。目录没有回测结果仍可 ready；这不是交易、行情新鲜度或 Gateway 健康证明。
+- GET /api/v1/backtests/sample：读取数据根下 finance-state/backtests/sample/latest.json。200 返回 run_id、strategy、instrument、start、end、total_orders、total_positions、pnl、currency、generated_at。时间为 UTC RFC3339（序列化时可规范化等价格式）；计数为整数，pnl 为精确十进制字符串，禁止 JSON 数字。当前示例 PnL 是 USD 账户最终余额减初始余额，不使用浮点统计接口；上游示例不下单，因此当前订单 / 持仓计数和 PnL 为零。
+
+没有结果为 404，统一错误体包含 error.code=sample_not_found 和 error.message。不可读为 500 / sample_unreadable，损坏 JSON、字段缺失或金额非法为 500 / sample_invalid；响应不暴露文件路径和底层错误。liveness / readiness 使用健康体及逐项 checks。
+
+## 示例批任务
+
+先完成 [源码构建](build.md)，执行一条命令：
+
+```sh
+FERTILE_DATA_ROOT=/home/box/fertile/data bash scripts/backtest-sample.sh
+```
+
+入口验证本地源码 wheel，调用 #3 同一个上游 CSV 示例和 DemoStrategy，不编辑 vendor、不写自研策略。在 engine.dispose 前提取真实结果与 Money.as_decimal() 余额，最后释放引擎；临时文件与 latest.json 在同一目录，flush / fsync 后 os.replace 原子替换，失败保留旧结果并清理临时文件。只在回测成功后写结果。配置层不会从该只读 API 启动批任务。批任务的数据路径使用 FERTILE_DATA_ROOT 或上述默认值，不读取 API profile 文件；调度时向批任务与 API 注入相同根路径。
+
+## OpenAPI 与契约
+
+```sh
+cargo run --locked -q -p finance-api -- export-openapi > /tmp/finance.openapi.json
+```
+
+utoipa 从 handler 注解和实际响应类型导出，不需要数据目录、账户或网络。Finance API CI 执行 build、test、clippy -D warnings、fmt --check；两次导出须完全一致，并上传 finance-openapi artifact。finance 不维护第二份手写或空快照。接口集成测试核对路由、错误状态和 pnl 的 string schema。
+
+权威集成快照是 fertile contracts/finance.openapi.json：改代码并验证 → 从同一 commit 导出 artifact → 后续 fertile 集成 PR 同步快照和子模块指针、比对差异 → web 生成客户端。禁止手改生成文件；当前 issue 不跨仓库更新快照或实现比对脚本。破坏性接口变更须有兼容迁移计划，见 [fertile contracts](https://github.com/viramoon/fertile/tree/main/contracts)。

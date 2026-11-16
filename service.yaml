@@ -45,12 +45,20 @@ processes:
       ready: 订阅有效、数据新鲜且目录可写
     restart_policy: TBD
   - name: api
-    command: TBD # 待 HTTP 入口实现
-    port: TBD
-    dependencies: [parquet_catalog, node_state]
+    command: cargo run --release --locked -p finance-api # 开发启动；部署产物命令由 fertile 定义
+    working_directory: finance # 需可读取 config/，或设 FINANCE_CONFIG_DIR
+    bind_host: 127.0.0.1
+    port: 8081 # FINANCE_API_PORT / config.api.port 可覆盖
+    dependencies: [data_root]
     health:
-      path: /healthz
+      live_path: /healthz/live
+      ready_path: /healthz/ready
       live: 进程存活
-      ready: 查询依赖可用、数据新鲜且节点状态可信
-    restart_policy: TBD
+      ready: 数据根目录可读；不代表交易 ready
+    restart_policy: 由 fertile deploy/ 的守护配置决定
+batch_jobs:
+  - name: backtest-sample
+    command: bash scripts/backtest-sample.sh
+    output: "${FERTILE_DATA_ROOT}/finance-state/backtests/sample/latest.json"
+    mode: Backtest
 runbook: RUNBOOK.md

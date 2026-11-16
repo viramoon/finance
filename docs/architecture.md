@@ -6,7 +6,9 @@ finance 是 fertile 的主项目与 submodule，交易核心以 vendor/nautilus_
 IB Gateway / 数据源 → Nautilus IB adapter / mm_api → collector → Parquet catalog
                                              → trader → 风控 / 执行 → IB Gateway
 研究 / backtest ← 历史 catalog
-浏览器 → web → HTTP → finance api → 节点状态与查询（内部对接 TBD）
+浏览器 → web → HTTP → finance api → 示例回测 latest.json
+上游 CSV 示例 → 回测批任务 → 原子 latest.json
+实时节点状态与查询：后续设计（内部对接 TBD）
 ```
 
 trader、collector、api 是独立常驻进程，backtest 是批任务。交易节点与行情采集分开，采集停止需触发行情陈旧保护；web 和 api 不可用不影响交易主循环。API 不是下单幂等或风控的唯一保护层。

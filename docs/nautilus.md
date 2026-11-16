@@ -9,7 +9,7 @@ bash scripts/build.sh
 bash scripts/smoke.sh
 ```
 
-源码构建、缓存与持久路径见 [build.md](build.md)。Nautilus 提供 Strategy / Actor、TradingNode、Backtest、风险 / 执行、IB adapter、Parquet catalog 和 Python API；业务接口和实际连接验证仍由后续 issue 实现。本 issue 只引入、构建、运行上游离线示例。
+源码构建、缓存与持久路径见 [build.md](build.md)。Nautilus 提供 Strategy / Actor、TradingNode、Backtest、风险 / 执行、IB adapter、Parquet catalog 和 Python API；当前 [API](api.md) 已提供只读示例回测查询，包装此处同一上游示例生成 JSON；实际交易连接验证仍由后续 issue 实现，Nautilus 源码没有修改。
 
 ## 版本唯一来源
 
