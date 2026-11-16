@@ -1,6 +1,6 @@
 # 配置分层设计
 
-部署配置按 base → 选定 profile 覆盖 → 受控环境变量 / 密钥引用加载；未知字段、非法路径和缺失必要项应在未来启动校验中拒绝。这里只记录结构，不创建可运行配置或依赖锁文件。
+部署配置按 base → 选定 profile 覆盖 → 受控环境变量 / 密钥引用加载；未知字段、非法路径和缺失必要项应在未来启动校验中拒绝。当前 API 已实现 base.yaml / profile 文件及环境变量覆盖，实际字段仅 api.bind_host、api.port 和 paths.data_root，详见 [API](../docs/api.md)；下面其他交易字段仍为未来设计，不混入当前严格配置。
 
 - `base.yaml`：跨环境字段、单位、默认值和验证规则。
 - `cloudbox.yaml`：云电脑根目录与网络参数覆盖，当前只允许 IBKR paper。
@@ -55,8 +55,8 @@ catalog:
   backup_schedule: TBD
   retention: TBD
 api:
-  bind_host: TBD
-  port: TBD
+  bind_host: 127.0.0.1
+  port: 8081
   auth_secret_ref: TBD
 health:
   path: /healthz

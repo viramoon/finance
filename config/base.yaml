@@ -1,0 +1,5 @@
+api:
+  bind_host: 127.0.0.1
+  port: 8081
+paths:
+  data_root: /home/box/fertile/data

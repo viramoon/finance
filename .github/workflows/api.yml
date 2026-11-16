@@ -1,0 +1,43 @@
+name: Finance API
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  api:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: 读取锁定工具链
+        id: versions
+        run: |
+          source toolchain.env
+          echo "rust=$RUST_VERSION" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.versions.outputs.rust }}
+          components: rustfmt, clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: api-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - run: cargo fmt --all -- --check
+      - run: cargo build --workspace --locked
+      - run: cargo test --workspace --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: 从代码导出 OpenAPI 并验证重复导出一致
+        run: |
+          cargo run --locked -q -p finance-api -- export-openapi > "$RUNNER_TEMP/finance.openapi.json"
+          cargo run --locked -q -p finance-api -- export-openapi > "$RUNNER_TEMP/finance.second.json"
+          cmp "$RUNNER_TEMP/finance.openapi.json" "$RUNNER_TEMP/finance.second.json"
+          git diff --check
+      - uses: actions/upload-artifact@v4
+        with:
+          name: finance-openapi
+          path: ${{ runner.temp }}/finance.openapi.json
