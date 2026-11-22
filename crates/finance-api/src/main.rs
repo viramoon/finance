@@ -7,7 +7,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if args == ["export-openapi"] {
         let mut spec = ApiDoc::openapi();
         // No package license has been declared. An empty License Object is invalid OpenAPI.
-        if spec.info.license.as_ref().is_some_and(|license| license.name.is_empty()) {
+        if spec
+            .info
+            .license
+            .as_ref()
+            .is_some_and(|license| license.name.is_empty())
+        {
             spec.info.license = None;
         }
         println!("{}", spec.to_pretty_json()?);
