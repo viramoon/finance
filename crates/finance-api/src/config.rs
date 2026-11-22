@@ -13,6 +13,9 @@ use std::{
 pub struct Settings {
     pub api: Api,
     pub paths: Paths,
+    /// IB configuration belongs to the separate collector / probe processes.
+    #[serde(rename = "ib", default)]
+    pub _ib: Option<serde_yaml::Mapping>,
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -1,2 +1,5 @@
-# 环境与 Backtest / Sandbox / Live 运行模式独立。
-{}
+# cloudbox 的 NAT / 云盒子链路更早检查静默断链。
+ib:
+  connect_timeout_ms: 5000
+  heartbeat_ms: 3000
+  read_timeout_ms: 2000
