@@ -1,6 +1,6 @@
 # 异步示例回测
 
-finance-api 的写入口仅接受本机调用。经 web 远程提交时使用 web 的写接口鉴权。先按[源码构建](build.md)准备策略运行环境，从 finance 仓库根在两个终端分别运行下列进程，指向同一已挂载的数据根。
+finance-api 默认监听 127.0.0.1:8081，写入口由本机 web 调用。盒子部署保持 loopback 绑定，远程提交由 web 验证写入令牌。先按[源码构建](build.md)准备策略运行环境，从 finance 仓库根在两个终端分别运行下列进程，指向同一已挂载的数据根。
 
 ```bash
 source /home/box/fertile/env.sh
