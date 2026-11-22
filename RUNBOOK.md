@@ -1,6 +1,6 @@
 # finance 运行手册
 
-本仓库已提供源码构建、示例批任务与只读 HTTP API。交易服务尚未实现，其启动命令、恢复阈值和凭据配置仍为 TBD；下述交易运维段落是后续设计。服务部署以 [fertile deploy/](https://github.com/viramoon/fertile/tree/main/deploy) 为唯一准绳，Maas · Ruler 只按 fertile tag 部署和回滚，不部署任意子模块分支。
+本仓库已提供源码构建、示例批任务、行情采集、回测 worker 与 HTTP API。交易服务尚未实现，其启动命令、恢复阈值和凭据配置仍为 TBD；下述交易运维段落是后续设计。服务部署以 [fertile deploy/](https://github.com/viramoon/fertile/tree/main/deploy) 为唯一准绳，Maas · Ruler 只按 fertile tag 部署和回滚，不部署任意子模块分支。
 
 ## 部署、启停与回滚
 
@@ -40,4 +40,20 @@ FERTILE_PROFILE=cloudbox cargo run --locked -p finance-api
 
 另一个终端 curl http://127.0.0.1:8081/healthz/live、/healthz/ready 和 /api/v1/backtests/sample。批任务打印 SUMMARY_PATH；ready 要求根目录可读，sample 为 404 表示尚未生成结果，重新运行批任务；500 时检查文件格式、挂载和权限，不手写假结果。批任务失败会保留旧 latest.json；重启 API 不会清空状态。路径覆盖必须同时传给 API 和批任务。端口覆盖 FINANCE_API_PORT，配置目录 FINANCE_CONFIG_DIR，细节见 [API](docs/api.md)。
 
-API 前台用 Ctrl-C 优雅停止；部署守护、日志收集和滚动重启以 fertile deploy/ 为准，本 PR 不部署。默认 loopback / 8081，无账户配置和 Gateway 依赖；不能把当前 ready 当成交易 ready。
+API 接受 SIGTERM 和 Ctrl-C 优雅停止；部署守护、日志收集和滚动重启以 fertile deploy/ 为准，本 PR 不部署。默认 loopback / 8081，无账户配置和 Gateway 依赖；不能把当前 ready 当成交易 ready。
+
+## 行情与作业
+
+从 finance 仓库根运行。先按源码构建文档准备虚拟环境，设置各进程共用的 FERTILE_DATA_ROOT，然后构建三个 Rust 程序。
+
+```sh
+cargo build --release --locked --workspace
+cargo run --release --locked -p finance-ib -- probe
+cargo run --release --locked -p finance-collector
+# 另一个终端
+curl --fail http://127.0.0.1:8082/healthz/ready
+curl --fail http://127.0.0.1:8081/api/v1/market/status
+scripts/finance-backtest-worker
+```
+
+Replay 可单独运行。paper 模式下 probe 用 client ID 91，collector 用 92，93 预留给 trader，凭据由盒子上的 Gateway 读取。连接、补数、权限与 pacing 故障定位见 [IB 接入](docs/integrations/ib.md)，水位、精度和杀进程恢复见 [catalog](catalog/README.md)，worker 的资源限制、队列恢复及幂等请求见 [作业说明](docs/backtest-jobs.md)。部署守护从 fertile 的 runbook 进入。

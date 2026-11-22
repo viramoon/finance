@@ -38,4 +38,4 @@ try:
     print("PASS real backtest JSON -> HTTP summary, exact string PnL, live and ready")
 finally:
     process.terminate()
-    process.wait(timeout=5)
+    assert process.wait(timeout=5) == 0, "API did not drain cleanly after SIGTERM"

@@ -1,4 +1,6 @@
 pub mod config;
+pub mod jobs;
+pub mod market;
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -143,11 +145,13 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz/live", get(live))
         .route("/healthz/ready", get(ready))
         .route("/api/v1/backtests/sample", get(sample))
+        .route("/api/v1/market/status", get(market::status))
+        .merge(jobs::routes())
         .with_state(state)
 }
 #[derive(OpenApi)]
 #[openapi(
-    paths(live, ready, sample),
-    components(schemas(BacktestSummary, ErrorBody, ErrorDetail, Health, Check))
+    paths(live, ready, sample, market::status, jobs::submit, jobs::detail, jobs::list),
+    components(schemas(BacktestSummary, ErrorBody, ErrorDetail, Health, Check, market::MarketStatus, market::InstrumentStatus, jobs::JobRequest, jobs::JobStatus, jobs::Job, jobs::Page, jobs::Accepted, jobs::StrategyParams))
 )]
 pub struct ApiDoc;

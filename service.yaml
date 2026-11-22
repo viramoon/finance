@@ -2,13 +2,13 @@
 version: 2
 system: fertile
 component: finance
-status: design
+status: component-reference
 deployment_source: "viramoon/fertile:deploy/service.yaml"
-profile: TBD # 由 FERTILE_PROFILE 选 cloudbox 或 stable
+profile: cloudbox # FERTILE_PROFILE 选择 cloudbox 或 stable
 environment:
-  FERTILE_PROFILE: TBD # 部署环境，与运行模式独立
+  FERTILE_PROFILE: cloudbox # 部署环境，与运行模式独立
   FERTILE_DATA_ROOT: /home/box/fertile/data # 配置默认，实际从配置读取
-  IB_GATEWAY_ADDRESS: TBD # 联调确认 host；paper 端口 4002
+  IB_GATEWAY_ADDRESS: "127.0.0.1:4002"
 paths:
   root: /home/box/fertile # 配置默认
   catalog: /home/box/fertile/data/catalog
@@ -16,7 +16,8 @@ paths:
   logs: /home/box/fertile/logs/finance
 dependencies:
   ib_gateway:
-    host: TBD
+    host: 127.0.0.1
+    client_ids: {probe: 91, collector: 92, trader: 93}
     paper_port: 4002
     account: paper
   parquet_catalog:
@@ -36,14 +37,23 @@ processes:
       ready: Gateway 认证、行情新鲜、订阅恢复且对账可信
     restart_policy: TBD # 由 fertile 运维设计确认
   - name: collector
-    command: TBD # 待采集入口实现
-    port: TBD
-    dependencies: [ib_gateway, parquet_catalog]
+    command: finance-collector
+    working_directory: finance
+    port: 8082
+    dependencies: [parquet_catalog, data_root]
+    source: replay # 真实行情还需已登录且有权限的 paper Gateway
     health:
-      path: /healthz
-      live: 进程存活
-      ready: 订阅有效、数据新鲜且目录可写
-    restart_policy: TBD
+      live_path: /healthz/live
+      ready_path: /healthz/ready
+      status_path: /status
+    restart_policy: fertile deploy/
+  - name: backtest-worker
+    command: scripts/finance-backtest-worker
+    working_directory: finance
+    dependencies: [data_root, nautilus_source_wheel]
+    queue: finance-state/backtests/jobs.sqlite3
+    health: 监测 worker 进程和最近作业的终态
+    restart_policy: fertile deploy/
   - name: api
     command: cargo run --release --locked -p finance-api # 开发启动；部署产物命令由 fertile 定义
     working_directory: finance # 需可读取 config/，或设 FINANCE_CONFIG_DIR

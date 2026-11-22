@@ -1,5 +1,7 @@
 name: Finance API
 on:
+  push:
+    branches: [ha-runthrough]
   pull_request:
     types: [opened, synchronize, reopened]
 permissions:
