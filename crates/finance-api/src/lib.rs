@@ -151,7 +151,29 @@ pub fn router(state: AppState) -> Router {
 }
 #[derive(OpenApi)]
 #[openapi(
-    paths(live, ready, sample, market::status, jobs::submit, jobs::detail, jobs::list),
-    components(schemas(BacktestSummary, ErrorBody, ErrorDetail, Health, Check, market::MarketStatus, market::InstrumentStatus, jobs::JobRequest, jobs::JobStatus, jobs::Job, jobs::Page, jobs::Accepted, jobs::StrategyParams))
+    paths(
+        live,
+        ready,
+        sample,
+        market::status,
+        jobs::submit,
+        jobs::detail,
+        jobs::list
+    ),
+    components(schemas(
+        BacktestSummary,
+        ErrorBody,
+        ErrorDetail,
+        Health,
+        Check,
+        market::MarketStatus,
+        market::InstrumentStatus,
+        jobs::JobRequest,
+        jobs::JobStatus,
+        jobs::Job,
+        jobs::Page,
+        jobs::Accepted,
+        jobs::StrategyParams
+    ))
 )]
 pub struct ApiDoc;
