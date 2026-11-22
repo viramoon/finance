@@ -41,7 +41,13 @@ processes:
     working_directory: finance
     port: 8082
     dependencies: [parquet_catalog, data_root]
-    source: replay # 真实行情还需已登录且有权限的 paper Gateway
+    source: replay
+    source_config_env: FINANCE_COLLECTOR_CONFIG
+    source_configs:
+      replay: config/collector/cloudbox.yaml
+      ib: config/collector/ib-cloudbox.yaml
+      ib-delayed: config/collector/ib-delayed.yaml
+    catalog_isolation: 每种数据源分配独立的 FERTILE_DATA_ROOT，API 读取该源的根目录
     health:
       live_path: /healthz/live
       ready_path: /healthz/ready
