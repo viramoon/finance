@@ -19,7 +19,7 @@ pub struct Settings {
     pub shutdown_seconds: u32,
     pub history_chunk_seconds: u32,
     pub catalog: PathBuf,
-    pub replay: ReplaySettings,
+    pub replay: Option<ReplaySettings>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -56,7 +56,9 @@ impl Settings {
             "invalid backfill chunk"
         );
         ensure!(
-            cfg.replay.interval_ms >= 100 && !cfg.instruments.is_empty(),
+            !cfg.instruments.is_empty()
+                && (cfg.source != "replay"
+                    || cfg.replay.as_ref().is_some_and(|r| r.interval_ms >= 100)),
             "invalid replay or instruments"
         );
         ensure!(

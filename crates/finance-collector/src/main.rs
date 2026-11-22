@@ -30,18 +30,31 @@ fn replay_origin(state: &Path) -> Result<i64> {
     }
 }
 fn make_source(cfg: &Settings, state: &Path) -> Result<(Box<dyn BarSource>, i64)> {
+    if matches!(cfg.source.as_str(), "ib" | "ib-delayed") {
+        ensure!(
+            cfg.bar_spec == "1-MINUTE-LAST",
+            "IB source supports only 1-MINUTE-LAST"
+        );
+        let delayed = cfg.source == "ib-delayed";
+        let horizon = if delayed { 22 } else { 2 };
+        return Ok((
+            Box::new(finance_collector::ib::IbBarSource::new(delayed)?),
+            now_ns() - horizon * 60_000_000_000,
+        ));
+    }
     ensure!(
         cfg.source == "replay",
         "unsupported collector source '{}'",
         cfg.source
     );
+    let replay = cfg.replay.as_ref().context("missing replay settings")?;
     let origin = replay_origin(state)?;
     Ok((
         Box::new(ReplaySource::new(
-            &cfg.replay.fixture,
+            &replay.fixture,
             origin,
-            cfg.replay.interval_ms,
-            cfg.replay.limit,
+            replay.interval_ms,
+            replay.limit,
         )?),
         origin - 1,
     ))
@@ -146,6 +159,10 @@ impl Collector<'_> {
 }
 #[tokio::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .json()
+        .with_writer(std::io::stderr)
+        .init();
     let cfg = Settings::load()?;
     let data = env::var_os("FERTILE_DATA_ROOT")
         .map(PathBuf::from)

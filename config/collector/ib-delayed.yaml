@@ -1,0 +1,9 @@
+bind: 127.0.0.1:8082
+source: ib-delayed
+instruments: [SPY.ARCA]
+bar_spec: 1-MINUTE-LAST
+max_age_seconds: 1500
+flush_ms: 750
+shutdown_seconds: 20
+history_chunk_seconds: 3600
+catalog: catalog
