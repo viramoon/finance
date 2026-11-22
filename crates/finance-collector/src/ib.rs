@@ -91,8 +91,9 @@ impl Pacer {
         loop {
             let mut next = self.0.lock().await;
             if *next <= Instant::now() {
-                // Shared across instruments, subscriptions, retries and reconnects.
-                *next = Instant::now() + Duration::from_secs(11);
+                // Shared across all clients of this source. Even identical bulk/stream
+                // requests after a reconnect stay outside IB’s 15-second window.
+                *next = Instant::now() + Duration::from_secs(16);
                 return;
             }
             let deadline = *next;
@@ -621,7 +622,7 @@ mod tests {
             .await
             .is_err()
         );
-        assert_eq!(started.elapsed().as_secs(), 59);
+        assert_eq!(started.elapsed().as_secs(), 64);
         let mut attempts = 0;
         assert!(
             paced(&pacer, || {
