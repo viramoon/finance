@@ -23,6 +23,12 @@ DECIMAL = re.compile(r"-?[0-9]+(?:\.[0-9]+)?")
 INSTRUMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z0-9_]+")
 
 
+def unix_nanos(value):
+    if type(value) is not int or not 0 <= value <= 2**63 - 1:
+        raise ValueError("expected Unix nanoseconds at or after the epoch, within int64")
+    return value
+
+
 def fsync_dir(path):
     fd = os.open(path, os.O_DIRECTORY | os.O_RDONLY)
     try:
@@ -114,10 +120,8 @@ class Store:
             instrument = row["instrument"]
             if not INSTRUMENT.fullmatch(instrument):
                 raise ValueError("expected a path-safe Nautilus instrument ID such as SPY.XNYS")
-            ts = row["ts_ns"]
-            if type(ts) is not int or not 0 < ts <= 2**63 - 1:
-                raise ValueError("expected a positive nanosecond timestamp")
-            if ts <= self.marks.get(instrument, 0):
+            ts = unix_nanos(row["ts_ns"])
+            if ts <= self.marks.get(instrument, -1):
                 continue  # producer supplies ordered closed bars after replay/backfill
             kind = BarType.from_str(f"{instrument}-{self.spec}-EXTERNAL")
             bar = Bar(kind, *(fixed(row[k], Price) for k in ("open", "high", "low", "close")),

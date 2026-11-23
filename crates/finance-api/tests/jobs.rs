@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 const BODY: &str = r#"{"strategy":"DemoStrategy","instrument":"6EH4.XCME","start":"2024-01-01T23:02:00Z","end":"2024-01-01T23:06:00Z","params":{}}"#;
+const DAILY: &str = r#"{"strategy":"SmaCrossover","instrument":"IBM.XNYS","start":"2025-01-02T00:00:00Z","end":"2025-03-04T00:00:00Z","params":{"fast_period":5,"slow_period":20,"shares":10}}"#;
 async fn request(
     root: &tempfile::TempDir,
     method: &str,
@@ -16,6 +17,7 @@ async fn request(
 ) -> (u16, Value) {
     let app = router(AppState {
         data_root: root.path().to_owned(),
+        research_root: root.path().join("research"),
     });
     let req = Request::builder()
         .method(method)
@@ -105,6 +107,7 @@ async fn queue_access_does_not_recreate_missing_data_mount() {
     let root = temp.path().join("missing-mount");
     let app = router(AppState {
         data_root: root.clone(),
+        research_root: root.join("research"),
     });
     let response = app
         .oneshot(
@@ -117,4 +120,49 @@ async fn queue_access_does_not_recreate_missing_data_mount() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert!(!root.exists());
+}
+
+#[tokio::test]
+async fn historical_catalog_and_lookup_use_the_committed_request() {
+    let t = tempfile::tempdir().unwrap();
+    let path = "/api/v1/backtests";
+    let dataset = t.path().join("research/IBM.XNYS");
+    assert_eq!(
+        request(&t, "GET", &format!("{path}/datasets"), "", "").await,
+        (200, json!({"items":[]}))
+    );
+    assert_eq!(
+        request(&t, "POST", path, "daily", DAILY).await.1["error"]["code"],
+        "no_data"
+    );
+    std::fs::create_dir_all(&dataset).unwrap();
+    std::fs::write(dataset.join("dataset.json"), json!({
+        "instrument":"IBM.XNYS", "asset_type":"stock", "source":"fixture", "source_sha256":"a".repeat(64),
+        "data_kind":"fixture", "calendar":"XNYS", "first_session":"2025-01-02", "last_session":"2025-03-04",
+        "observations":42, "price_basis":"raw_unadjusted", "corporate_actions":"cash_dividends_excluded_split_free_reviewed"
+    }).to_string()).unwrap();
+    assert_eq!(
+        request(&t, "GET", &format!("{path}/datasets"), "", "")
+            .await
+            .1["items"][0]["instrument"],
+        "IBM.XNYS"
+    );
+    for bad in [
+        DAILY.replace("2025-01-02", "1969-12-31"),
+        DAILY.replace("\"shares\":10", "\"shares\":0"),
+        DAILY.replace("IBM.XNYS", "^GSPC.XNYS"),
+    ] {
+        assert_eq!(request(&t, "POST", path, "bad", &bad).await.0, 422);
+    }
+    let lookup = format!("{path}/by-key");
+    assert_eq!(request(&t, "GET", &lookup, "daily", "").await.0, 404);
+    let accepted = request(&t, "POST", path, "daily", DAILY).await;
+    assert_eq!(accepted.0, 202);
+    assert_eq!(
+        request(&t, "GET", &lookup, "daily", "").await,
+        (200, accepted.1.clone())
+    );
+    // A retry of previously committed work can be identified even if the catalog goes away.
+    std::fs::remove_file(dataset.join("dataset.json")).unwrap();
+    assert_eq!(request(&t, "POST", path, "daily", DAILY).await, accepted);
 }

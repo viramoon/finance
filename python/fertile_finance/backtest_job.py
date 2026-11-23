@@ -20,6 +20,17 @@ def die_with_parent(expected: int) -> None:
 
 
 def execute(request: dict, target: Path) -> None:
+    if request["strategy"] == "SmaCrossover":
+        from .backtest_research import run_research
+        from .research_catalog import ResearchError, research_root
+
+        try:
+            summary = run_research(research_root(), request)
+        except ResearchError as exc:
+            print(f"{exc.code}: {exc}", flush=True)
+            summary = {"research_error": exc.code}
+        atomic_write(target, summary)
+        return
     if (request["strategy"], request["instrument"], request["params"]) != (
         "DemoStrategy",
         "6EH4.XCME",

@@ -35,3 +35,7 @@ FINANCE_COLLECTOR_BIN="${CARGO_TARGET_DIR:-target}/debug/finance-collector" "$FI
 ```
 
 故障测试启动真实子进程，使用独立临时目录和可加速的有限 CSV 回放。它在非空缓冲时发送 TERM，之后用 KILL 中断和重启，再等数据陈旧，验证 ready 从 200 转 503。最后使用 Python ParquetDataCatalog.bars() 核对每个预期时间戳及高精度价格。跨日分组、排他锁、迟到重复数据和水位替换失败后恢复另由 test_collector_store.py 覆盖。
+
+## 研究日线
+
+经审核的原始日线用独立 [研究 catalog](../docs/historical-backtest.md) 导入。导入从交易日历生成时间戳，拒绝负数纳秒、预 epoch 日线、重复日和非交易会话。1970-01-01T00:00:00Z 与之后的有效纳秒可通过底层存储校验。NYSE 日线还必须落在官方交易日收盘。

@@ -27,6 +27,11 @@ pub struct Api {
 #[serde(deny_unknown_fields)]
 pub struct Paths {
     pub data_root: PathBuf,
+    #[serde(default = "default_research_root")]
+    pub research_root: PathBuf,
+}
+fn default_research_root() -> PathBuf {
+    "/home/box/fertile/data/research".into()
 }
 fn merge(base: &mut Value, overlay: Value) {
     if let (Value::Mapping(base), Value::Mapping(overlay)) = (&mut *base, &overlay) {
@@ -65,8 +70,14 @@ impl Settings {
         if let Some(root) = env.get("FERTILE_DATA_ROOT") {
             settings.paths.data_root = root.into();
         }
-        if settings.api.port == 0 || !settings.paths.data_root.is_absolute() {
-            return Err("port must be nonzero and data_root must be absolute".into());
+        if let Some(root) = env.get("FERTILE_RESEARCH_ROOT") {
+            settings.paths.research_root = root.into();
+        }
+        if settings.api.port == 0
+            || !settings.paths.data_root.is_absolute()
+            || !settings.paths.research_root.is_absolute()
+        {
+            return Err("port must be nonzero and data_root/research_root must be absolute".into());
         }
         Ok(settings)
     }

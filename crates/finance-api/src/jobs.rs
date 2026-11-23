@@ -1,13 +1,13 @@
 //! Durable, single-host submission. SQLite's write transaction serializes the
 //! idempotency lookup, capacity check and insertion across API processes.
-use crate::{ApiError, AppState, BacktestSummary, ErrorBody, error};
+use crate::{ApiError, AppState, BacktestSummary, ErrorBody, error, research};
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Path, Query, State, rejection::JsonRejection},
     http::{HeaderMap, StatusCode},
     routing::get,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -15,10 +15,19 @@ use utoipa::ToSchema;
 const CAPACITY: i64 = 128;
 const SAMPLE_FIRST: i64 = 1704150060;
 const SAMPLE_LAST: i64 = SAMPLE_FIRST + 8 * 60;
+const FIRST_RESEARCH_DAY: NaiveDate = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+const LAST_RESEARCH_DAY: NaiveDate = NaiveDate::from_ymd_opt(2100, 12, 31).unwrap();
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub struct StrategyParams {}
+pub struct StrategyParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast_period: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slow_period: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shares: Option<u16>,
+}
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -31,15 +40,53 @@ pub struct JobRequest {
 }
 
 impl JobRequest {
-    fn validate(&self) -> bool {
-        self.strategy == "DemoStrategy"
-            && self.instrument == "6EH4.XCME"
-            && self.start < self.end
-            && [self.start, self.end].iter().all(|t| {
-                (SAMPLE_FIRST..=SAMPLE_LAST).contains(&t.timestamp())
-                    && t.timestamp() % 60 == 0
-                    && t.timestamp_subsec_nanos() == 0
-            })
+    fn validate(&self) -> Result<(), ApiError> {
+        if self.start >= self.end {
+            return Err(invalid("Start must precede end"));
+        }
+        let params = (
+            self.params.fast_period,
+            self.params.slow_period,
+            self.params.shares,
+        );
+        match self.strategy.as_str() {
+            "DemoStrategy"
+                if self.instrument == "6EH4.XCME"
+                    && params == (None, None, None)
+                    && [self.start, self.end].iter().all(|t| {
+                        (SAMPLE_FIRST..=SAMPLE_LAST).contains(&t.timestamp())
+                            && t.timestamp() % 60 == 0
+                            && t.timestamp_subsec_nanos() == 0
+                    }) =>
+            {
+                Ok(())
+            }
+            "DemoStrategy" => Err(invalid(
+                "Invalid DemoStrategy instrument, minutes or parameters",
+            )),
+            "SmaCrossover" => {
+                if !research::instrument_valid(&self.instrument) {
+                    return Err(invalid("Choose a catalog XNYS stock or ETF"));
+                }
+                if ![self.start, self.end].iter().all(|t| {
+                    (FIRST_RESEARCH_DAY..=LAST_RESEARCH_DAY).contains(&t.date_naive())
+                        && t.time() == NaiveTime::MIN
+                }) {
+                    return Err(invalid(
+                        "Use dates from 1970-01-01 through 2100-12-31 at UTC midnight",
+                    ));
+                }
+                if !matches!(params, (Some(fast), Some(slow), Some(shares))
+                    if 2 <= fast && fast < slow && slow <= 250 && (1..=1000).contains(&shares))
+                {
+                    return Err(invalid(
+                        "Require 2 <= fast_period < slow_period <= 250 and 1..1000 shares",
+                    ));
+                }
+                Ok(())
+            }
+            _ => Err(invalid("Unsupported strategy")),
+        }
     }
 }
 
@@ -86,6 +133,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/backtests", get(list).post(submit))
         .route("/api/v1/backtests/{id}", get(detail))
+        .route("/api/v1/backtests/by-key", get(by_key))
         .layer(DefaultBodyLimit::max(8192))
 }
 fn invalid(message: &str) -> ApiError {
@@ -98,6 +146,20 @@ fn storage_error(err: impl std::fmt::Display) -> ApiError {
         "queue_error",
         "Cannot access job queue",
     )
+}
+fn submission_key(headers: &HeaderMap) -> Result<String, ApiError> {
+    let mut keys = headers.get_all("Idempotency-Key").iter();
+    keys.next()
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| {
+            (1..=128).contains(&v.len())
+                && v.bytes().all(|c| c.is_ascii_graphic())
+                && keys.next().is_none()
+        })
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            invalid("One Idempotency-Key with 1..128 visible ASCII characters is required")
+        })
 }
 async fn db<T: Send + 'static>(
     state: AppState,
@@ -131,19 +193,13 @@ pub async fn submit(
     headers: HeaderMap,
     request: Result<Json<JobRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Accepted>), ApiError> {
-    let key = headers
-        .get("Idempotency-Key")
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| (1..=128).contains(&v.len()) && v.bytes().all(|c| c.is_ascii_graphic()))
-        .ok_or_else(|| invalid("Idempotency-Key required (1..128 visible ASCII characters)"))?
-        .to_owned();
+    let key = submission_key(&headers)?;
     let req = request
         .map_err(|_| invalid("Invalid job request or parameters"))?
         .0;
-    if !req.validate() {
-        return Err(invalid("Unsupported strategy, instrument or data interval"));
-    }
+    req.validate()?;
     let request = serde_json::to_string(&req).map_err(storage_error)?;
+    let research_root = state.research_root.clone();
     let id = db(state, move |conn| {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -163,6 +219,18 @@ pub async fn submit(
                 ));
             }
             return Ok(id);
+        }
+        if req.strategy == "SmaCrossover" {
+            let dataset = research::dataset(&research_root, &req.instrument)?;
+            if !dataset.is_some_and(|d| {
+                req.start.date_naive() <= d.last_session && req.end.date_naive() >= d.first_session
+            }) {
+                return Err(error(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "no_data",
+                    "No configured dataset overlaps the requested dates",
+                ));
+            }
         }
         let count: i64 = tx
             .query_row(
@@ -189,6 +257,30 @@ pub async fn submit(
     })
     .await?;
     Ok((StatusCode::ACCEPTED, Json(Accepted { id })))
+}
+
+#[utoipa::path(get, path = "/api/v1/backtests/by-key",
+    params(("Idempotency-Key" = String, Header, description="Exact key from the attempted submission")),
+    responses((status=200,body=Accepted),(status=404,body=ErrorBody),(status=422,body=ErrorBody),(status=500,body=ErrorBody)))]
+pub async fn by_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Accepted>, ApiError> {
+    let key = submission_key(&headers)?;
+    let id = db(state, move |conn| {
+        conn.query_row("SELECT id FROM jobs WHERE idem=?1", [key], |row| row.get(0))
+            .optional()
+            .map_err(storage_error)?
+            .ok_or_else(|| {
+                error(
+                    StatusCode::NOT_FOUND,
+                    "job_not_found",
+                    "No job for this key",
+                )
+            })
+    })
+    .await?;
+    Ok(Json(Accepted { id }))
 }
 
 const COLUMNS: &str = "id,status,request,attempt,created_at,summary,error";

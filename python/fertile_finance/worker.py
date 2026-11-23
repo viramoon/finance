@@ -140,12 +140,21 @@ def reap(db, jobs):
         else:
             try:
                 result = json.loads(job.result.read_text())
-                if not isinstance(result["pnl"], str):
+                research_error = result.get("research_error")
+                if research_error is not None and research_error not in {
+                    "invalid_instrument", "no_data", "invalid_date", "invalid_source", "invalid_bar",
+                    "missing_sessions", "insufficient_history", "invalid_parameters", "execution_audit_failed",
+                }:
+                    raise ValueError("invalid research error")
+                if research_error is None and not isinstance(result["pnl"], str):
                     raise ValueError("invalid pnl")
             except (OSError, ValueError, KeyError, TypeError):
                 finish(db, job_id, "failed", error="invalid_result")
             else:
-                finish(db, job_id, "succeeded", json.dumps(result))
+                if research_error is not None:
+                    finish(db, job_id, "failed", error=research_error)
+                else:
+                    finish(db, job_id, "succeeded", json.dumps(result))
         job.scratch.cleanup()
         del jobs[job_id]
 

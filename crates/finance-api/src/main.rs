@@ -27,6 +27,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 k.as_str(),
                 "FERTILE_PROFILE"
                     | "FERTILE_DATA_ROOT"
+                    | "FERTILE_RESEARCH_ROOT"
                     | "FINANCE_API_BIND_HOST"
                     | "FINANCE_API_PORT"
             )
@@ -44,6 +45,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         listener,
         router(AppState {
             data_root: settings.paths.data_root,
+            research_root: settings.paths.research_root,
         }),
     )
     .with_graceful_shutdown(async move {

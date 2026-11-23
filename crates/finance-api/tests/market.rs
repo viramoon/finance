@@ -11,6 +11,7 @@ use tower::ServiceExt;
 async fn market(root: &Path) -> Value {
     let r = router(AppState {
         data_root: root.into(),
+        research_root: root.join("research"),
     })
     .oneshot(
         Request::get("/api/v1/market/status")

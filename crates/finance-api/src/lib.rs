@@ -1,6 +1,7 @@
 pub mod config;
 pub mod jobs;
 pub mod market;
+pub mod research;
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -11,6 +12,7 @@ use utoipa::{OpenApi, ToSchema};
 #[derive(Clone)]
 pub struct AppState {
     pub data_root: PathBuf,
+    pub research_root: PathBuf,
 }
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -27,6 +29,8 @@ pub struct BacktestSummary {
     pub pnl: String,
     pub currency: String,
     pub generated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub research: Option<research::ResearchReport>,
 }
 impl BacktestSummary {
     fn valid(&self) -> bool {
@@ -146,6 +150,7 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz/ready", get(ready))
         .route("/api/v1/backtests/sample", get(sample))
         .route("/api/v1/market/status", get(market::status))
+        .route("/api/v1/backtests/datasets", get(research::datasets))
         .merge(jobs::routes())
         .with_state(state)
 }
@@ -158,7 +163,9 @@ pub fn router(state: AppState) -> Router {
         market::status,
         jobs::submit,
         jobs::detail,
-        jobs::list
+        jobs::list,
+        jobs::by_key,
+        research::datasets
     ),
     components(schemas(
         BacktestSummary,
@@ -173,7 +180,16 @@ pub fn router(state: AppState) -> Router {
         jobs::Job,
         jobs::Page,
         jobs::Accepted,
-        jobs::StrategyParams
+        jobs::StrategyParams,
+        research::Dataset,
+        research::DatasetList,
+        research::ResearchReport,
+        research::Metrics,
+        research::Window,
+        research::Coverage,
+        research::ExecutionAudit,
+        research::Fill,
+        research::BlockedOrder
     ))
 )]
 pub struct ApiDoc;
