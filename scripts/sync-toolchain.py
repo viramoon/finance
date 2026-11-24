@@ -10,6 +10,11 @@ parser.add_argument("--check", action="store_true")
 args = parser.parse_args()
 root = Path(__file__).resolve().parent.parent
 content = args.source.read_text()
+# The Gateway installer verifies these archives in fertile. Neither archive
+# participates in the finance wheel build or the finance runtime toolchain.
+gateway_downloads = {"IB_GATEWAY_SHA256", "IBC_SHA256"}
+content = "".join(line for line in content.splitlines(keepends=True)
+                  if line.partition("=")[0] not in gateway_downloads)
 values = dict(re.findall(r"^([A-Z_]+)=([^\n]+)$", content, re.M))
 outputs = {
     "toolchain.env": "# GENERATED：源为 fertile/deploy/toolchain.env；运行 scripts/sync-toolchain.py 更新。\n" + content,

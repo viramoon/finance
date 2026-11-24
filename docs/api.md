@@ -1,6 +1,6 @@
 # 面向 web 的 HTTP API
 
-finance-api 是独立的 Rust / axum 只读进程；web 通过 HTTP 调用，frontend 只调用 web。当前不启动 Nautilus、trader、collector 或 IBKR，也不在 HTTP 请求中执行回测。服务部署唯一来源仍为 fertile deploy/，本仓库 service.yaml 记录组件接口。
+finance-api 是独立的 Rust / axum 进程；web 通过 HTTP 调用，frontend 只调用 web。当前不启动 Nautilus、trader、collector 或 IBKR，也不在 HTTP 请求中执行回测。服务部署唯一来源仍为 fertile deploy/，本仓库 service.yaml 记录组件接口。
 
 ## 运行与配置
 
@@ -31,6 +31,12 @@ FERTILE_PROFILE=cloudbox cargo run --locked -p finance-api
 
 没有结果为 404，统一错误体包含 error.code=sample_not_found 和 error.message。不可读为 500 / sample_unreadable，损坏 JSON、字段缺失或金额非法为 500 / sample_invalid；响应不暴露文件路径和底层错误。liveness / readiness 使用健康体及逐项 checks。
 
+## 行情与作业
+
+GET /api/v1/market/status 从 collector 持久状态读取各标的水位和新鲜度。没有状态文件时返回明确的缺失状态，collector 停止后会反映过期。可用性和精度验证见 [行情目录](../catalog/README.md)。
+
+POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /api/v1/backtests/{id} 查看执行进度与摘要，GET /api/v1/backtests 按 cursor 和 limit 翻页。提交使用同库事务完成幂等检查和容量检查，worker 独立执行。完整输入范围、超时和恢复见 [作业运维](backtest-jobs.md)。公网入口由 web 鉴权并限流。
+
 ## 示例批任务
 
 先完成 [源码构建](build.md)，执行一条命令：
@@ -39,7 +45,7 @@ FERTILE_PROFILE=cloudbox cargo run --locked -p finance-api
 FERTILE_DATA_ROOT=/home/box/fertile/data bash scripts/backtest-sample.sh
 ```
 
-入口验证本地源码 wheel，调用 #3 同一个上游 CSV 示例和 DemoStrategy，不编辑 vendor、不写自研策略。在 engine.dispose 前提取真实结果与 Money.as_decimal() 余额，最后释放引擎；临时文件与 latest.json 在同一目录，flush / fsync 后 os.replace 原子替换，失败保留旧结果并清理临时文件。只在回测成功后写结果。配置层不会从该只读 API 启动批任务。批任务的数据路径使用 FERTILE_DATA_ROOT 或上述默认值，不读取 API profile 文件；调度时向批任务与 API 注入相同根路径。
+入口验证本地源码 wheel，调用 #3 同一个上游 CSV 示例和 DemoStrategy，不编辑 vendor、不写自研策略。在 engine.dispose 前提取真实结果与 Money.as_decimal() 余额，最后释放引擎；临时文件与 latest.json 在同一目录，flush / fsync 后 os.replace 原子替换，失败保留旧结果并清理临时文件。只在回测成功后写结果。worker 独立领取 HTTP 提交的作业。批任务的数据路径使用 FERTILE_DATA_ROOT 或上述默认值，不读取 API profile 文件；调度时向批任务与 API 注入相同根路径。
 
 ## OpenAPI 与契约
 
@@ -50,3 +56,9 @@ cargo run --locked -q -p finance-api -- export-openapi > /tmp/finance.openapi.js
 utoipa 从 handler 注解和实际响应类型导出，不需要数据目录、账户或网络。Finance API CI 执行 build、test、clippy -D warnings、fmt --check；两次导出须完全一致，并上传 finance-openapi artifact。finance 不维护第二份手写或空快照。接口集成测试核对路由、错误状态和 pnl 的 string schema。
 
 权威集成快照是 fertile contracts/finance.openapi.json：改代码并验证 → 从同一 commit 导出 artifact → 后续 fertile 集成 PR 同步快照和子模块指针、比对差异 → web 生成客户端。禁止手改生成文件；当前 issue 不跨仓库更新快照或实现比对脚本。破坏性接口变更须有兼容迁移计划，见 [fertile contracts](https://github.com/viramoon/fertile/tree/main/contracts)。
+
+## 历史回测与提交确认
+
+GET /api/v1/backtests/datasets 返回具名日线 catalog 的可选标的、来源和日期范围。POST /api/v1/backtests 接受 `SmaCrossover`、一个已导入的 `instrument`、UTC 午夜的 `start` / `end`，以及整数 `fast_period`、`slow_period`、`shares`。要求 `2 ≤ fast_period < slow_period ≤ 250` 与 `1 ≤ shares ≤ 1000`。研究结果的 `research` 字段含数据血缘、执行模型、覆盖与成交审计。无匹配 catalog 的新请求返回 422。缺失会话或 warmup 不够的作业进入失败终态，错误码为 `missing_sessions` 或 `insufficient_history`。不替换为示例数据。
+
+GET /api/v1/backtests/by-key 使用提交时的同一 `Idempotency-Key` 请求头。存在时返回原作业 ID，不存在时返回 404。经 web 查询时也使用提交凭据。详情继续用 GET /api/v1/backtests/{id}。回测条件和风险边界见 [历史回测](historical-backtest.md)。

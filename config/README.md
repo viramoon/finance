@@ -1,6 +1,6 @@
 # 配置分层设计
 
-部署配置按 base → 选定 profile 覆盖 → 受控环境变量 / 密钥引用加载；未知字段、非法路径和缺失必要项应在未来启动校验中拒绝。当前 API 已实现 base.yaml / profile 文件及环境变量覆盖，实际字段仅 api.bind_host、api.port 和 paths.data_root，详见 [API](../docs/api.md)；下面其他交易字段仍为未来设计，不混入当前严格配置。
+部署配置按 base → 选定 profile 覆盖 → 受控环境变量 / 密钥引用加载；API 使用 api.bind_host、api.port 和 paths.data_root。finance-ib 独立读取 ib 段校验纸账户端点、client ID 与超时，collector 的数据源、标的、刷新和补数参数从 config/collector/ 加载。见 [API](../docs/api.md) 和 [IB 接入](../docs/integrations/ib.md)。下表注明未来交易进程的规划字段。
 
 - `base.yaml`：跨环境字段、单位、默认值和验证规则。
 - `cloudbox.yaml`：云电脑根目录与网络参数覆盖，当前只允许 IBKR paper。

@@ -3,3 +3,15 @@ api:
   port: 8081
 paths:
   data_root: /home/box/fertile/data
+ib:
+  address: "127.0.0.1:4002"
+  collector_client_id: 92
+  probe_client_id: 91
+  trader_client_id: 93
+  account_prefix: DU
+  connect_timeout_ms: 8000
+  heartbeat_ms: 10000
+  read_timeout_ms: 5000
+  backoff_initial_ms: 500
+  backoff_max_ms: 30000
+  jitter_ms: 250

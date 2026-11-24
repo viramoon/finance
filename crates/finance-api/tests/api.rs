@@ -29,6 +29,7 @@ async fn live_ready_and_missing_result() {
     let dir = tempfile::tempdir().unwrap();
     let app = router(AppState {
         data_root: dir.path().into(),
+        research_root: dir.path().join("research"),
     });
     assert_eq!(call(app.clone(), "/healthz/live").await.0, StatusCode::OK);
     let (code, health) = call(app.clone(), "/healthz/ready").await;
@@ -45,7 +46,10 @@ async fn live_ready_and_missing_result() {
         if root.ends_with("not-directory") {
             fs::write(&root, "file").unwrap();
         }
-        let app = router(AppState { data_root: root });
+        let app = router(AppState {
+            research_root: root.join("research"),
+            data_root: root,
+        });
         let (code, health) = call(app.clone(), "/healthz/ready").await;
         assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(health["checks"][0]["ok"], false);
@@ -61,6 +65,7 @@ async fn sample_exact_amount_and_corrupt_results() {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let app = router(AppState {
         data_root: dir.path().into(),
+        research_root: dir.path().join("research"),
     });
     let expected = summary();
     fs::write(&path, expected.to_string()).unwrap();

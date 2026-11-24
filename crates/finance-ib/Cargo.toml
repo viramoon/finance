@@ -1,0 +1,21 @@
+[package]
+name = "finance-ib"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+ibapi = "=3.2.0"
+rand = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }

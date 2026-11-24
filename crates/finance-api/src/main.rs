@@ -5,7 +5,17 @@ use utoipa::OpenApi;
 async fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args == ["export-openapi"] {
-        println!("{}", ApiDoc::openapi().to_pretty_json()?);
+        let mut spec = ApiDoc::openapi();
+        // No package license has been declared. An empty License Object is invalid OpenAPI.
+        if spec
+            .info
+            .license
+            .as_ref()
+            .is_some_and(|license| license.name.is_empty())
+        {
+            spec.info.license = None;
+        }
+        println!("{}", spec.to_pretty_json()?);
         return Ok(());
     }
     if !args.is_empty() {
@@ -17,6 +27,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 k.as_str(),
                 "FERTILE_PROFILE"
                     | "FERTILE_DATA_ROOT"
+                    | "FERTILE_RESEARCH_ROOT"
                     | "FINANCE_API_BIND_HOST"
                     | "FINANCE_API_PORT"
             )
@@ -29,14 +40,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let listener =
         tokio::net::TcpListener::bind((settings.api.bind_host, settings.api.port)).await?;
     eprintln!("finance-api listening on {}", listener.local_addr()?);
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     axum::serve(
         listener,
         router(AppState {
             data_root: settings.paths.data_root,
+            research_root: settings.paths.research_root,
         }),
     )
-    .with_graceful_shutdown(async {
-        let _ = tokio::signal::ctrl_c().await;
+    .with_graceful_shutdown(async move {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = terminate.recv() => {},
+        }
     })
     .await?;
     Ok(())

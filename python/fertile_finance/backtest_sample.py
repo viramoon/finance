@@ -32,7 +32,7 @@ def timestamp(nanoseconds: int) -> str:
     return datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + f".{nanos:09d}Z"
 
 
-def run_sample(repo: Path) -> dict:
+def run_sample(repo: Path, *, start: str | None = None, end: str | None = None) -> dict:
     from nautilus_trader.backtest import engine as engine_module
     from nautilus_trader.model.currencies import USD
     from nautilus_trader.model.identifiers import Venue
@@ -41,6 +41,9 @@ def run_sample(repo: Path) -> dict:
     original = engine_module.BacktestEngine
 
     class CapturingEngine(original):
+        def run(self):
+            return super().run(start=start, end=end)
+
         def dispose(self):
             try:
                 result = self.get_result()

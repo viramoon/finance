@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+export VIRTUAL_ENV="${FINANCE_BUILD_ROOT:-/home/box/fertile/cache/finance}/venv"
+export PATH="$VIRTUAL_ENV/bin:$PATH" PYTHONPATH="$repo/python"
+cd "$repo"
+exec "$VIRTUAL_ENV/bin/python" -m fertile_finance.worker "$@"
