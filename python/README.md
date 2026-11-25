@@ -9,3 +9,7 @@ finance-backtest-worker 使用已锁定源码环境，通过独立 Python 子进
 ## 研究作业
 
 源码构建的 Python 环境包含研究日线导入器和均线策略。配置、运行、费用与覆盖见 [历史回测](../docs/historical-backtest.md)。运行时测试同时检查原生 Nautilus 对负时间戳的异常及项目侧 epoch 边界。
+
+## 多标的研究
+
+`fertile_finance.portfolio_backtest.run_portfolio_backtest` 在一个 Nautilus 引擎中运行 XNYS 权益组合，支持目标权重、横截面排序、逐会话净值和成交审计。该 Python 入口把 Nautilus 已有的多标的能力封装成可复用的研究工具。输入契约、执行时点、估值缺口和无风险利率口径见 [多标的组合回测](../docs/portfolio-backtest.md)。HTTP 作业继续运行已注册的策略，`SmaCrossover` 的数据与执行合同见 [历史回测](../docs/historical-backtest.md)。
