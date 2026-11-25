@@ -43,6 +43,11 @@ class YahooDaily:
             return f"{self.symbol.removeprefix('^')}.INDEX"
         return f"{self.symbol}.{self.listing_venue}"
 
+    @property
+    def missing_quote_rows(self) -> int:
+        """Count parsed rows with all five source quote fields missing."""
+        return sum(row.is_missing_quote for row in self.bars)
+
 
 def _midnight_seconds(day: date) -> int:
     midnight = datetime.combine(day, time.min, _EXCHANGE_TZ)
@@ -133,23 +138,29 @@ def _quote_rows(indicators, timestamp_count, dated_rows, asset_type, adjustment_
     reference = asset_type == "index"
     rows = []
     for session, index in sorted(dated_rows):
+        quote_values = [column[index] for column in columns]
+        missing_quote = all(value is None for value in quote_values)
+        if not reference and not missing_quote and any(value is None for value in quote_values):
+            raise ValueError(f"Incomplete Yahoo stock/ETF OHLCV for {session}")
         o, h, low, close, volume = (
-            None if reference and column[index] is None else _number(column[index], f"{session} {field}")
-            for field, column in zip(_QUOTE_FIELDS, columns, strict=True)
+            None if value is None else _number(value, f"{session} {field}")
+            for field, value in zip(_QUOTE_FIELDS, quote_values, strict=True)
         )
         prices = (o, h, low, close)
         complete = all(value is not None and value > 0 for value in prices)
         if complete:
             if not low <= min(o, close) <= max(o, close) <= h:
                 raise ValueError(f"Invalid Yahoo OHLC range for {session}")
-        elif not reference or close == 0 or any(value is not None and value < 0 for value in prices):
+        elif (not reference and not missing_quote) or close == 0 or any(
+            value is not None and value < 0 for value in prices
+        ):
             raise ValueError(f"Invalid Yahoo OHLC prices for {session}")
         if volume is not None and (volume < 0 or volume != volume.to_integral_value()):
             raise ValueError(f"Yahoo volume must be a nonnegative whole number for {session}")
 
         adjusted_value = None if adjusted_values is None else adjusted_values[index]
         adjusted_close, factor = None, None
-        if adjusted_value is not None or not reference:
+        if adjusted_value is not None:
             adjusted_close = _number(adjusted_value, f"{session} adjclose")
             if adjusted_close < 0 or (not reference and adjusted_close == 0):
                 raise ValueError(f"Yahoo adjusted close must be positive for {session}")
@@ -190,6 +201,7 @@ def load_yahoo_daily(
     Supply the archive snapshot date as adjustment_as_of. Yahoo quotes themselves
     may already reflect split normalization. The factor is adjusted close divided
     by source close and may incorporate later actions than an observation date.
+    Entirely missing quote rows are counted, and missing adjusted closes have no factor.
     """
     if type(adjustment_as_of) is not date:
         raise ValueError("Yahoo adjustment_as_of must be an explicit snapshot date")

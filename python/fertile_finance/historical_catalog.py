@@ -39,6 +39,8 @@ class WriteReport:
     dividends: int
     splits: int
     dropped_pre_epoch: EpochDiscard
+    missing_quote_rows: int = 0
+    skipped_missing_non_sessions: int = 0
 
 
 @dataclass(frozen=True)
@@ -170,13 +172,19 @@ class HistoricalCatalog:
             raise ValueError("Expected a FRED series ID such as DGS10")
         return self.root / "historical" / source / series_id
 
-    def _write(self, source, series_id, metadata, groups, dropped, mode, start, end):
+    def _write(
+        self, source, series_id, metadata, groups, dropped, mode, start, end,
+        *, missing_quote_rows=0, skipped_missing_non_sessions=0,
+    ):
         if mode not in {"append", "replace"}:
             raise ValueError("mode must be 'append' or 'replace'")
         _bounds(start, end)
         primary = next(iter(groups.values()))
         if not primary:
-            raise ValueError(f"No observations to write for {series_id}; discarded pre-epoch: {dropped}")
+            message = f"No observations to write for {series_id}; discarded pre-epoch: {dropped}"
+            if skipped_missing_non_sessions:
+                message += f"; skipped empty non-session rows: {skipped_missing_non_sessions}"
+            raise ValueError(message)
         observations = [_day(row) for row in primary]
         if len(set(observations)) != len(observations):
             raise ValueError(f"Duplicate observation date in {series_id}")
@@ -212,6 +220,7 @@ class HistoricalCatalog:
         return WriteReport(
             series_id, min(observations), max(observations), len(primary),
             len(groups.get(YahooDividend, ())), len(groups.get(YahooSplit, ())), dropped,
+            missing_quote_rows=missing_quote_rows, skipped_missing_non_sessions=skipped_missing_non_sessions,
         )
 
     def _read(self, source, series_id, record_types, start, end):
@@ -239,10 +248,18 @@ class HistoricalCatalog:
         bars, _ = guard_epoch(batch.bars, date_of=lambda row: row.session, policy="reject")
         calendar = sessions(min(row.session for row in bars), max(row.session for row in bars)) if bars else {}
         quote_records = []
+        missing_quote_rows = 0
+        skipped_missing_non_sessions = 0
         for row in bars:
-            if row.session not in calendar:
+            when = calendar.get(row.session)
+            missing_quote = row.is_missing_quote
+            if when is None:
+                if missing_quote and row.adjusted_close is None:
+                    skipped_missing_non_sessions += 1
+                    continue
                 raise ValueError(f"Yahoo daily bar date {row.session} is not an XNYS session")
-            quote_records.append(encode_record(bar_type, row, calendar[row.session]))
+            missing_quote_rows += missing_quote
+            quote_records.append(encode_record(bar_type, row, when))
 
         def action_records(record_type, events: Iterable[Dividend | Split]):
             events, _ = guard_epoch(events, date_of=lambda row: row.session, policy="reject")
@@ -257,7 +274,10 @@ class HistoricalCatalog:
             YahooDividend: action_records(YahooDividend, batch.dividends),
             YahooSplit: action_records(YahooSplit, batch.splits),
         }
-        return self._write("yahoo", batch.series_id, metadata, groups, batch.dropped_pre_epoch, mode, start, end)
+        return self._write(
+            "yahoo", batch.series_id, metadata, groups, batch.dropped_pre_epoch, mode, start, end,
+            missing_quote_rows=missing_quote_rows, skipped_missing_non_sessions=skipped_missing_non_sessions,
+        )
 
     def read_yahoo(self, series_id: str, *, start: date | None = None, end: date | None = None) -> YahooHistory:
         bar_type = _yahoo_bar_type(series_id)

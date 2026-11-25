@@ -135,4 +135,4 @@ print(catalog.write_fred(fred))
 PY
 ```
 
-核对报告里的实际写入首尾、记录数与预 1970 丢弃范围。读取及旧 SPY 数据迁移约定见 [Python 研究接口](python/README.md#历史数据接口) 和 [历史数据目录](catalog/README.md#既有-spy-固定-2100-utc-数据)。
+核对报告里的实际写入首尾、记录数与预 1970 丢弃范围。导入 Yahoo 时，同时核对写入的缺失行情行数 `missing_quote_rows` 和跳过的全空非会话行数 `skipped_missing_non_sessions`。读取及旧 SPY 数据迁移约定见 [Python 研究接口](python/README.md#历史数据接口) 和 [历史数据目录](catalog/README.md#既有-spy-固定-2100-utc-数据)。

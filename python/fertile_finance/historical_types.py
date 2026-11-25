@@ -73,6 +73,10 @@ class DailyBar:
     price_basis: ClassVar[str] = "yahoo_chart_quote"
 
     @property
+    def is_missing_quote(self) -> bool:
+        return all(value is None for value in (self.open, self.high, self.low, self.close, self.volume))
+
+    @property
     def ts_init(self) -> int | None:
         return self.ts_event
 

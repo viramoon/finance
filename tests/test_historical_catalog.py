@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Barrier
@@ -36,6 +37,88 @@ class HistoricalCatalogTests(unittest.TestCase):
 
     def snapshot(self, source, series_id):
         return self.data_root / "catalog" / "historical" / source / series_id / "current"
+
+    def yahoo_quote_archive(self, dates, quotes, *, adjclose=None, asset_type="EQUITY"):
+        keys = ("open", "high", "low", "close", "volume")
+        indicators = {"quote": [{key: values for key, values in zip(keys, zip(*quotes), strict=True)}]}
+        if adjclose is not None:
+            indicators["adjclose"] = [{"adjclose": adjclose}]
+        epoch = date(1970, 1, 1)
+        chart = {"chart": {"error": None, "result": [{
+            "meta": {
+                "currency": "USD", "symbol": "IBM", "exchangeName": "NYQ",
+                "instrumentType": asset_type, "exchangeTimezoneName": "America/New_York",
+                "dataGranularity": "1d",
+            },
+            "timestamp": [(day - epoch).days * 86_400 + 15 * 3_600 for day in dates],
+            "indicators": indicators,
+        }]}}
+        path = self.data_root / "yahoo-quote-sample.json"
+        path.write_text(json.dumps(chart), encoding="utf-8")
+        return load_yahoo_daily(path, adjustment_as_of=ARCHIVE_DAY)
+
+    def test_yahoo_null_quotes_preserve_sessions_and_count_skipped_non_sessions(self):
+        holiday, first, gap, last, weekend = (date(2024, 1, day) for day in (1, 2, 3, 4, 6))
+        missing = (None,) * 5
+        traded = (98, 101, 95, 100, 0)
+        batch = self.yahoo_quote_archive(
+            (holiday, first, gap, last, weekend), (missing, traded, missing, traded, missing),
+            adjclose=(None, 99, None, 98, None),
+        )
+        self.assertEqual(batch.missing_quote_rows, 3)
+        self.assertEqual([bar.session for bar in batch.bars if bar.is_missing_quote], [holiday, gap, weekend])
+
+        report = self.catalog.write_yahoo(batch)
+        self.assertEqual((report.first, report.last, report.observations), (first, last, 3))
+        self.assertEqual((report.missing_quote_rows, report.skipped_missing_non_sessions), (1, 2))
+        self.assertEqual(report.dropped_pre_epoch, EpochDiscard())
+        traded_bar, missing_bar, last_bar = self.catalog.read_yahoo(batch.series_id).bars
+        self.assertEqual((traded_bar.session, missing_bar.session, last_bar.session), (first, gap, last))
+        self.assertTrue(missing_bar.is_missing_quote)
+        self.assertEqual((missing_bar.open, missing_bar.high, missing_bar.low, missing_bar.close, missing_bar.volume),
+                         missing)
+        self.assertIsNone(missing_bar.adjusted_close)
+        self.assertIsNone(missing_bar.adjustment_factor)
+        self.assertIsNone(missing_bar.adjusted())
+        self.assertEqual(datetime.fromtimestamp(missing_bar.ts_event // 10**9, timezone.utc),
+                         datetime(2024, 1, 3, 21, tzinfo=timezone.utc))
+        self.assertEqual(missing_bar.ts_init, missing_bar.ts_event)
+        self.assertFalse(traded_bar.is_missing_quote)
+        self.assertEqual(traded_bar.volume, Decimal(0))
+        self.assertEqual(traded_bar.adjustment_factor, Decimal("0.99"))
+        self.assertEqual(last_bar.adjustment_factor, Decimal("0.98"))
+
+    def test_yahoo_absent_adjclose_keeps_source_ohlcv_without_adjustment(self):
+        dates = tuple(date(2024, 1, day) for day in (2, 3, 4))
+        quote = (98, 101, 95, 100, 50_000)
+        for adjclose in ((99, None, 97), None):
+            with self.subTest(adjclose=adjclose):
+                batch = self.yahoo_quote_archive(dates, (quote,) * len(dates), adjclose=adjclose)
+                self.assertEqual(batch.missing_quote_rows, 0)
+                report = self.catalog.write_yahoo(batch, mode="replace")
+                self.assertEqual((report.observations, report.missing_quote_rows), (3, 0))
+                bars = self.catalog.read_yahoo(batch.series_id).bars
+                expected = (None,) * len(dates) if adjclose is None else (Decimal("0.99"), None, Decimal("0.97"))
+                self.assertEqual(tuple(bar.adjustment_factor for bar in bars), expected)
+                bar = bars[1]
+                self.assertFalse(bar.is_missing_quote)
+                self.assertEqual((bar.open, bar.high, bar.low, bar.close, bar.volume), tuple(map(Decimal, quote)))
+                self.assertIsNone(bar.adjusted_close)
+                self.assertIsNone(bar.adjustment_factor)
+                self.assertIsNone(bar.adjusted())
+
+    def test_yahoo_rejects_partially_null_stock_and_etf_quotes(self):
+        quote = (98, 101, 95, None, 50_000)
+        for asset_type in ("EQUITY", "ETF"):
+            with self.subTest(asset_type=asset_type), self.assertRaisesRegex(ValueError, "Incomplete Yahoo stock/ETF OHLCV"):
+                self.yahoo_quote_archive((date(2024, 1, 3),), (quote,), adjclose=(99,), asset_type=asset_type)
+
+    def test_yahoo_non_session_placeholders_alone_cannot_publish_a_snapshot(self):
+        missing = (None,) * 5
+        batch = self.yahoo_quote_archive((date(2024, 1, 1), date(2024, 1, 6)), (missing, missing))
+        with self.assertRaisesRegex(ValueError, "skipped empty non-session rows: 2"):
+            self.catalog.write_yahoo(batch)
+        self.assertFalse(self.snapshot("yahoo", batch.series_id).exists())
 
     def test_yahoo_quote_factor_and_corporate_actions_round_trip(self):
         batch = self.yahoo()

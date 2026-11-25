@@ -70,7 +70,7 @@ Yahoo 适配器接收纽约时区的美元日线，并以锁定的 `exchange-cal
 
 ### 存储 schema 与价格口径
 
-源日线、公司行为和宏观因子使用 Nautilus 自定义数据。时间戳列 `ts_event`、`ts_init` 为非负 `int64` UTC 纳秒，日期列为 ISO `YYYY-MM-DD` 字符串，金额、价格、成交量、收益与因子使用精确十进制字符串，Python 加载与读取接口返回 `Decimal`。拆股比例两端和源事件秒数用整数保存。源数据缺值时保留空值。每版 `dataset.json` 记录 schema 版本、来源、序列 ID 和口径元数据。以下业务字段随 Nautilus 的 `type`、`ts_event`、`ts_init` 通用列保存。
+源日线、公司行为和宏观因子使用 Nautilus 自定义数据。时间戳列 `ts_event`、`ts_init` 为非负 `int64` UTC 纳秒，日期列为 ISO `YYYY-MM-DD` 字符串，金额、价格、成交量、收益与因子使用精确十进制字符串，Python 加载与读取接口返回 `Decimal`。拆股比例两端和源事件秒数用整数保存。允许缺失的字段以空值保存。每版 `dataset.json` 记录 schema 版本、来源、序列 ID 和口径元数据。以下业务字段随 Nautilus 的 `type`、`ts_event`、`ts_init` 通用列保存。
 
 | 数据类型 | 字段与含义 |
 | --- | --- |
@@ -80,7 +80,11 @@ Yahoo 适配器接收纽约时区的美元日线，并以锁定的 `exchange-cal
 | `KenFrenchDaily` | `session`、`mkt_rf`、`smb`、`hml`、`rf`、`mom`（日收益率小数）、`available_on`（源文件没有可用日期，返回空值） |
 | `FredDailyObservation` | `observation_date`、`value`（源单位）、`realtime_start`、`realtime_end`（若源文件提供） |
 
-Yahoo 默认读取 chart `indicators.quote` 的 OHLCV，保留 `events.dividends` 与 `events.splits`，并保存 chart `indicators.adjclose` 的调整收盘价。源价的 `price_basis` 为 `yahoo_chart_quote`，表示适配器施加复权因子前的 Yahoo 值。Yahoo 源价本身可能已经过供应商的拆股归一化。指数早期历史中的缺值以及为零的开盘、最高或最低价保留原样。若有有效的 `close` 和 `adjclose`，复权因子为 `adjclose / close`，使用 34 位十进制有效数字及 `ROUND_HALF_EVEN`。`DailyBar.adjusted()` 将因子乘到源 OHLC，派生记录的 `price_basis` 为 `yahoo_chart_adjusted_close_ratio`。`volume` 在两种视图中都保留源值，适配器不按拆股比率缩放成交量。
+Yahoo 默认读取 chart `indicators.quote` 的 OHLCV，保留 `events.dividends` 与 `events.splits`，并保存 chart `indicators.adjclose` 的调整收盘价。源价的 `price_basis` 为 `yahoo_chart_quote`，表示适配器施加复权因子前的 Yahoo 值。Yahoo 源价本身可能已经过供应商的拆股归一化。若有有效的 `close` 和 `adjclose`，复权因子为 `adjclose / close`，使用 34 位十进制有效数字及 `ROUND_HALF_EVEN`。`DailyBar.adjusted()` 将因子乘到源 OHLC，派生记录的 `price_basis` 为 `yahoo_chart_adjusted_close_ratio`。`volume` 在两种视图中都保留源值，适配器不按拆股比率缩放成交量。
+
+- OHLCV 全为 `null` 时，向 catalog 写入 XNYS 会话日收盘时点的缺失记录。`DailyBar.is_missing_quote` 为真，`WriteReport.missing_quote_rows` 计入这类记录，`observations` 和实际写入区间也包含它们。非会话日的 OHLCV 和 `adjclose` 全为空时跳过，并计入 `WriteReport.skipped_missing_non_sessions`。非会话日若有源值则报错。若跳过后无主记录，写入失败并报告跳过数。
+- 单日 `adjclose` 为空或文件缺少整个 `adjclose` 序列时，源 OHLCV 照常入库。`adjusted_close`、`adjustment_factor` 和 `DailyBar.adjusted()` 都返回 `None`。若 OHLCV 全空而会话日有源 `adjclose`，仍保留该源字段，复权因子为空。禁止用相邻数据前填或插值。
+- 股票和 ETF 的部分 OHLCV 缺失会报错，确保含有行情的记录具备完整价格与成交量。指数是参考序列，可原样归档早期历史中的部分缺值以及为零的开盘、最高或最低价。
 
 `adjustment_as_of` 是调用方记录的源文件数据截止日期，按行保存。同一序列追加或局部替换后，派生历史可能混合不同截止日期的复权因子。历史复权序列可能包含后来才知道的公司行为，可用于明确标注口径的事后分析。用于当时可得的信号研究须另有可用时点证明。锁定的 Nautilus v1.231.0 回测仓位调整类型只有佣金和资金费，未发现股票现金分红或拆股的一等回测事件。当前归档和读取事件，现金入账、持仓股数调整和权益连续性验证仍需要引擎接入。
 
