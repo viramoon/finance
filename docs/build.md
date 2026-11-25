@@ -8,11 +8,28 @@
 
 源码在独立 git worktree 构建，不编辑 vendor checkout。轮到客制化时必须先把补丁推入私有镜像，见 [nautilus.md](nautilus.md)。
 
+## 精简研究工具链
+
+Ubuntu 24.04 x86_64 上可以使用 [bootstrap-research.sh](../scripts/bootstrap-research.sh)。它使用 `toolchain.env` 中锁定的 Rust、rustup、uv、Python 和 LLVM 版本，通过 apt 准备系统编译与下载依赖，并复用源码构建的 LLVM 安装脚本。精简入口跳过 PostgreSQL、Node.js 和 pnpm。
+
+```bash
+bash scripts/bootstrap-research.sh --dry-run
+bash scripts/bootstrap-research.sh
+source "${FINANCE_RESEARCH_TOOLCHAIN_ROOT:-$HOME/.local/share/finance-research}/env.sh"
+bash scripts/build.sh
+```
+
+`--dry-run` 只显示版本、软件包和目标路径。正式安装会联网，apt 需要系统安装权限。工具默认位于 `$HOME/.local/share/finance-research`，可通过 `FINANCE_RESEARCH_TOOLCHAIN_ROOT` 指定绝对路径。默认构建根为该目录的 `build/`，也可在 bootstrap 时设置绝对路径 `FINANCE_BUILD_ROOT`。生成的环境文件指定 `FINANCE_TOOLCHAIN_ENV`，源码构建优先加载这个环境文件。
+
+研究分析依赖按 [Python 研究环境](../python/README.md#研究环境) 安装到已构建的回测 venv。
+
 ## 缓存、来源与空间
 
 默认 FINANCE_BUILD_ROOT=/home/box/fertile/cache/finance；内含 wheels、cargo-target、uv-cache、venv、sources 和 logs。所有运行缓存、生成文件与编译产物位于持久根。CI 显式覆盖为 runner 临时目录，Linux x86_64 / Ubuntu 24.04 是当前验证平台。CARGO_BUILD_JOBS 默认 2、C 扩展编译串行，避免小内存 runner 同时编译大量模块。
 
 缓存键包含 Nautilus commit、实际 Rust / clang 版本、Python ABI、构建模式、high precision、toolchain.env、uv.lock 和构建脚本。缓存 wheel 的摘要与 source-commit 每次核对；安装时明确传 file:// 本地 wheel，verify-source.py 验证 direct_url 和已安装的 .so 扩展位置。日志输出 SOURCE_COMMIT / SOURCE_WHEEL / BUILD_CACHE_HIT / BUILD_SECONDS，可证明来源和冷 / 热耗时。
+
+`research` 依赖组与源码构建共享 `uv.lock`，以统一 NumPy、pandas 等公共依赖版本。CI 在完成两次源码构建与缓存校验后同步该组，再执行研究测试。研究组进入锁文件会改变源码 wheel 和 GitHub 编译缓存键，后续更新该组的锁文件也会使这些缓存失效。
 
 本地实测（Ubuntu 24.04 x86_64、3 vCPU、约 9.7 GiB 内存、ci-pr profile）：完整源码构建与安装 2171 秒（36 分 11 秒），其中 Rust 阶段 17 分 11 秒；不含前置工具链安装。编译后 cargo-target 约 8.7 GiB、隔离 worktree 约 6.9 GiB、已安装虚拟环境约 4.1 GiB，wheel 658 MiB。不同硬件不可直接套用这些耗时，GitHub 冷 / 热运行另见 PR 与 artifact。应预留至少 40 GiB 可用磁盘和 8 GiB 内存，用于完整 Python / Rust 构建、下载与缓存临时文件；清理缓存只删除确认不再使用的旧 key，不删除数据 catalog 或订单状态。保留上次可用 wheel 可加快回退。
 

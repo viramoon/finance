@@ -3,7 +3,9 @@
 set -Eeuo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo"
-if [[ -f "${FERTILE_BOX_HOME:-/home/box}/fertile/env.sh" ]]; then
+if [[ -n "${FINANCE_TOOLCHAIN_ENV:-}" ]]; then
+  source "$FINANCE_TOOLCHAIN_ENV"
+elif [[ -f "${FERTILE_BOX_HOME:-/home/box}/fertile/env.sh" ]]; then
   source "${FERTILE_BOX_HOME:-/home/box}/fertile/env.sh"
 fi
 source "$repo/toolchain.env"

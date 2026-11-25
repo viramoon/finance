@@ -19,3 +19,4 @@ build = [
   "setuptools>=83",
   "packaging>=25",
 ]
+research = ["scipy", "statsmodels"]

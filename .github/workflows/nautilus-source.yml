@@ -79,6 +79,8 @@ jobs:
           FERTILE_DATA_ROOT: ${{ runner.temp }}/finance-data
           CARGO_TARGET_DIR: ${{ runner.temp }}/finance-api-target
         run: |
+          UV_CACHE_DIR="$FINANCE_BUILD_ROOT/uv-cache" UV_PROJECT_ENVIRONMENT="$FINANCE_BUILD_ROOT/venv" \
+            uv sync --locked --only-group research --inexact --python "$(cat .python-version)"
           PYTHONPATH=python "$FINANCE_BUILD_ROOT/venv/bin/python" -m unittest discover -s tests -v
           bash scripts/backtest-sample.sh
           cargo build --locked -p finance-api -p finance-collector
