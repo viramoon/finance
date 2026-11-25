@@ -23,3 +23,23 @@ UV_CACHE_DIR="$build_root/uv-cache" UV_PROJECT_ENVIRONMENT="$build_root/venv" \
 FERTILE_DATA_ROOT="$(mktemp -d)" PYTHONPATH=python \
   "$build_root/venv/bin/python" -m unittest discover -s tests -v
 ```
+
+## Ken French 日因子相关
+
+`fertile_finance.factor_analysis.analyze_factors(returns, factors, *, as_of=None, regression=False)` 接收一个日收益 `pandas.Series` 和一张日因子 `pandas.DataFrame`。两边的索引都使用唯一的交易日标签，支持 ISO 日期字符串、`datetime.date` 或无时区的午夜时间戳。因子表至少包含 `Mkt-RF`、`SMB`、`HML`，存在 `Mom` 时一起计算。收益用小数表示，例如 1% 写作 `0.01`。相关与回归直接使用传入收益，如需以超额收益为因变量，请先按已对齐的 RF 计算后传入。
+
+按日期取完整交集，要求同日策略收益和所选因子均有值。缺日或缺值会缩小所有统计量的共同样本，计算不前填。结果提供 `sample_start`、`sample_end`、`observations` 和 `dropped_observations`，后者统计在策略收益索引首尾之间、至少一侧有该日标签但未入样的日期。两边同时缺少标签的日期无法从输入识别。空样本的首尾为 `None`。样本不足两点或任一变量为常数时，对应 Pearson 系数为 `None`。
+
+历史分析传入 `as_of`，两侧只使用截至该日（含）的观测。因子表以观测日为索引。若用结果驱动历史决策，调用方还须按当时实际可用的发布日期和数据版本准备输入。
+
+`regression=True` 用同一交集做含截距的 OLS，返回日截距、各因子系数和 R²。回归需要样本数大于参数数、因变量有变动且设计矩阵满秩。结果用 `regression_status` 披露 `ok`、`insufficient_observations`、`constant_returns` 或 `rank_deficient`。默认只计算 Pearson 系数。
+
+```python
+import pandas as pd
+from fertile_finance.factor_analysis import analyze_factors
+
+factors = pd.read_csv("tests/fixtures/french_daily.csv", index_col="date")
+returns = 2 * factors["Mkt-RF"]
+result = analyze_factors(returns, factors, as_of="2024-01-10", regression=True)
+print(result.sample_start, result.sample_end, result.observations, result.correlations)
+```
