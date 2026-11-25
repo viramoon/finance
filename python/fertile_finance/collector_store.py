@@ -17,7 +17,11 @@ from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.objects import FIXED_PRECISION, Price, Quantity
 from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 
-from .epoch import unix_nanos
+if not __package__:
+    # The Rust collector launches this file by path from the repository root.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from fertile_finance.epoch import unix_nanos
 
 
 NS_PER_DAY = 86_400_000_000_000

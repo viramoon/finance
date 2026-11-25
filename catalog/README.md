@@ -12,6 +12,8 @@ writer 是通过 finance 构建入口安装的 Nautilus Python 包及其原生�
 
 在 finance 仓库根目录完成 bash scripts/build.sh 与 cargo build --locked -p finance-collector，加载盒子的 env.sh。示例使用默认 127.0.0.1:8082、数据根 /home/box/fertile/data。FINANCE_BUILD_ROOT 指向包含 venv 的编译目录，也可用 FINANCE_PYTHON 显式指定源码 wheel 对应解释器。
 
+collector 从仓库根按脚本路径启动 `python/fertile_finance/collector_store.py`。writer 从自身路径找到项目包，无需设置 `PYTHONPATH`，并和模块调用共用 Unix epoch 校验。
+
 ```sh
 cargo run --locked -p finance-collector
 curl -sS http://127.0.0.1:8082/healthz/live
