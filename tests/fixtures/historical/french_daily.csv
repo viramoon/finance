@@ -1,0 +1,10 @@
+This file was created by the synthetic fixture using a sample daily archive format.
+The RF column shows a daily risk-free return in percent.
+
+,Mkt-RF,SMB,HML,RF
+19691231,    0.50,   -0.02,    0.40,    0.02
+19700102,   -0.25,    0.01,   -0.02,    0.03
+20240703,    1.23,   -0.23,    0.00,    0.02
+20240705,    0.02,  -99.99,    0.04, -999.00
+
+Copyright notice placeholder for synthetic fixture

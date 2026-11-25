@@ -1,7 +1,11 @@
 """Requires the source-built finance venv, just like the collector process."""
 
 from decimal import Decimal
+import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -11,6 +15,25 @@ from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 
 
 class CatalogStorage(unittest.TestCase):
+    def test_script_writer_handshake_without_pythonpath(self):
+        repo = Path(__file__).resolve().parents[1]
+        env = os.environ.copy()
+        env.pop("PYTHONPATH", None)
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog = root / "catalog"
+            state = root / "state"
+            row = dict(instrument="SPY.XNYS", ts_ns=0, open="4", high="4", low="4", close="4", volume="1")
+            child = subprocess.run(
+                [sys.executable, "-u", "python/fertile_finance/collector_store.py",
+                 str(catalog), str(state), "1-MINUTE-LAST", "replay"],
+                cwd=repo, env=env, input=json.dumps([row]) + "\n",
+                capture_output=True, text=True, timeout=20,
+            )
+            self.assertEqual(child.returncode, 0, child.stderr)
+            self.assertEqual([json.loads(line) for line in child.stdout.splitlines()], [{}, {"SPY.XNYS": 0}])
+            self.assertEqual([bar.ts_event for bar in ParquetDataCatalog(catalog).bars()], [0])
+
     def test_replay_catalog_cannot_be_reused_for_ib(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
