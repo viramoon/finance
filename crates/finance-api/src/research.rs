@@ -163,7 +163,10 @@ mod tests {
         });
         let data: Window = from_value(report.clone()).unwrap();
         let serialized = to_value(data).unwrap();
-        assert_eq!(serialized["calendar_diagnostic"], report["calendar_diagnostic"]);
+        assert_eq!(
+            serialized["calendar_diagnostic"],
+            report["calendar_diagnostic"]
+        );
         assert_eq!(serialized["coverage_reason"], "calendar_unavailable");
         assert_eq!(serialized["expected_sessions"], Value::Null);
         assert_eq!(serialized["missing_sessions"], Value::Null);
