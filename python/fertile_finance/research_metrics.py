@@ -1,0 +1,111 @@
+"""Point-in-time risk-free rates and Sharpe calculations for daily research."""
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import date
+from decimal import Context, Decimal, localcontext
+from itertools import pairwise
+from statistics import mean, stdev
+from typing import Literal
+
+
+TRADING_DAYS = Decimal(252)
+_EPOCH = date(1970, 1, 1)
+_NS_PER_DAY = 86_400_000_000_000
+_METRIC_CONTEXT = Context(prec=34)
+
+type EquityClose = tuple[date, int, Decimal | None]
+
+
+def _utc_day_index(ts: int) -> int:
+    if type(ts) is not int or not 0 <= ts <= 2**63 - 1:
+        raise ValueError("Expected nonnegative UTC Unix nanoseconds within int64")
+    return ts // _NS_PER_DAY
+
+
+@dataclass(frozen=True)
+class RiskFreeRate:
+    """A decimal rate for an observation date, known from available_ts (UTC ns)."""
+
+    observation_date: date
+    available_ts: int
+    rate: Decimal
+
+    def __post_init__(self) -> None:
+        if type(self.observation_date) is not date:
+            raise ValueError("RF observation_date must be a calendar date")
+        if _utc_day_index(self.available_ts) < (self.observation_date - _EPOCH).days:
+            raise ValueError("RF availability cannot precede its observation date")
+        if not isinstance(self.rate, Decimal) or not self.rate.is_finite() or self.rate <= -1:
+            raise ValueError("RF rate must be a finite Decimal greater than -1")
+
+
+@dataclass(frozen=True)
+class RiskFreeSeries:
+    """A named set of daily or effective annual rates expressed as fractions."""
+
+    source: str
+    basis: Literal["daily", "annual"]
+    rates: Sequence[RiskFreeRate]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source, str) or not self.source.strip():
+            raise ValueError("RF source must be nonempty")
+        if self.basis not in ("daily", "annual"):
+            raise ValueError("RF basis must be daily or annual")
+        rates = tuple(self.rates)
+        if any(not isinstance(rate, RiskFreeRate) for rate in rates):
+            raise ValueError("RF rates must contain RiskFreeRate entries")
+        keys = {(rate.available_ts, rate.observation_date) for rate in rates}
+        if len(rates) != len(keys):
+            raise ValueError("Duplicate RF observation and availability time")
+        object.__setattr__(self, "rates", tuple(sorted(rates, key=lambda rate: rate.available_ts)))
+
+
+def excess_returns(
+    equity: Sequence[EquityClose],
+    rf: RiskFreeSeries | None = None,
+) -> tuple[Decimal | None, ...]:
+    """Subtract the last published rate known at the start of each close-to-close interval.
+
+    Pass one row per consecutive session, using None for an unavailable valuation.
+    An interval missing either valuation or an explicitly supplied RF is unavailable.
+    """
+    previous_day = None
+    for day, close_ts, value in equity:
+        if type(day) is not date or _utc_day_index(close_ts) != (day - _EPOCH).days:
+            raise ValueError("Equity close timestamp must fall on its UTC session date")
+        if previous_day is not None and day <= previous_day:
+            raise ValueError("Equity close dates must be strictly increasing")
+        if value is not None and (not isinstance(value, Decimal) or not value.is_finite() or value <= 0):
+            raise ValueError("Equity close must be a positive finite Decimal or None")
+        previous_day = day
+
+    releases = iter(rf.rates if rf is not None else ())
+    annual = rf is not None and rf.basis == "annual"
+    upcoming = next(releases, None)
+    observation_day = None
+    daily_rate = Decimal(0) if rf is None else None
+    result = []
+    with localcontext(_METRIC_CONTEXT):
+        for (_, start_ts, start_value), (_, _, end_value) in pairwise(equity):
+            while upcoming is not None and upcoming.available_ts <= start_ts:
+                if observation_day is None or upcoming.observation_date >= observation_day:
+                    observation_day = upcoming.observation_date
+                    daily_rate = (1 + upcoming.rate) ** (1 / TRADING_DAYS) - 1 if annual else upcoming.rate
+                upcoming = next(releases, None)
+            if daily_rate is None or start_value is None or end_value is None:
+                result.append(None)
+            else:
+                result.append(end_value / start_value - 1 - daily_rate)
+    return tuple(result)
+
+
+def sharpe_ratio(returns: Sequence[Decimal | None]) -> Decimal | None:
+    """Annualize daily excess returns using sample standard deviation and 252 sessions."""
+    available = [value for value in returns if value is not None]
+    if len(available) < 2 or len(available) != len(returns):
+        return None
+    with localcontext(_METRIC_CONTEXT):
+        volatility = stdev(available)
+        return mean(available) / volatility * TRADING_DAYS.sqrt() if volatility else None
