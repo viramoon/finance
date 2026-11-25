@@ -11,6 +11,12 @@ bash scripts/smoke.sh
 
 源码构建、缓存与持久路径见 [build.md](build.md)。Nautilus 提供 Strategy / Actor、TradingNode、Backtest、风险 / 执行、IB adapter、Parquet catalog 和 Python API；当前 [API](api.md) 已提供只读示例回测查询，包装此处同一上游示例生成 JSON；实际交易连接验证仍由后续 issue 实现，Nautilus 源码没有修改。
 
+## 日线时间戳下界
+
+finance 在有符号时间戳进入 Nautilus 前校验 Unix epoch 下界。1970-01-01T00:00:00Z 及之后的有效时间戳可用。预 1970 历史不可进入研究 catalog 或回测，最长回测样本从首条可用观测计算。
+
+源码构建的 v1.231.0 回归测试中，原生 `BarDataWrangler.process` 将 1969-12-31T00:00:00Z 转成 `18446657673709551616`。按原始顺序写入时 catalog 拒绝乱序，按转换后的时间排序后却能写出带错误时间的 Parquet，随后 `catalog.bars()` 解析文件名失败。原生 `BacktestEngine.add_data()` 接收并重排这批数据，`run()` 抛出 `OutOfBoundsDatetime`。finance 的检查在转换前拒收，显式丢弃后 epoch 及次日的两个 bar 均可写入、读回并完成回测。接口与行为见 [Python 研究与分析](../python/README.md#unix-epoch-边界)。
+
 ## 版本唯一来源
 
 fertile/deploy/toolchain.env 为维护源，finance 的 toolchain.env、rust-toolchain.toml、.python-version、.uv-version 是派生文件。运行 `python scripts/sync-toolchain.py /path/to/fertile/deploy/toolchain.env` 同步，--check 校验；uv.lock 通过 uv lock 生成，禁止手改。选择的 Rust 1.97.1 与上游精确一致，uv 0.11.33 符合上游 required-version，Python 3.12.13 落在 >=3.12,<3.15 内；LLVM 22.1.8 提供 clang / lld，满足上游未指定最低版本的编译器要求。finance CI 可独立读取派生文件，不需跨私有仓库 token；系统集成时必须与 fertile 维护源核对。

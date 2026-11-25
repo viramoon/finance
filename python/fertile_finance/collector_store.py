@@ -17,16 +17,12 @@ from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.objects import FIXED_PRECISION, Price, Quantity
 from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 
+from .epoch import unix_nanos
+
 
 NS_PER_DAY = 86_400_000_000_000
 DECIMAL = re.compile(r"-?[0-9]+(?:\.[0-9]+)?")
 INSTRUMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z0-9_]+")
-
-
-def unix_nanos(value):
-    if type(value) is not int or not 0 <= value <= 2**63 - 1:
-        raise ValueError("expected Unix nanoseconds at or after the epoch, within int64")
-    return value
 
 
 def fsync_dir(path):

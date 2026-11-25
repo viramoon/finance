@@ -15,6 +15,7 @@ from nautilus_trader.model.objects import Money, Price, Quantity
 from nautilus_trader.trading.strategy import Strategy
 
 from .backtest_sample import timestamp
+from .epoch import require_bar_timestamps, unix_nanos
 from .research_catalog import CENT, ResearchError, iso_date, load_interval, sessions
 
 
@@ -200,6 +201,7 @@ class DailySma(Strategy):
 
 
 def simulate(instrument, bars, days, fast, slow, shares):
+    require_bar_timestamps(bars)
     engine = BacktestEngine(BacktestEngineConfig(logging=LoggingConfig(bypass_logging=True)))
     strategy = DailySma(instrument.id, bars, days, fast, slow, shares)
     try:
@@ -220,7 +222,8 @@ def simulate(instrument, bars, days, fast, slow, shares):
                 feed.append(QuoteTick(instrument.id, Price.from_str(str(design_price(close, OrderSide.SELL))),
                                       Price.from_str(str(design_price(close, OrderSide.BUY))), size, size, time, time))
             # Process the executable closing quote before evaluating this bar's signal.
-            feed.append(Bar(bar.bar_type, bar.open, bar.high, bar.low, bar.close, bar.volume, time, time + 1))
+            feed.append(Bar(bar.bar_type, bar.open, bar.high, bar.low, bar.close, bar.volume,
+                            time, unix_nanos(time + 1)))
         engine.add_data(feed)
         engine.add_strategy(strategy)
         engine.run()
