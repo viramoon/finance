@@ -4,7 +4,7 @@ from bisect import bisect_left, bisect_right
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
-from decimal import Decimal, ROUND_DOWN, localcontext
+from decimal import Decimal
 from fractions import Fraction
 
 from nautilus_trader.model.currencies import USD
@@ -122,8 +122,7 @@ class _PortfolioInputs:
             selected = ranked[:self._top_n]
             if not selected:
                 return {}, gaps
-            with localcontext(rounding=ROUND_DOWN):
-                weight = Decimal(1) / len(selected)
+            weight = Fraction(1, len(selected))
             return {key: weight for key, _ in selected}, gaps
 
         index = bisect_right(self._target_dates, day) - 1

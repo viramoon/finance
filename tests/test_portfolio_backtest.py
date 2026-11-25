@@ -55,6 +55,14 @@ class PortfolioBacktestTests(unittest.TestCase):
                             Quantity.from_int(100_000), ts, ts))
         return PortfolioAsset(instrument, tuple(bars), raw_split_free_reviewed=True)
 
+    def constant_price_asset(self, symbol, value):
+        price = Price.from_str(value)
+        volume = Quantity.from_int(100_000)
+        kind = bar_type(symbol)
+        bars = tuple(Bar(kind, price, price, price, price, volume, ts, ts)
+                     for ts in self.closes.values())
+        return PortfolioAsset(cash_equity(symbol), bars, raw_split_free_reviewed=True)
+
     def snapshot(self, day, *symbols):
         return UniverseSnapshot(day, self.opens[day], symbols)
 
@@ -186,6 +194,34 @@ class PortfolioBacktestTests(unittest.TestCase):
         self.assertFalse(blocked.fills)
         self.assertEqual(set(blocked.equity.values()), {PortfolioConfig().initial_cash})
 
+    def test_equal_weight_thirds_buy_one_share_per_instrument(self):
+        symbols = (A, B, C)
+        result = self.run_factors(
+            [{A: 3, B: 2, C: 1}] * len(self.days),
+            assets=tuple(self.constant_price_asset(symbol, "100.00") for symbol in symbols),
+            universe=(self.snapshot(self.start, *symbols),),
+            top_n=3,
+            config=PortfolioConfig(initial_cash=Decimal("300.00")),
+        )
+        expected = dict.fromkeys(symbols, Decimal(1))
+        self.assertEqual(result.positions, expected)
+        self.assertEqual(result.total_orders, 3)
+        self.assertEqual({fill.instrument_id: fill.quantity for fill in result.fills}, expected)
+        self.assertTrue(all(fill.side == "buy" and fill.price == Decimal("100.00") for fill in result.fills))
+
+    def test_whole_share_floor_preserves_precise_target_weight(self):
+        assets = tuple(self.constant_price_asset(symbol, "10.00") for symbol in (A, B))
+        for weight, shares in ((Decimal("0.099999999999999999999999999999999"), 0),
+                               (Decimal("0.10"), 1)):
+            with self.subTest(weight=weight):
+                result = self.run_targets(
+                    assets=assets,
+                    targets=(TargetWeights(self.start, self.closes[self.start], {A: weight}),),
+                    config=PortfolioConfig(initial_cash=Decimal("100.00")),
+                )
+                self.assertEqual(result.total_orders, shares)
+                self.assertEqual(result.positions, {A: Decimal(shares)} if shares else {})
+
     def test_cross_section_rotates_only_through_point_in_time_members(self):
         exit_day = self.days[3]
         history = (*self.universe, self.snapshot(exit_day, B, C))
@@ -275,6 +311,37 @@ class PortfolioBacktestTests(unittest.TestCase):
         self.assertFalse(any(fill.instrument_id == A and fill.fill_date == missing_day for fill in filled.fills))
         self.assertTrue(any(gap.date == missing_day and gap.instrument_id == A and gap.kind == "valuation_price"
                             and gap.filled_from == self.days[1] for gap in filled.gaps))
+
+    def test_padded_valuation_keeps_five_year_window_incomplete(self):
+        start, end = date(2019, 7, 12), date(2024, 7, 12)
+        missing_day = date(2024, 7, 9)
+        closes = sessions(start, end)
+        starts_at = int(nyse().schedule.loc[str(start), "open"].value)
+        alpha = self.asset(A, 0, closes)
+        sparse = replace(alpha, bars=tuple(bar for bar in alpha.bars if bar.ts_event != closes[missing_day]))
+        portfolio = dict(
+            assets=(sparse, self.asset(B, 1, closes)),
+            universe=(UniverseSnapshot(start, starts_at, (A, B)),),
+            targets=(TargetWeights(start, closes[start], {A: Decimal("0.40"), B: Decimal("0.40")}),),
+            start=start, end=end,
+        )
+        config = PortfolioConfig(rebalance_every=len(closes))
+        default = run_portfolio_backtest(**portfolio, config=config)
+        padded = run_portfolio_backtest(**portfolio, config=replace(config, fill_missing=True))
+
+        self.assertIn(A, padded.positions)
+        self.assertIsNone(default.equity[missing_day])
+        self.assertIsNotNone(padded.equity[missing_day])
+        self.assertIn((missing_day, A, "valuation_price", date(2024, 7, 8)),
+                      [(gap.date, gap.instrument_id, gap.kind, gap.filled_from) for gap in padded.gaps])
+        for result in (default, padded):
+            window = result.windows[2]
+            self.assertEqual(window["requested_years"], 5)
+            for row in (window, result.longest_sample):
+                self.assertEqual(row["coverage"], "insufficient")
+                self.assertEqual(row["missing_sessions"], 1)
+                self.assertEqual(row["observations"], len(closes) - 1)
+                self.assertIsNone(row["metrics"])
 
     def test_missing_factor_is_excluded_unless_explicitly_filled_from_the_past(self):
         missing_day = self.days[1]

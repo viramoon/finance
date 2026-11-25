@@ -4,7 +4,8 @@ from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN, localcontext
+from fractions import Fraction
 from typing import Literal
 
 from nautilus_trader.backtest.engine import BacktestEngine
@@ -142,6 +143,7 @@ class _PortfolioStrategy(Strategy):
         self.cash = config.initial_cash
         self.shares = defaultdict(int)
         self.equity = {}
+        self.carried_valuation_dates = set()
         self.gaps = []
         self.rebalances = []
         self.fills = []
@@ -181,6 +183,7 @@ class _PortfolioStrategy(Strategy):
                 continue
             if source_day != day:
                 self.gaps.append(DataGap(day, key, "valuation_price", source_day))
+                self.carried_valuation_dates.add(day)
             if equity is not None:
                 equity += shares * bar.close.as_decimal()
 
@@ -190,22 +193,31 @@ class _PortfolioStrategy(Strategy):
             return
         targets, gaps = self.inputs.resolve_targets(day, fill_missing=self.settings.fill_missing)
         self.gaps.extend(gaps)
-        self.rebalances.append(RebalanceAudit(day, event.ts_event, targets))
+        # A repeating equal weight is rounded only for the public Decimal audit.
+        with localcontext(rounding=ROUND_DOWN):
+            audit_targets = {
+                key: Decimal(weight.numerator) / Decimal(weight.denominator)
+                if isinstance(weight, Fraction) else weight
+                for key, weight in targets.items()
+            }
+        self.rebalances.append(RebalanceAudit(day, event.ts_event, audit_targets))
         if equity is None:
             return
 
+        exact_equity = Fraction(equity)
+        drift_limit = exact_equity * Fraction(self.settings.weight_drift_threshold)
         changes = {}
         held = {key for key, shares in self.shares.items() if shares}
         for key in sorted(set(targets) | held):
             bar, _ = self.inputs.signal_bar(day, key, fill_missing=self.settings.fill_missing)
             if bar is None:
                 continue
-            price = bar.close.as_decimal()
+            price = Fraction(bar.close.as_decimal())
             current = self.shares[key]
-            target = targets.get(key, Decimal(0))
-            if abs(current * price - target * equity) <= self.settings.weight_drift_threshold * equity:
+            target_value = exact_equity * Fraction(targets.get(key, 0))
+            if abs(current * price - target_value) <= drift_limit:
                 continue
-            quantity = int(equity * target // price) - current
+            quantity = target_value // price - current
             if quantity:
                 changes[key] = quantity
         self.pending = (day, event.ts_event, changes)
@@ -230,7 +242,7 @@ class _PortfolioStrategy(Strategy):
             change = changes[key]
             price = quote.bid_price.as_decimal()
             if change > 0:
-                size = min(change, int(self.cash // price))
+                size = min(change, Fraction(self.cash) // Fraction(price))
                 if size < change:
                     self.gaps.append(DataGap(day, key, "execution_cash"))
                 side = OrderSide.BUY
@@ -326,10 +338,11 @@ def _simulate(inputs, config):
         engine.dispose()
 
 
-def _performance(equity, closes, fills, rf):
+def _performance(equity, closes, fills, rf, *, carried_valuation_dates):
     days = list(closes)
-    observed = {day: value for day, value in equity.items() if value is not None}
-    closes_with_equity = [(day, closes[day], equity[day]) for day in days]
+    observed = {day: value for day, value in equity.items()
+                if value is not None and day not in carried_valuation_dates}
+    closes_with_equity = [(day, closes[day], observed.get(day)) for day in days]
     daily_excess = dict(zip(days[1:], excess_returns(closes_with_equity, rf), strict=True))
     daily_turnover = defaultdict(Decimal)
     for fill in fills:
@@ -381,7 +394,10 @@ def run_portfolio_backtest(
         assets, start=start, end=end, universe=universe, target_weights=targets, factors=factors, top_n=top_n,
     )
     strategy, positions, orders, total_positions = _simulate(inputs, config)
-    windows, longest, risk_free = _performance(strategy.equity, inputs.closes, strategy.fills, rf)
+    windows, longest, risk_free = _performance(
+        strategy.equity, inputs.closes, strategy.fills, rf,
+        carried_valuation_dates=strategy.carried_valuation_dates,
+    )
     return PortfolioResult(
         config.fill_timing, config.fill_missing, strategy.equity, positions, tuple(strategy.fills),
         tuple(strategy.rebalances), tuple(strategy.gaps), orders, total_positions, windows, longest, risk_free,

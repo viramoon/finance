@@ -9,7 +9,7 @@
 - `UniverseSnapshot(date, available_ts, members)` 是从该交易日开盘起生效的完整成员表，必须在该次开盘前或同时已知。每次成员变化提供新的完整快照，表会持续生效到下一次变更。首个回测会话开盘必须已有生效快照，仅提供期末快照会报错。新成员从生效日起参与排名。退出后撤销该标的的待执行意图。若退出时仍持仓，保留原生账本中的头寸并报告净值缺口。调用方可用较早的目标指示，在退出前最后一个可交易会话完成减仓。
 - `TargetWeights(date, available_ts, weights)` 与 `factors` 二选一。目标权重必须在所标会话的收盘前或同时可得，使用该信号日或此前最近的目标表。所有权重之和至多为 `1`，余额为现金。排除成员资格或数据不满足的标的后，剩余权重保持原值。新加入或重新加入的成员需要其当前成员期内的目标表。
 - `FactorValue(date, available_ts, instrument_id, value)` 必须在所标会话的收盘前或同时可得。对当次合格标的按因子值从高到低排序，同值按完整标的 ID 排序，最多取 `top_n` 个等权持有。因子计算和数据的发布日期由调用方提供。
-- `PortfolioConfig` 默认用 `initial_cash=Decimal("100000.00")`、`rebalance_every=1` 和 `weight_drift_threshold=Decimal("0")`。再平衡从第一个交易会话开始，每隔配置的会话数生成信号。每个标的只在当前权重与目标权重的绝对差超过阈值时调整。`Decimal("0.05")` 表示差值须大于 5 个百分点。按信号时已知的净值与收盘价把目标换算为整股。
+- `PortfolioConfig` 默认用 `initial_cash=Decimal("100000.00")`、`rebalance_every=1` 和 `weight_drift_threshold=Decimal("0")`。再平衡从第一个交易会话开始，每隔配置的会话数生成信号。每个标的只在当前权重与目标权重的绝对差超过阈值时调整。`Decimal("0.05")` 表示差值须大于 5 个百分点。漂移判断与股数换算使用精确分数，最后向下取整股。横截面等权在计算中为精确的 `1 / 入选标的数`，循环小数仅在 `rebalances[].targets` 审计中以 `Decimal` 向下舍入展示。
 
 ## 时点与数据缺口
 
@@ -25,7 +25,7 @@
 
 ## 窗口与无风险利率
 
-`windows` 复用现有 50 年、10 年、5 年的 [覆盖规则](historical-backtest.md#信号执行和绩效) 并报告实际首尾与观测数。覆盖不足时 `metrics` 为 `None`。`longest_sample` 按请求中的完整交易会话报告全样本覆盖，至少两次净值观测且无估值缺口时计算指标。窗口换手 `turnover` 是窗口起始净值之后各笔买卖名义金额除以各自信号日组合净值的累计值，单位为倍数。
+`windows` 复用现有 50 年、10 年、5 年的 [覆盖规则](historical-backtest.md#信号执行和绩效) 并报告实际首尾与观测数。窗口覆盖使用持仓可按当日价格估值的会话。借用历史收盘价估值的会话仍计入 `missing_sessions`，补全后的净值保留在 `PortfolioResult.equity` 中。窗口内部或末端存在此类缺口时，覆盖为 `insufficient`，`metrics` 为 `None`。`longest_sample` 按请求中的完整交易会话报告全样本覆盖，至少两次净值观测且无估值缺口时计算指标。窗口换手 `turnover` 是窗口起始净值之后各笔买卖名义金额除以各自信号日组合净值的累计值，单位为倍数。
 
 `risk_free` 在结果和窗口中披露来源与频率。默认来源为 `rf=0`。外部加载器可构造 `fertile_finance.research_metrics.RiskFreeSeries(source, basis, rates)`，其中 `basis` 取 `daily` 或 `annual`，`rates` 是 `RiskFreeRate(observation_date, available_ts, rate)` 序列。利率为 `Decimal` 小数，`available_ts` 为发布或修订可得的 UTC 纳秒。`annual` 表示有效年利率，以 252 个交易日折为日利率。
 
