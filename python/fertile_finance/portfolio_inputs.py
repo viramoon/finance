@@ -4,15 +4,18 @@ from bisect import bisect_left, bisect_right
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import Context, Decimal, localcontext
 from fractions import Fraction
 
 from nautilus_trader.model.currencies import USD
 from nautilus_trader.model.data import Bar
 from nautilus_trader.model.instruments import Equity
+from nautilus_trader.model.objects import Price, Quantity
 
 from .collector_store import NS_PER_DAY, unix_nanos
-from .research_catalog import CENT, EPOCH, ID, LATEST, ResearchError, bar_type, nyse
+from .historical_catalog import YahooHistory
+from .historical_types import DailyBar
+from .research_catalog import CENT, EPOCH, ID, LATEST, ResearchError, bar_type, cash_equity, nyse
 
 
 @dataclass(frozen=True)
@@ -22,6 +25,51 @@ class PortfolioAsset:
     instrument: Equity
     bars: Sequence[Bar]
     raw_split_free_reviewed: bool
+
+    @classmethod
+    def from_yahoo(cls, history: YahooHistory, *, raw_split_free_reviewed: bool) -> "PortfolioAsset":
+        """Convert archived source bars after verifying prices are raw and split-free.
+
+        The caller must review supplier normalization as well as the selected span.
+        A bounded Yahoo read can omit later splits that affected stored prices.
+        """
+        if not isinstance(history, YahooHistory) or not ID.fullmatch(history.series_id) or (
+            history.asset_type not in {"stock", "etf"} or history.currency != "USD"
+        ):
+            raise ResearchError("invalid_instrument", "Expected a Yahoo XNYS USD stock or ETF history")
+        if raw_split_free_reviewed is not True or history.splits:
+            raise ResearchError("invalid_source", "Yahoo prices require raw price review and a split-free history")
+        kind = bar_type(history.series_id)
+        schedule = nyse().schedule
+        bars = []
+        for row in history.bars:
+            if not isinstance(row, DailyBar):
+                raise ResearchError("invalid_source", "Expected Yahoo source bars with original OHLCV")
+            when = _session_time(schedule, row.session, "close")
+            if type(row.ts_event) is not int or row.ts_event != when or row.ts_init != when:
+                raise ResearchError("invalid_bar", f"{history.series_id} {row.session}: expected archived XNYS close")
+            if not row.is_missing_quote:
+                bars.append(_yahoo_quote_bar(kind, row, when))
+        return cls(cash_equity(history.series_id), tuple(bars), raw_split_free_reviewed=True)
+
+
+def _yahoo_quote_bar(kind, row, when):
+    prices = (row.open, row.high, row.low, row.close)
+    volume = row.volume
+    if any(not isinstance(value, Decimal) or not value.is_finite() for value in (*prices, volume)):
+        raise ResearchError("invalid_bar", f"{kind} {row.session}: expected a complete finite Yahoo quote")
+    try:
+        with localcontext(Context(prec=34)):
+            cents = tuple(value.quantize(CENT) for value in prices)
+            shares = volume.quantize(Decimal(1))
+            if (cents != prices or any(value <= 0 for value in cents)
+                    or shares != volume or shares < 0):
+                raise ValueError("inexact or invalid quote")
+            native_prices = tuple(Price.from_decimal(value) for value in cents)
+            native_volume = Quantity.from_decimal(shares)
+            return Bar(kind, *native_prices, native_volume, when, when)
+    except (ArithmeticError, ValueError) as exc:
+        raise ResearchError("invalid_bar", f"{kind} {row.session}: expected representable USD cents and whole shares") from exc
 
 
 @dataclass(frozen=True)

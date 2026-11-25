@@ -1,8 +1,16 @@
 from datetime import date
 from decimal import Decimal, localcontext
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
+from fertile_finance.historical_catalog import HistoricalCatalog
+from fertile_finance.research_catalog import sessions
+from fertile_finance.research_factors import load_fred, load_ken_french, load_ken_french_rf
 from fertile_finance.research_metrics import RiskFreeRate, RiskFreeSeries, daily_risk_free, excess_returns, sharpe_ratio
+
+
+HISTORICAL_FIXTURES = Path(__file__).parent / "fixtures" / "historical"
 
 
 def close_ts(day):
@@ -60,6 +68,36 @@ class ResearchMetrics(unittest.TestCase):
             RiskFreeRate(wed, close_ts(wed) + 1, Decimal("0.01")),
         ))
         self.assertEqual(daily_risk_free(closes, rf), {mon: Decimal("0.01"), tue: Decimal("0.02")})
+
+    def test_french_archive_and_catalog_use_verified_release_times(self):
+        source = HISTORICAL_FIXTURES / "french_daily.csv"
+        raw = load_ken_french_rf(source, pre_epoch="drop")
+        with TemporaryDirectory(dir="/tmp") as work:
+            catalog = HistoricalCatalog(Path(work))
+            catalog.write_french(load_ken_french(source, pre_epoch="drop"))
+            stored = catalog.read_french()
+
+        epoch_session, wed, fri, mon = (date(1970, 1, 2), date(2024, 7, 3), date(2024, 7, 5), date(2024, 7, 8))
+        closes = sessions(wed, mon)
+        issued = {epoch_session: close_ts(epoch_session), wed: closes[wed] + 1}
+        expected = (
+            RiskFreeRate(epoch_session, issued[epoch_session], Decimal("0.0003")),
+            RiskFreeRate(wed, issued[wed], Decimal("0.0002")),
+        )
+        for batch in (raw, stored):
+            with self.subTest(batch=type(batch).__name__):
+                self.assertTrue(all(row.available_on is None for row in batch.rows))
+                series = RiskFreeSeries.from_french(batch, available_ts=issued, source="French fixture")
+                self.assertEqual((series.source, series.basis, series.rates), ("French fixture", "daily", expected))
+                self.assertEqual(daily_risk_free(closes, series), {fri: Decimal("0.0003"), mon: Decimal("0.0002")})
+                with self.assertRaisesRegex(
+                    ValueError, "Missing verified Ken French RF availability timestamp for 2024-07-03",
+                ):
+                    RiskFreeSeries.from_french(batch, available_ts={epoch_session: issued[epoch_session]})
+
+        fred = load_fred(HISTORICAL_FIXTURES / "fred_dgs10_observations.json", series_id="DGS10")
+        with self.assertRaisesRegex(ValueError, "Expected a FrenchDaily or FrenchRiskFree batch"):
+            RiskFreeSeries.from_french(fred, available_ts={})
 
     def test_valuation_gaps_and_degenerate_sharpe_remain_unavailable(self):
         day, ts, _ = self.equity[1]

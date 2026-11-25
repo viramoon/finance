@@ -8,6 +8,8 @@ from itertools import pairwise
 from statistics import mean, stdev
 from typing import Literal
 
+from .research_factors import FrenchDaily, FrenchRiskFree
+
 
 TRADING_DAYS = Decimal(252)
 _EPOCH = date(1970, 1, 1)
@@ -60,6 +62,26 @@ class RiskFreeSeries:
         if len(rates) != len(keys):
             raise ValueError("Duplicate RF observation and availability time")
         object.__setattr__(self, "rates", tuple(sorted(rates, key=lambda rate: rate.available_ts)))
+
+    @classmethod
+    def from_french(
+        cls,
+        batch: FrenchDaily | FrenchRiskFree,
+        *,
+        available_ts: Mapping[date, int],
+        source: str = "Ken French",
+    ) -> "RiskFreeSeries":
+        """Use daily French fractions with verified UTC release times for this archive vintage."""
+        if not isinstance(batch, (FrenchDaily, FrenchRiskFree)):
+            raise ValueError("Expected a FrenchDaily or FrenchRiskFree batch")
+        rates = []
+        for row in batch.rows:
+            if row.rf is None:
+                continue
+            if row.session not in available_ts:
+                raise ValueError(f"Missing verified Ken French RF availability timestamp for {row.session}")
+            rates.append(RiskFreeRate(row.session, available_ts[row.session], row.rf))
+        return cls(source, "daily", rates)
 
 
 def _validate_close(day: date, close_ts: int) -> None:

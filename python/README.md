@@ -84,3 +84,5 @@ read_fred(series_id: str, *, start=None, end=None) -> FredDaily
 ## 多标的研究
 
 `fertile_finance.portfolio_backtest.run_portfolio_backtest` 在一个 Nautilus 引擎中运行 XNYS 权益组合，支持目标权重、横截面排序、逐会话净值和成交审计。`result.windows` 使用上方统一的四行合同，最长样本覆盖检查使用请求截止日。该 Python 入口把 Nautilus 已有的多标的能力封装成可复用的研究工具。输入契约、执行时点、估值缺口和无风险利率口径见 [多标的组合回测](../docs/portfolio-backtest.md)。HTTP 作业继续运行已注册的策略，`SmaCrossover` 的数据与执行合同见 [历史回测](../docs/historical-backtest.md)。
+
+经审核的 Yahoo 日线可以通过 `PortfolioAsset.from_yahoo` 供组合研究使用。`RiskFreeSeries.from_french` 接收日频 RF 与独立提供的准确发布时间。FRED 序列的单位及版本处理见 [历史数据与组合输入](../docs/portfolio-backtest.md#历史数据与组合输入)。

@@ -11,6 +11,16 @@
 - `FactorValue(date, available_ts, instrument_id, value)` 必须在所标会话的收盘前或同时可得。对当次合格标的按因子值从高到低排序，同值按完整标的 ID 排序，最多取 `top_n` 个等权持有。因子计算和数据的发布日期由调用方提供。
 - `PortfolioConfig` 默认用 `initial_cash=Decimal("100000.00")`、`rebalance_every=1` 和 `weight_drift_threshold=Decimal("0")`。再平衡从第一个交易会话开始，每隔配置的会话数生成信号。每个标的只在当前权重与目标权重的绝对差超过阈值时调整。`Decimal("0.05")` 表示差值须大于 5 个百分点。漂移判断与股数换算使用精确分数，最后向下取整股。横截面等权在计算中为精确的 `1 / 入选标的数`，循环小数仅在 `rebalances[].targets` 审计中以 `Decimal` 向下舍入展示。
 
+## 历史数据与组合输入
+
+研究脚本可用 `HistoricalCatalog(data_root)` 从 `data_root/catalog/historical` 读取当前发布版本。Yahoo 自定义 Parquet 记录与 `dataset.json` 由 `read_yahoo` 读取并解码为 `YahooHistory`。经审核后用 `PortfolioAsset.from_yahoo(history, raw_split_free_reviewed=True)` 转成组合所用的原生 `Equity` 与日线。准入范围为 XNYS 上市、美元计价的股票或 ETF。价格必须能精确表示到分，成交量必须为整股，收盘时间须匹配 XNYS 会话。全空行情保留为组合缺口，零成交量仍记录为零。参考指数及其他上市场所的记录留在历史 catalog。见 [目录与原始字段](../catalog/README.md#公开历史数据)。
+
+`yahoo_chart_quote` 表示适配器读取的源报价。调用方须核实其在研究区间内确为未复权、无拆股归一化的原始 OHLCV。显式审核仍须覆盖供应商可能将后续拆股反映到早期价格的情况，按区间读取时也适用。传入记录含拆股事件时适配器拒绝转换。调整收盘价和复权因子只供来源分析，组合使用源 OHLCV 计算价格收益，现金分红排除在收益之外。官方 `SmaCrossover` 继续读取其独立的不可变研究快照及专用清单。组合宇宙由调用方提供带可得时间的 `UniverseSnapshot`。
+
+`RiskFreeSeries.from_french(batch, available_ts=release_ns_by_date)` 接收 `load_ken_french_rf(...)` 的返回值或 `HistoricalCatalog.read_french(...)` 的因子记录，直接使用已转换为日收益率小数的 `rf`。值缺失的记录会被略过。每个保留的观测日都必须由调用方提供该版本可得的 UTC 纳秒，缺少时间证据时报错。French 的 `session` 和 catalog 的午夜时间戳表示观察日，归档 `available_on` 为空。单独用这些字段无法确定当时可得的 RF。
+
+FRED 读取结果保留 `value` 的源单位。CSV 无版本信息，JSON 的 `realtime_start` 和 `realtime_end` 仅有日期。`DGS10` 是十年期美国国债收益率报价。若使用适合所选 RF 口径的 FRED 序列，须先根据供应商单位换算成日简单收益率或有效年利率的小数，并核实具体版本的准确发布时间，再构造 `RiskFreeRate(observation_date, available_ts, rate)`。在没有可靠证据时可省略 RF，从而使用显式披露的 `rf=0`。
+
 ## 时点与数据缺口
 
 每次在官方收盘生成信号，含当日有效收盘价和在该时点已知的宇宙、权重、因子。`PortfolioConfig.fill_timing` 可选 `next_open`（默认）和 `next_close`，分别按下一 XNYS 会话的开盘价和收盘价模拟成交。周末、休市、夏令时和提前收盘按 XNYS 日历处理。末日信号没有后续执行会话。
