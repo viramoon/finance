@@ -1,0 +1,33 @@
+{
+  "chart": {
+    "result": [
+      {
+        "meta": {
+          "currency": "USD",
+          "symbol": "^GSPC",
+          "exchangeName": "SNP",
+          "fullExchangeName": "SNP",
+          "instrumentType": "INDEX",
+          "exchangeTimezoneName": "America/New_York",
+          "dataGranularity": "1d"
+        },
+        "timestamp": [-34200, 138600, 397800],
+        "indicators": {
+          "quote": [
+            {
+              "open": [null, 0, 95.05],
+              "high": [null, null, 96.25],
+              "low": [null, null, 94.50],
+              "close": [null, 95.10, 95.75],
+              "volume": [null, null, 0]
+            }
+          ],
+          "adjclose": [
+            {"adjclose": [null, null, 95.75]}
+          ]
+        }
+      }
+    ],
+    "error": null
+  }
+}

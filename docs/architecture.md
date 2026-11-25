@@ -5,7 +5,8 @@ finance 是 fertile 的主项目与 submodule，交易核心以 vendor/nautilus_
 ```text
 CSV Replay / IB 数据源 → finance-collector → Nautilus Parquet catalog + 状态文件
                                              → trader → 风控 / 执行 → IB Gateway
-研究 / backtest ← 历史 catalog
+Yahoo / Ken French / FRED 存档 → 历史适配器 → catalog/historical → Python 研究
+经审核的 NYSE CSV → 独立研究 catalog → SmaCrossover 回测作业
 浏览器 → web → HTTP → finance api → 示例回测 latest.json
 上游 CSV 示例 → 回测批任务 → 原子 latest.json
 实时节点状态与查询：后续设计（内部对接 TBD）
@@ -20,3 +21,5 @@ trader、collector、api 是独立常驻进程，backtest 是批任务。交易�
 不再规划 v1 的自研核心 crate。新增能力先查 [Nautilus 组件](nautilus.md)，替换自研必须符合 [ADR-0002](adr/ADR-0002-nautilus-dependency.md)。所有 API 数值保持精度，契约由代码导出，见 [api.md](api.md)。
 
 finance-api 通过数据根目录中的 collector 心跳与水位提供市场状态。冷启动缺文件与过期状态的规则、回放及原子发布协议见 [行情目录](../catalog/README.md)。
+
+公开历史行情和因子由离线 Python 适配器读取，按序列写入数据根 `catalog/historical` 下的 Nautilus Parquet 版本。研究读取 API 返回源价格、复权因子、公司行为与宏观数据。指数以参考序列保存。`SmaCrossover` 仍从独立的审核快照加载 NYSE 股票或 ETF，且继续执行原有准入、覆盖和价格口径检查。分区与行情语义见 [历史数据目录](../catalog/README.md#公开历史数据)。
