@@ -23,10 +23,12 @@ with localcontext(RESEARCH_CONTEXT):
     from nautilus_trader.model.objects import QUANTITY_MAX, Money, Quantity
     from nautilus_trader.trading.strategy import Strategy
 
+    from .fill_audit import FillSignal, audit_logical_fills
     from .portfolio_inputs import (
         DataGap,
         FactorValue,
         PortfolioAsset,
+        TargetFunction,
         TargetWeights,
         UniverseSnapshot,
         prepare_portfolio,
@@ -121,6 +123,11 @@ class FillAudit:
     order_id: str
     trade_id: str
 
+    @property
+    def notional(self) -> Decimal:
+        with localcontext(EXACT_RESEARCH_CONTEXT):
+            return self.quantity * self.price
+
 
 @dataclass(frozen=True)
 class RebalanceAudit:
@@ -182,7 +189,7 @@ class _ExpectedFill:
 
 
 class _PortfolioStrategy(Strategy):
-    def __init__(self, inputs, config):
+    def __init__(self, inputs, config, *, research_details):
         super().__init__()
         self.inputs = inputs
         self.settings = config
@@ -193,6 +200,8 @@ class _PortfolioStrategy(Strategy):
         self.gaps = []
         self.rebalances = []
         self.fills = []
+        self.raw_fills = [] if research_details else None
+        self.weights = {} if research_details else None
         self.orders = {}
         self.quotes = {}
         self.pending = None
@@ -213,6 +222,7 @@ class _PortfolioStrategy(Strategy):
 
     def _mark_equity(self, day):
         equity = self.cash
+        marked_positions = {} if self.weights is not None else None
         members = self.inputs.members[day]
         for key, shares in sorted(self.shares.items()):
             if not shares:
@@ -230,7 +240,10 @@ class _PortfolioStrategy(Strategy):
                 self.gaps.append(DataGap(day, key, "valuation_price", source_day))
                 self.carried_valuation_dates.add(day)
             if equity is not None:
-                equity += shares * bar.close.as_decimal()
+                value = shares * bar.close.as_decimal()
+                equity += value
+                if marked_positions is not None:
+                    marked_positions[key] = value
 
         # A cash balance alone is not a market observation. A carried holding
         # mark can still be used by the strategy and is excluded from coverage.
@@ -239,6 +252,11 @@ class _PortfolioStrategy(Strategy):
         ):
             equity = None
 
+        if marked_positions is not None:
+            with localcontext(RESEARCH_CONTEXT):
+                self.weights[day] = None if equity is None else {
+                    key: value / equity for key, value in marked_positions.items()
+                }
         return equity
 
     def mark_and_signal(self, event):
@@ -252,7 +270,7 @@ class _PortfolioStrategy(Strategy):
         self.equity[day] = equity
         if not due:
             return
-        targets, gaps = self.inputs.resolve_targets(day, fill_missing=self.settings.fill_missing)
+        targets, gaps = self.inputs.resolve_targets(day, fill_missing=self.settings.fill_missing, equity=equity)
         self.gaps.extend(gaps)
         # A repeating equal weight is rounded only for the public Decimal audit.
         with localcontext(RESEARCH_CONTEXT, prec=28, rounding=ROUND_DOWN):
@@ -345,11 +363,13 @@ class _PortfolioStrategy(Strategy):
             plan.instrument_id, plan.signal_date, plan.signal_ts, plan.fill_date, event.ts_event,
             "buy" if change > 0 else "sell", size, price, str(event.client_order_id), str(event.trade_id),
         ))
+        if self.raw_fills is not None:
+            self.raw_fills.append(event)
 
 
-def _simulate(inputs, config):
+def _simulate(inputs, config, *, research_details=False):
     engine = BacktestEngine(BacktestEngineConfig(logging=LoggingConfig(bypass_logging=True)))
-    strategy = _PortfolioStrategy(inputs, config)
+    strategy = _PortfolioStrategy(inputs, config, research_details=research_details)
     venue = next(iter(inputs.assets.values())).id.venue
     try:
         engine.add_venue(
@@ -411,7 +431,7 @@ def _performance(equity, closes, fills, rf, *, carried_valuation_dates):
     turnover = dict.fromkeys(closes, Decimal(0))
     with localcontext(RESEARCH_CONTEXT):
         for fill in fills:
-            turnover[fill.fill_date] += fill.quantity * fill.price / equity[fill.signal_date]
+            turnover[fill.fill_date] += fill.notional / equity[fill.signal_date]
         windows = coverage_windows(
             observed, next(reversed(closes)), rf=aligned_rf, rf_source=rf.source if rf is not None else None,
             turnover=turnover, longest_through_end=True,
@@ -432,18 +452,38 @@ def run_portfolio_backtest(
     rf: RiskFreeSeries | None = None,
 ) -> PortfolioResult:
     """Run a long-only cash portfolio, selecting by target weights or a ranked factor."""
+    result, _, _ = _run_portfolio_backtest(
+        assets=assets, universe=universe, start=start, end=end, config=config,
+        targets=targets, factors=factors, top_n=top_n, rf=rf,
+    )
+    return result
+
+
+def _run_portfolio_backtest(
+    *, assets, universe, start, end, config, targets=None, factors=None, top_n=None, rf=None,
+    target_fn: TargetFunction | None = None, research_details=False,
+):
     # The engine invokes Python callbacks synchronously and also converts native
     # fixed-point objects through Decimal on this thread.
     with localcontext(RESEARCH_CONTEXT):
         inputs = prepare_portfolio(
             assets, start=start, end=end, universe=universe, target_weights=targets, factors=factors, top_n=top_n,
+            target_fn=target_fn, min_assets=1 if research_details else 2,
         )
-        strategy, positions, orders, total_positions = _simulate(inputs, config)
+        strategy, positions, orders, total_positions = _simulate(inputs, config, research_details=research_details)
+        logical_fills = ()
+        if strategy.raw_fills is not None:
+            signals = {
+                fill.order_id: FillSignal(fill.signal_date, fill.signal_ts, fill.fill_date)
+                for fill in strategy.fills
+            }
+            logical_fills = audit_logical_fills(strategy.raw_fills, signals)
         windows, risk_free = _performance(
-            strategy.equity, inputs.closes, strategy.fills, rf,
+            strategy.equity, inputs.closes, logical_fills if research_details else strategy.fills, rf,
             carried_valuation_dates=strategy.carried_valuation_dates,
         )
-        return PortfolioResult(
+        result = PortfolioResult(
             config.fill_timing, config.fill_missing, strategy.equity, positions, tuple(strategy.fills),
             tuple(strategy.rebalances), tuple(strategy.gaps), orders, total_positions, windows, risk_free,
         )
+        return result, strategy.weights, logical_fills

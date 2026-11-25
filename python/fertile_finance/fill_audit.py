@@ -1,8 +1,9 @@
 """Summarize native fills for same-currency cash equity research."""
 
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal, localcontext
 
 from nautilus_trader.model.enums import OrderSide
@@ -43,6 +44,42 @@ class LogicalFill:
             context.prec = 80
             proceeds = self.notional.copy_negate() if self.side == OrderSide.BUY else self.notional
             return proceeds - self.commission
+
+
+@dataclass(frozen=True)
+class FillSignal:
+    signal_date: date
+    signal_ts: int
+    fill_date: date
+
+
+@dataclass(frozen=True)
+class AuditedFill(FillSignal):
+    fill: LogicalFill
+
+    @property
+    def fill_ts(self) -> int:
+        return self.fill.fill_ts
+
+    @property
+    def notional(self) -> Decimal:
+        return self.fill.notional
+
+
+def audit_logical_fills(
+    events: Iterable[OrderFilled], signals: Mapping[str, FillSignal],
+) -> tuple[AuditedFill, ...]:
+    """Attach audited signal times to one run's grouped native executions."""
+    fills = merge_order_fills(events)
+    if {str(fill.order_id) for fill in fills} != signals.keys():
+        raise ValueError("Native fills and audited order IDs disagree")
+    audited = []
+    for fill in fills:
+        signal = signals[str(fill.order_id)]
+        if unix_nanos(signal.signal_ts) >= fill.fill_ts:
+            raise ValueError(f"Signal must precede the fill for order {fill.order_id}")
+        audited.append(AuditedFill(signal.signal_date, signal.signal_ts, signal.fill_date, fill))
+    return tuple(audited)
 
 
 def merge_order_fills(fills: Iterable[OrderFilled]) -> tuple[LogicalFill, ...]:

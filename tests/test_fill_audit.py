@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 import unittest
 
@@ -12,7 +13,8 @@ from nautilus_trader.model.objects import Money, Price, Quantity
 from nautilus_trader.trading.strategy import Strategy
 
 from fertile_finance.epoch import MAX_UNIX_NS
-from fertile_finance.fill_audit import merge_order_fills
+from fertile_finance.fill_audit import FillSignal, audit_logical_fills, merge_order_fills
+from fertile_finance.portfolio_backtest import _performance
 from fertile_finance.research_catalog import cash_equity
 
 
@@ -133,6 +135,21 @@ class FillAuditTests(unittest.TestCase):
             merge_order_fills([first, edit_fill(second, order_side="SELL")])
         with self.assertRaisesRegex(ValueError, "Inconsistent fill"):
             merge_order_fills([first, edit_fill(second, commission="0.00 EUR")])
+
+    def test_research_result_audit_and_turnover_use_one_native_logical_fill(self):
+        start, end = date(2024, 11, 25), date(2024, 11, 26)
+        closes = {start: SIGNAL_TS, end: FILL_TS}
+        for volume, expected in ((0, "10.0509"), (100, "10.0500")):
+            with self.subTest(volume=volume):
+                strategy, orders, cash, position = self.runs[volume]
+                signals = {str(orders[0].client_order_id): FillSignal(start, strategy.signal_ts, end)}
+                audit = audit_logical_fills(strategy.fills, signals)
+                (trade,) = audit
+                self.assertLess(trade.signal_ts, trade.fill_ts)
+                self.assertEqual(trade.fill.quantity, position)
+                equity = {start: STARTING_CASH, end: cash + position * Decimal("100.50")}
+                windows, _ = _performance(equity, closes, audit, None, carried_valuation_dates=set())
+                self.assertEqual(windows[-1]["metrics"]["turnover_pct"], expected)
 
     def test_fill_timestamp_obeys_epoch_range(self):
         first = self.runs[0][0].fills[0]

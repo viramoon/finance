@@ -101,6 +101,62 @@ read_fred(series_id: str, *, start=None, end=None) -> FredDaily
 
 经审核的 Yahoo 日线可以通过 `PortfolioAsset.from_yahoo` 供组合研究使用。`RiskFreeSeries.from_french` 接收日频 RF 与独立提供的准确发布时间。FRED 序列的单位及版本处理见 [历史数据与组合输入](../docs/portfolio-backtest.md#历史数据与组合输入)。
 
+## Catalog 回测入口
+
+```text
+fertile_finance.run_backtest(strategy, instruments, start, end, *, benchmark=None, costs=None,
+             rf="kenfrench", fill_timing="next_open", catalog=None, universe=...,
+             raw_split_free_reviewed=False, rf_available_ts=None)
+```
+
+- `instruments` 是一个或多个不同的 Yahoo catalog 标的 ID。可成交标的为 XNYS 美元股票或 ETF。`start`、`end` 是含边界的 `date` 或 ISO 日期字符串，至少覆盖两个 XNYS 会话。默认 `catalog=None` 按 `FERTILE_DATA_ROOT` 打开 `HistoricalCatalog`。调用方先核实供应商 OHLCV 的原始、未复权及无拆股归一化口径，再设置 `raw_split_free_reviewed=True`。
+- `universe` 是调用方提供的 `UniverseSnapshot` 序列。首个会话开盘前须已有成员表，后续按实际可得时点更新成员。`strategy` 接收 `TargetWeights` 序列，或接收 `SignalContext` 并返回 `{标的 ID: Decimal 权重}` 的函数。每次回调只有当期会话的 `date`、收盘 `signal_ts`、`members`、可用原始收盘价 `closes` 和 `equity`。缺少持仓估值时 `equity` 为 `None`。函数可自行保留先前回调的状态。目标权重在 0 到 1 之间且总和至多为 1。
+- `fill_timing` 默认 `next_open`，可选 `next_close`。收盘信号仅在下一 XNYS 会话执行，零量或缺少执行价的意图会记录在 `gaps`。初始现金为 `100000.00` USD。佣金和滑点为零，`costs` 接受 `None`、整数 `0` 或 `Decimal(0)`。非零成本会报错。
+- `rf="kenfrench"` 从 catalog 读取 French 日 RF，并要求 `rf_available_ts` 为按观测日期索引、已核实的 UTC 纳秒发布时间。较早的观测可通过在该映射中提供较早日期来纳入读取范围，读取到的每条非空 RF 都需要时间证据。组合引擎按每段收益的起始收盘对齐已知利率，缺少当时可得 RF 的窗口 Sharpe 为 `None`。也可传入已构造的 `RiskFreeSeries`，或用 `rf=None` 显式选择 `rf=0`。
+- `benchmark` 可传入独立的 Yahoo catalog ID，包括只用于比较的美元参考指数。基准按源收盘价序列计算价格收益，窗口内换手为零。基准报告使用其自身有效观测和相同的区间截止日与 RF 对齐规则。缺失的基准观测保留为缺口。
+
+`BacktestResult.metadata` 记录标的、请求区间、成交时点、初始现金、成本、RF 来源及频率和基准 ID。`nav` 按会话返回组合净值，`weights` 返回当日已持有头寸的收盘权重，现金为剩余权重。估值缺失的净值和权重为 `None`。`targets` 提供解析后的目标权重审计，`positions` 为期末持仓，`total_orders` 为实际订单数。
+
+`fill_audit` 中每条记录提供 `signal_date`、`signal_ts`、`fill_date`、`fill_ts` 和归并后的 `fill`，每笔均满足 `signal_ts < fill_ts`。换手使用每笔逻辑成交的精确名义金额除以信号日净值。原生零量分笔的回归使用同一套归并和换手计算，组合执行继续将零量交易意图记为缺口。`windows` 依次给出 50 年、10 年、5 年和最长样本，覆盖不足的行 `metrics` 为 `None`。`benchmark_nav` 和 `benchmark_windows` 独立呈现基准结果，省略基准时两者为 `None`。
+
+`result.analyze_factors(factors, as_of=..., regression=False)` 复用下方的相关工具，以相邻会话净值计算日收益。任一净值缺失的区间保留缺值。分析默认截在请求结束日，也可显式截在更早日期。
+
+### 离线最小示例
+
+从仓库根目录设置 `PYTHONPATH=python`，使用源码构建的 Python 运行以下合成 fixture。输入写入一个临时 catalog。
+
+```python
+from datetime import date
+from decimal import Decimal
+from tempfile import TemporaryDirectory
+
+from fertile_finance import run_backtest
+from fertile_finance.historical_catalog import HistoricalCatalog
+from fertile_finance.historical_types import DailyBar, EpochDiscard
+from fertile_finance.portfolio_backtest import UniverseSnapshot
+from fertile_finance.research_catalog import nyse, sessions
+from fertile_finance.yahoo_daily import YahooDaily
+
+start, end = date(2024, 11, 27), date(2024, 12, 2)
+symbol = "FIXTURE.XNYS"
+rows = tuple(
+    DailyBar(day, price, price, price, price, Decimal(1000), None, None, end)
+    for day, price in zip(sessions(start, end), map(Decimal, ("100", "101", "104")), strict=True)
+)
+opening = int(nyse().schedule.at[start.isoformat(), "open"].value)
+universe = (UniverseSnapshot(start, opening, (symbol,)),)
+
+with TemporaryDirectory() as directory:
+    catalog = HistoricalCatalog(directory)
+    catalog.write_yahoo(YahooDaily("FIXTURE", "stock", "USD", "XNYS", end, rows, (), (), EpochDiscard()))
+    result = run_backtest(
+        lambda context: {symbol: Decimal("0.50")}, [symbol], start, end,
+        catalog=catalog, universe=universe, raw_split_free_reviewed=True, rf=None,
+    )
+    print(result.metadata.fill_timing, result.nav)
+    print([(row["window"], row["coverage"]) for row in result.windows])
+```
+
 ## Ken French 日因子相关
 
 `fertile_finance.factor_analysis.analyze_factors(returns, factors, *, as_of=None, regression=False)` 接收一个日收益 `pandas.Series`，因子可以直接传入 `load_ken_french(...)` 或 `HistoricalCatalog.read_french(...)` 返回的 `FrenchDaily`。已归一化的内存数据也可以用 `pandas.DataFrame` 传入。Pandas 索引使用唯一的交易日标签，支持 ISO 日期字符串、`datetime.date` 或无时区的午夜时间戳。收益用小数表示，例如 1% 写作 `0.01`。DataFrame 至少包含 `Mkt-RF`、`SMB`、`HML`，存在 `Mom` 列时一起计算。对 `FrenchDaily`，只有分析日期区间内可用的因子行至少提供一个非空动量值时才纳入 `Mom`。相关与回归直接使用传入收益，如需以超额收益为因变量，请先按已对齐的 RF 计算后传入。
