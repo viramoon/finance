@@ -22,12 +22,12 @@ from nautilus_trader.model.instruments import Equity
 from nautilus_trader.model.objects import Price, Quantity
 from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 
-from .collector_store import DECIMAL, unix_nanos
+from .collector_store import DECIMAL
+from .epoch import EPOCH, require_bar_timestamps, unix_nanos
 
 
 ID = re.compile(r"[A-Z][A-Z0-9-]{0,15}\.XNYS")
 SOURCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._()/-]{0,119}")
-EPOCH = date(1970, 1, 1)
 LATEST = date(2100, 12, 31)
 CENT = Decimal("0.01")
 FIELDS = ["date", "open", "high", "low", "close", "volume"]
@@ -153,6 +153,7 @@ def import_catalog(root, csv_path, *, instrument, source, kind, asset_type):
         "observations": len(bars), "price_basis": "raw_unadjusted",
         "corporate_actions": "cash_dividends_excluded_split_free_reviewed",
     }
+    require_bar_timestamps(bars)
     # Readers only discover the final directory. Never replace a published dataset.
     with tempfile.TemporaryDirectory(prefix=".import-", dir=root) as work:
         staging = Path(work) / "dataset"

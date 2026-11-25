@@ -186,6 +186,7 @@ pub fn router(state: AppState) -> Router {
         research::ResearchReport,
         research::Metrics,
         research::Window,
+        research::WindowMetrics,
         research::Coverage,
         research::ExecutionAudit,
         research::Fill,

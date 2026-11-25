@@ -6,8 +6,9 @@ from datetime import date
 from decimal import Context, Decimal, ROUND_HALF_EVEN, localcontext
 from typing import ClassVar, Literal
 
+from .epoch import EPOCH, MAX_UNIX_NS, filter_pre_epoch
 
-EPOCH = date(1970, 1, 1)
+
 EpochPolicy = Literal["reject", "drop"]
 ADJUSTMENT_CONTEXT = Context(prec=34, rounding=ROUND_HALF_EVEN)
 
@@ -25,20 +26,28 @@ def guard_epoch[T](
     """Reject or count pre-epoch dates before conversion to Nautilus nanoseconds."""
     if policy not in {"reject", "drop"}:
         raise ValueError("pre_epoch must be 'reject' or 'drop'")
-    kept = []
-    count = 0
-    first = last = None
-    for row in rows:
+    pre_epoch_days: list[date] = []
+
+    def epoch_check_ns(row: T) -> int:
         day = date_of(row)
-        if day >= EPOCH:
-            kept.append(row)
-        elif policy == "reject":
-            raise ValueError(f"Pre-epoch observation {day} is before 1970-01-01; use pre_epoch='drop' to discard it")
-        else:
-            count += 1
-            first = day if first is None else min(first, day)
-            last = day if last is None else max(last, day)
-    return tuple(kept), EpochDiscard(count, first, last)
+        midnight_ns = (day - EPOCH).days * 86_400 * 10**9
+        if midnight_ns < 0:
+            pre_epoch_days.append(day)
+        # The adapter filters calendar dates. Clip this check value while retaining
+        # the exact source date. The writer validates actual storage timestamps.
+        return max(-MAX_UNIX_NS - 1, min(midnight_ns, MAX_UNIX_NS))
+
+    try:
+        kept, dropped = filter_pre_epoch(rows, timestamp=epoch_check_ns, mode=policy)
+    except ValueError as exc:
+        if policy == "reject" and pre_epoch_days:
+            raise ValueError(
+                f"Pre-epoch observation {pre_epoch_days[0]} is before 1970-01-01; use pre_epoch='drop' to discard it"
+            ) from exc
+        raise
+    return tuple(kept), EpochDiscard(
+        dropped.count, min(pre_epoch_days, default=None), max(pre_epoch_days, default=None),
+    )
 
 
 @dataclass(frozen=True)

@@ -14,12 +14,13 @@ from uuid import uuid4
 
 from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 
-from .collector_store import NS_PER_DAY, ensure_dir, fsync_dir, unix_nanos
+from .collector_store import NS_PER_DAY, ensure_dir, fsync_dir
+from .epoch import EPOCH, unix_nanos
 from .historical_records import (
     FredDailyObservation, KenFrenchDaily, YahooDividend, YahooIndexBar, YahooSourceBar, YahooSplit,
     daily_bar, dividend, encode_record, fred_observation, french_factor, split,
 )
-from .historical_types import DailyBar, Dividend, EPOCH, EpochDiscard, Split, guard_epoch
+from .historical_types import DailyBar, Dividend, EpochDiscard, Split, guard_epoch
 from .research_catalog import sessions
 from .research_factors import FRED_SERIES_ID, FredDaily, FrenchDaily
 from .yahoo_daily import YahooDaily

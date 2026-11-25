@@ -34,6 +34,16 @@ pub struct Metrics {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct WindowMetrics {
+    pub return_pct: String,
+    pub max_drawdown_pct: String,
+    pub cagr_pct: Option<String>,
+    pub sharpe: Option<String>,
+    pub volatility_pct: Option<String>,
+    pub turnover_pct: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Coverage {
     Full,
@@ -42,18 +52,126 @@ pub enum Coverage {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct Window {
-    pub requested_years: u8,
-    pub requested_start: NaiveDate,
+    /// Window identifier (50y, 10y, 5y, longest_sample).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub requested_years: Option<u8>,
+    pub requested_start: Option<NaiveDate>,
     pub actual_start: Option<NaiveDate>,
     pub actual_end: Option<NaiveDate>,
     pub actual_years: Option<String>,
     /// First supported date counted in the calendar totals.
-    pub calendar_start: NaiveDate,
-    pub expected_sessions: u32,
-    pub missing_sessions: u32,
+    pub calendar_start: Option<NaiveDate>,
+    /// Upper date bound used for the calendar totals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calendar_end: Option<NaiveDate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observations: Option<u32>,
+    pub expected_sessions: Option<u32>,
+    pub missing_sessions: Option<u32>,
     pub missing_pct: Option<String>,
     pub coverage: Coverage,
-    pub metrics: Option<Metrics>,
+    /// Reason reported when the calendar cannot cover the requested dates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage_reason: Option<String>,
+    /// Calendar name, attempted dates, and construction error when unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calendar_diagnostic: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rf_source: Option<String>,
+    pub metrics: Option<WindowMetrics>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Window;
+    use serde_json::{Value, from_value, json, to_value};
+
+    #[test]
+    fn window_json_supports_existing_jobs_and_new_decimal_metrics() {
+        let previous = json!({
+            "requested_years": 50,
+            "requested_start": "1976-11-20",
+            "actual_start": "2026-11-18",
+            "actual_end": "2026-11-20",
+            "actual_years": "0.0055",
+            "calendar_start": "1976-11-20",
+            "expected_sessions": 12604,
+            "missing_sessions": 12601,
+            "missing_pct": "99.9762",
+            "coverage": "insufficient",
+            "metrics": null
+        });
+        let legacy: Window = from_value(previous.clone()).unwrap();
+        assert_eq!(to_value(legacy).unwrap(), previous);
+
+        let mut longest = previous;
+        longest["window"] = json!("longest_sample");
+        longest["label"] = json!("longest_sample");
+        longest["requested_years"] = Value::Null;
+        longest["requested_start"] = json!("2026-11-18");
+        longest["calendar_start"] = json!("2026-11-18");
+        longest["observations"] = json!(3);
+        longest["expected_sessions"] = json!(3);
+        longest["missing_sessions"] = json!(0);
+        longest["missing_pct"] = json!("0.0000");
+        longest["coverage"] = json!("full");
+        longest["rf_source"] = json!("rf=0");
+        longest["metrics"] = json!({
+            "return_pct": "1.2345",
+            "max_drawdown_pct": "0.0000",
+            "cagr_pct": "12.3456",
+            "sharpe": "1.0000",
+            "volatility_pct": "4.4321",
+            "turnover_pct": null
+        });
+        let current: Window = from_value(longest.clone()).unwrap();
+        assert_eq!(to_value(current).unwrap(), longest);
+    }
+
+    #[test]
+    fn window_json_preserves_partial_calendar_bounds() {
+        let report = json!({
+            "requested_start": "1974-06-05",
+            "calendar_start": "1990-12-03",
+            "calendar_end": "2024-06-05",
+            "expected_sessions": 8200,
+            "missing_sessions": 5700,
+            "coverage": "insufficient",
+            "coverage_reason": "calendar_out_of_range",
+            "metrics": null
+        });
+        let data: Window = from_value(report).unwrap();
+        let serialized = to_value(data).unwrap();
+        assert_eq!(serialized["calendar_start"], "1990-12-03");
+        assert_eq!(serialized["calendar_end"], "2024-06-05");
+        assert_eq!(serialized["coverage_reason"], "calendar_out_of_range");
+        assert_eq!(serialized["metrics"], Value::Null);
+    }
+
+    #[test]
+    fn window_json_preserves_unavailable_calendar_diagnostic_and_unknown_counts() {
+        let report = json!({
+            "window": "50y",
+            "calendar_diagnostic": "XTAE 1976-01-16 to 2026-01-16: ValueError: Special dates are not sessions.",
+            "coverage_reason": "calendar_unavailable",
+            "coverage": "insufficient",
+            "expected_sessions": null,
+            "missing_sessions": null
+        });
+        let data: Window = from_value(report.clone()).unwrap();
+        let serialized = to_value(data).unwrap();
+        assert_eq!(
+            serialized["calendar_diagnostic"],
+            report["calendar_diagnostic"]
+        );
+        assert_eq!(serialized["coverage_reason"], "calendar_unavailable");
+        assert_eq!(serialized["expected_sessions"], Value::Null);
+        assert_eq!(serialized["missing_sessions"], Value::Null);
+        assert_eq!(serialized["metrics"], Value::Null);
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]

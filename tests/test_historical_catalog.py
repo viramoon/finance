@@ -14,7 +14,7 @@ from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 from fertile_finance.backtest_research import run_research
 from fertile_finance.historical_catalog import HistoricalCatalog
 from fertile_finance.historical_records import FredDailyObservation, YahooIndexBar, YahooSourceBar
-from fertile_finance.historical_types import EpochDiscard
+from fertile_finance.historical_types import EpochDiscard, guard_epoch
 from fertile_finance.research_catalog import ResearchError
 from fertile_finance.research_factors import load_fred, load_ken_french
 from fertile_finance.yahoo_daily import load_yahoo_daily
@@ -181,6 +181,16 @@ class HistoricalCatalogTests(unittest.TestCase):
                 params=dict(fast_period=2, slow_period=3, shares=1),
             ))
         self.assertEqual(rejected.exception.code, "invalid_instrument")
+
+    def test_date_guard_keeps_exact_bounds_outside_nanosecond_range(self):
+        pre_epoch = date(1600, 1, 1)
+        epoch = date(1970, 1, 1)
+        dates = (pre_epoch, date.max, date.min, epoch)
+        with self.assertRaisesRegex(ValueError, "Pre-epoch observation 1600-01-01"):
+            guard_epoch(dates, date_of=lambda day: day, policy="reject")
+        kept, discarded = guard_epoch(dates, date_of=lambda day: day, policy="drop")
+        self.assertEqual(kept, (date.max, epoch))
+        self.assertEqual(discarded, EpochDiscard(2, date.min, pre_epoch))
 
     def test_epoch_guard_reports_only_rows_really_written(self):
         with self.assertRaisesRegex(ValueError, "Pre-epoch observation 1969-12-31"):

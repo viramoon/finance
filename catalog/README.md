@@ -12,6 +12,8 @@ writer 是通过 finance 构建入口安装的 Nautilus Python 包及其原生�
 
 在 finance 仓库根目录完成 bash scripts/build.sh 与 cargo build --locked -p finance-collector，加载盒子的 env.sh。示例使用默认 127.0.0.1:8082、数据根 /home/box/fertile/data。FINANCE_BUILD_ROOT 指向包含 venv 的编译目录，也可用 FINANCE_PYTHON 显式指定源码 wheel 对应解释器。
 
+collector 从仓库根按脚本路径启动 `python/fertile_finance/collector_store.py`。writer 从自身路径找到项目包，无需设置 `PYTHONPATH`，并和模块调用共用 Unix epoch 校验。
+
 ```sh
 cargo run --locked -p finance-collector
 curl -sS http://127.0.0.1:8082/healthz/live
@@ -36,6 +38,12 @@ FINANCE_COLLECTOR_BIN="${CARGO_TARGET_DIR:-target}/debug/finance-collector" "$FI
 
 故障测试启动真实子进程，使用独立临时目录和可加速的有限 CSV 回放。它在非空缓冲时发送 TERM，之后用 KILL 中断和重启，再等数据陈旧，验证 ready 从 200 转 503。最后使用 Python ParquetDataCatalog.bars() 核对每个预期时间戳及高精度价格。跨日分组、排他锁、迟到重复数据和水位替换失败后恢复另由 test_collector_store.py 覆盖。
 
+## 官方回测与时间边界
+
+官方回测导入器把经许可并审核的 NYSE 股票或 ETF 原始日线写入独立、不可变的 [研究 catalog 快照](../docs/historical-backtest.md)。日线时间戳使用交易所会话收盘，导入拒绝负数纳秒、预 epoch 日线、重复日和非交易会话。1970-01-01T00:00:00Z 与之后的有效纳秒可通过底层时间范围校验。
+
+应用端应在构造 Bar 或调用 wrangler 之前检查有符号时间戳。显式丢弃模式返回条数及最早、最晚被丢弃时间，接口见 [Python 研究与分析](../python/README.md#unix-epoch-边界)。系统从首根被接受的 bar 起计算最长可用行情区间，官方作业从 warmup 后的第一条净值起算绩效。`^GSPC` 始于 1927 年的 98.89 年原始历史不能作为已回测覆盖，SPY 约 33.81 年的数据也不能称作 50 年回报。满窗最多允许起始边界缺五个交易日，窗口内部及末端应完整。详见 [日线窗口](../python/README.md#日线窗口)。
+
 ## 公开历史数据
 
 `HistoricalCatalog` 使用 `data_root/catalog/historical`。`data_root` 可由调用方传入，也可用 `FERTILE_DATA_ROOT` 配置，默认是 `/home/box/fertile/data`。Yahoo 按序列 ID 分区，Ken French 使用固定分区 `daily`，FRED 按 series ID 分区。各分区的 `current` 指向当前版本，目录结构如下。
@@ -51,9 +59,9 @@ catalog/historical/fred/DGS10/current
 
 - `append` 在传入区间与当前序列覆盖首尾相交时抛错，含边界重叠。计算原覆盖范围时同时计入主记录和事件日期，因此范围内缺少记录的日期仍计入覆盖。
 - `replace` 重写指定的闭区间。区间外原有记录保留，区间内原有的观察值与事件按日期整体替换。传入记录须在指定范围内。省略边界时使用传入主记录和事件共同覆盖的首尾，详细签名见 [Python 研究接口](../python/README.md)。
-- 导入默认拒绝早于 1970-01-01 的样本。调用方可显式指定 `pre_epoch="drop"`，并使用报告的 `dropped_pre_epoch` 查看丢弃数及丢弃区间。`WriteReport.first` 和 `last` 报告此次实际写入主记录的首尾，区间含两端。没有主记录的输入无法提交。
+- Yahoo、Ken French 和 FRED 加载器共用 [Unix epoch 校验](../python/README.md#unix-epoch-边界)，默认 `pre_epoch="reject"`，拒绝早于 1970-01-01 的样本。调用方可显式指定 `pre_epoch="drop"`，查看 `dropped_pre_epoch` 的 `count`、`first`、`last`，分别对应丢弃数、最早和最晚日期。`WriteReport.first` 和 `last` 报告此次实际写入主记录的首尾，区间含两端。没有主记录的输入无法提交。
 
-经许可并审核的 NYSE 股票或 ETF 由 [官方历史回测导入器](../docs/historical-backtest.md) 生成独立的不可变快照。公开历史数据分区供研究读取，`HistoricalCatalog` 不注册可下单工具。Yahoo 股票和 ETF 使用权益序列 ID，指数 `^GSPC` 对应参考序列 `GSPC.INDEX`。`SPY` 是独立标的，有自己的价格与公司行为。官方 `SmaCrossover` 作业继续使用经审核的历史回测快照和原有准入条件。
+公开历史数据分区供研究读取，`HistoricalCatalog` 不注册可下单工具。Yahoo 股票和 ETF 使用权益序列 ID，指数 `^GSPC` 对应参考序列 `GSPC.INDEX`。`SPY` 是独立标的，有自己的价格与公司行为。官方 `SmaCrossover` 作业继续使用上文经审核的历史回测快照和原有准入条件。
 
 ### 日线时间戳
 
