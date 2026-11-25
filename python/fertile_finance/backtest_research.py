@@ -2,8 +2,9 @@
 
 from collections import Counter, deque
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING
+from itertools import pairwise
 
 from nautilus_trader.backtest.engine import BacktestEngine
 from nautilus_trader.backtest.models import FixedFeeModel
@@ -16,7 +17,8 @@ from nautilus_trader.trading.strategy import Strategy
 
 from .backtest_sample import timestamp
 from .epoch import require_bar_timestamps, unix_nanos
-from .research_catalog import CENT, ResearchError, iso_date, load_interval, sessions
+from .research_catalog import CENT, ResearchError, iso_date, load_interval
+from .research_windows import coverage_windows as daily_coverage_windows, metrics
 
 
 STRATEGY = "SmaCrossover"
@@ -24,61 +26,11 @@ STARTING_CASH = Decimal("100000.00")
 COMMISSION = Decimal("1.00")
 SLIPPAGE_BPS = 5
 RF = Decimal(0)
-WINDOW_YEARS = (50, 10, 5)
-
-
-def percent(value):
-    return format(value * 100, ".4f")
-
-
-def metrics(equity):
-    if len(equity) < 2:
-        return None
-    values = [equity[day] for day in sorted(equity)]
-    high = values[0]
-    drawdown = Decimal(0)
-    for value in values:
-        high = max(high, value)
-        drawdown = max(drawdown, 1 - value / high)
-    return {
-        "return_pct": percent(values[-1] / values[0] - 1),
-        "max_drawdown_pct": percent(drawdown),
-    }
-
-
-def years_before(day, years):
-    try:
-        return day.replace(year=day.year - years)
-    except ValueError:
-        return day.replace(year=day.year - years, day=28)
 
 
 def coverage_windows(equity, end):
-    output = []
-    for years in WINDOW_YEARS:
-        start = years_before(end, years)
-        # Only post-epoch observations can be used. Keep the original requested date
-        # and mark any unsupported part of the calendar insufficient.
-        calendar_start = max(date(1970, 1, 1), start)
-        expected = list(sessions(calendar_start, end))
-        window = {day: equity[day] for day in expected if day in equity}
-        first = min(window, default=None)
-        last = max(window, default=None)
-        missing = [day for day in expected if day not in window]
-        full = (start == calendar_start and len(window) >= 2 and len(missing) <= 5
-                and all(day < first for day in missing))
-        elapsed = Decimal((last - first).days) / Decimal("365.2425") if first else Decimal(0)
-        output.append({
-            "requested_years": years, "requested_start": str(start),
-            "actual_start": str(first) if first else None, "actual_end": str(last) if last else None,
-            "actual_years": format(elapsed, ".4f") if first else None,
-            "calendar_start": str(calendar_start), "expected_sessions": len(expected),
-            "missing_sessions": len(missing),
-            "missing_pct": percent(Decimal(len(missing)) / len(expected)) if expected else None,
-            "coverage": "full" if full else "insufficient",
-            "metrics": metrics(window) if full else None,
-        })
-    return output
+    """Compatibility entry point for callers expecting the three fixed windows."""
+    return daily_coverage_windows(equity, end)[:3]
 
 
 def design_price(close, side):
@@ -111,6 +63,7 @@ class DailySma(Strategy):
         self.shares_held = 0
         self.cash = STARTING_CASH
         self.equity = {}
+        self.traded_notional = {}
         self.orders = {}
         self.fill_ids = set()
         self.recent_fills = deque(maxlen=20)
@@ -189,6 +142,7 @@ class DailySma(Strategy):
         plan.filled = int(quantity)
         change = plan.filled if plan.side == OrderSide.BUY else -plan.filled
         self.shares_held += change
+        self.traded_notional[self.days[event.ts_event]] = quantity * price
         self.cash -= change * price + fee
         if self.cash < 0 or self.shares_held not in (0, self.shares):
             raise ResearchError("execution_audit_failed", "Simulated position or cash is inconsistent")
@@ -267,6 +221,10 @@ def run_research(root, request):
     result, strategy = simulate(instrument, bars, days, fast, slow, shares)
     ending_equity = strategy.equity[days[bars[-1].ts_event]]
     actual_start, actual_end = days[bars[0].ts_event], days[bars[-1].ts_event]
+    turnover = {
+        day: strategy.traded_notional.get(day, Decimal(0)) / strategy.equity[prior]
+        for prior, day in pairwise(sorted(strategy.equity))
+    }
     report = {
         "dataset": metadata, "requested_start": str(start), "requested_end": str(end),
         "actual_start": str(actual_start), "actual_end": str(actual_end), "observations": len(bars),
@@ -274,7 +232,8 @@ def run_research(root, request):
         "initial_equity": format(STARTING_CASH, ".2f"), "ending_equity": format(ending_equity, ".2f"),
         "commission_per_order": format(COMMISSION, ".2f"), "slippage_bps": SLIPPAGE_BPS,
         "risk_free_rate": str(RF), "execution": "signal_at_close_next_session_close",
-        "metrics": metrics(strategy.equity), "windows": coverage_windows(strategy.equity, actual_end),
+        "metrics": metrics(strategy.equity),
+        "windows": daily_coverage_windows(strategy.equity, actual_end, turnover=turnover),
         "audit": {
             "fills": len(strategy.fill_ids), "zero_volume_bars": strategy.audit["zero_volume_bars"],
             "blocked_zero_volume": strategy.audit["zero_volume"],

@@ -39,3 +39,5 @@ FINANCE_COLLECTOR_BIN="${CARGO_TARGET_DIR:-target}/debug/finance-collector" "$FI
 ## 研究日线
 
 经审核的原始日线用独立 [研究 catalog](../docs/historical-backtest.md) 导入。导入从交易日历生成时间戳，拒绝负数纳秒、预 epoch 日线、重复日和非交易会话。1970-01-01T00:00:00Z 与之后的有效纳秒可通过底层存储校验。NYSE 日线还必须落在官方交易日收盘。
+
+应用端应在构造 Bar 或调用 wrangler 之前检查有符号时间戳。显式丢弃模式返回条数及最早、最晚被丢弃时间，接口见 [Python 研究与分析](../python/README.md#unix-epoch-边界)。系统无法使用预 1970 历史，最长可用区间从首根被接受的 bar 起算。^GSPC 始于 1927 年的 98.89 年原始历史不能作为已回测覆盖，SPY 约 33.81 年的数据也不能称作 50 年回报。满窗最多允许起始边界缺五个交易日，窗口内部及末端应完整。详见 [日线窗口](../python/README.md#日线窗口)。

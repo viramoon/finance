@@ -61,4 +61,8 @@ utoipa 从 handler 注解和实际响应类型导出，不需要数据目录、�
 
 GET /api/v1/backtests/datasets 返回具名日线 catalog 的可选标的、来源和日期范围。POST /api/v1/backtests 接受 `SmaCrossover`、一个已导入的 `instrument`、UTC 午夜的 `start` / `end`，以及整数 `fast_period`、`slow_period`、`shares`。要求 `2 ≤ fast_period < slow_period ≤ 250` 与 `1 ≤ shares ≤ 1000`。研究结果的 `research` 字段含数据血缘、执行模型、覆盖与成交审计。无匹配 catalog 的新请求返回 422。缺失会话或 warmup 不够的作业进入失败终态，错误码为 `missing_sessions` 或 `insufficient_history`。不替换为示例数据。
 
+新成功作业的 `summary.research.windows` 依序返回四行，`window` 为 `50y`、`10y`、`5y` 或 `longest_sample`。使用 `label` 展示覆盖不足的固定窗口，例如 `50y (insufficient)`。每行包含 `requested_years`、`requested_start`、`actual_start`、`actual_end`、`actual_years`、`calendar_start`、`observations`、`expected_sessions`、`missing_sessions`、`missing_pct`、`coverage` 和 `rf_source`。最长样本行的 `requested_years` 为 `null`。日期采用 `YYYY-MM-DD`，实际跨度及比例使用十进制字符串，数量为整数。
+
+`coverage=insufficient` 时 `metrics` 为 `null`。满窗的 `metrics` 包含 `return_pct`、`cagr_pct`、`max_drawdown_pct`、`volatility_pct`、`turnover_pct` 和无量纲的 `sharpe`，计算值为十进制字符串，无法计算的单项为 `null`。当前作业标记 `rf_source="rf=0"`。已有的成功摘要仍可读取，可能只有三个固定窗口及原有字段。判定和计算口径见 [日线窗口](../python/README.md#日线窗口)。
+
 GET /api/v1/backtests/by-key 使用提交时的同一 `Idempotency-Key` 请求头。存在时返回原作业 ID，不存在时返回 404。经 web 查询时也使用提交凭据。详情继续用 GET /api/v1/backtests/{id}。回测条件和风险边界见 [历史回测](historical-backtest.md)。
