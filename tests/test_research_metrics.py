@@ -2,7 +2,7 @@ from datetime import date
 from decimal import Decimal, localcontext
 import unittest
 
-from fertile_finance.research_metrics import RiskFreeRate, RiskFreeSeries, excess_returns, sharpe_ratio
+from fertile_finance.research_metrics import RiskFreeRate, RiskFreeSeries, daily_risk_free, excess_returns, sharpe_ratio
 
 
 def close_ts(day):
@@ -50,6 +50,16 @@ class ResearchMetrics(unittest.TestCase):
             annual = Decimal("1.001") ** 252 - 1
         rf = RiskFreeSeries("Synthetic annual RF", "annual", (RiskFreeRate(first, ts, annual),))
         self.assertEqual(excess_returns(self.equity, rf), tuple(map(Decimal, ("0.099", "-0.101", "-0.001"))))
+
+    def test_daily_risk_free_aligns_to_return_end_across_holiday(self):
+        wed, fri, mon, tue = (date(2024, 11, 27), date(2024, 11, 29), date(2024, 12, 2), date(2024, 12, 3))
+        early_close = close_ts(fri) - 3 * 3_600_000_000_000
+        closes = {tue: close_ts(tue), mon: close_ts(mon), fri: early_close, wed: close_ts(wed)}
+        rf = RiskFreeSeries("Synthetic daily RF", "daily", (
+            RiskFreeRate(wed, early_close + 1, Decimal("0.02")),
+            RiskFreeRate(wed, close_ts(wed) + 1, Decimal("0.01")),
+        ))
+        self.assertEqual(daily_risk_free(closes, rf), {mon: Decimal("0.01"), tue: Decimal("0.02")})
 
     def test_valuation_gaps_and_degenerate_sharpe_remain_unavailable(self):
         day, ts, _ = self.equity[1]

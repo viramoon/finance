@@ -19,7 +19,7 @@ finance-backtest-worker 使用已锁定源码环境，通过独立 Python 子进
 
 ### 日线窗口
 
-`fertile_finance.research_windows.coverage_windows(equity, end=None, *, calendar="XNYS", rf=None, rf_source=None, turnover=None)` 接收以交易会话日期为键、正的有限 `Decimal` 为值的日终净值，按顺序返回 `50y`、`10y`、`5y` 和 `longest_sample`。前三行从最后一个观测日期按日历年回推，闰日目标年无 2 月 29 日时使用 2 月 28 日。可显式指定 `end` 作为固定窗口统计截止日。最长样本行覆盖截止日前（含）第一至最后一条可用观测，`requested_years` 为 `null`，`requested_start` 为第一条观测日期。`calendar` 使用 exchange-calendars 注册名或别名，未注册的名称会报 `InvalidCalendarName`。
+`fertile_finance.research_windows.coverage_windows(equity, end=None, *, calendar="XNYS", rf=None, rf_source=None, turnover=None, longest_through_end=False)` 接收以交易会话日期为键、正的有限 `Decimal` 为值的日终净值，按顺序返回 `50y`、`10y`、`5y` 和 `longest_sample`。前三行从最后一个观测日期按日历年回推，闰日目标年无 2 月 29 日时使用 2 月 28 日。可显式指定 `end` 作为固定窗口统计截止日。最长样本行默认覆盖截止日前（含）第一至最后一条可用观测，`requested_years` 为 `null`，`requested_start` 为第一条观测日期。`longest_through_end=True` 将最长样本的日历截止日延伸到 `end`，最后一条有效观测之后的缺失会话也计入覆盖。`calendar` 使用 exchange-calendars 注册名或别名，未注册的名称会报 `InvalidCalendarName`。
 
 行内 `window` 是稳定键，展示使用 `label`，例如 `50y (insufficient)`。覆盖字段包括 `requested_start`、`actual_start`、`actual_end`、`actual_years`、`observations`、`calendar_start`、`calendar_end`、`expected_sessions`、`missing_sessions` 和 `missing_pct`。实际跨度为首尾相差天数除以 365.2425，单位为年。固定窗口请求起点早于 epoch 时保留原日期，仅统计 epoch 当日及之后的可用交易日，覆盖标记为 `insufficient`。其余窗口仅在起始边界至首条观测之前最多缺五个交易日、内部及末端无缺失且至少两条观测时标记 `full`。周末、休市日按交易所日历处理。覆盖判定不使用跨度百分比、不填补观测。
 
@@ -38,4 +38,4 @@ finance-backtest-worker 使用已锁定源码环境，通过独立 Python 子进
 
 ## 多标的研究
 
-`fertile_finance.portfolio_backtest.run_portfolio_backtest` 在一个 Nautilus 引擎中运行 XNYS 权益组合，支持目标权重、横截面排序、逐会话净值和成交审计。该 Python 入口把 Nautilus 已有的多标的能力封装成可复用的研究工具。输入契约、执行时点、估值缺口和无风险利率口径见 [多标的组合回测](../docs/portfolio-backtest.md)。HTTP 作业继续运行已注册的策略，`SmaCrossover` 的数据与执行合同见 [历史回测](../docs/historical-backtest.md)。
+`fertile_finance.portfolio_backtest.run_portfolio_backtest` 在一个 Nautilus 引擎中运行 XNYS 权益组合，支持目标权重、横截面排序、逐会话净值和成交审计。`result.windows` 使用上方统一的四行合同，最长样本覆盖检查使用请求截止日。该 Python 入口把 Nautilus 已有的多标的能力封装成可复用的研究工具。输入契约、执行时点、估值缺口和无风险利率口径见 [多标的组合回测](../docs/portfolio-backtest.md)。HTTP 作业继续运行已注册的策略，`SmaCrossover` 的数据与执行合同见 [历史回测](../docs/historical-backtest.md)。

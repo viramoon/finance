@@ -1,6 +1,8 @@
 from dataclasses import replace
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
+from itertools import pairwise
+from statistics import stdev
 import unittest
 
 from nautilus_trader.model.data import Bar
@@ -98,8 +100,11 @@ class PortfolioBacktestTests(unittest.TestCase):
         self.assertEqual(result.equity[self.start], PortfolioConfig().initial_cash)
         self.assertTrue(all(isinstance(value, Decimal) for value in result.equity.values()))
         self.assertNotEqual(result.equity[self.end], result.equity[self.start])
-        self.assertEqual([row["requested_years"] for row in result.windows], [50, 10, 5])
-        for row in result.windows:
+        self.assertEqual([row["window"] for row in result.windows], ["50y", "10y", "5y", "longest_sample"])
+        self.assertEqual([row["requested_years"] for row in result.windows], [50, 10, 5, None])
+        self.assertEqual([row["rf_source"] for row in result.windows], ["rf=0"] * 4)
+        self.assertIs(result.longest_sample, result.windows[-1])
+        for row in result.windows[:3]:
             self.assertEqual(row["coverage"], "insufficient")
             self.assertIsNone(row["metrics"])
             self.assertEqual(row["actual_start"], self.start.isoformat())
@@ -122,8 +127,11 @@ class PortfolioBacktestTests(unittest.TestCase):
         self.assertEqual(tuple(day for day, value in result.equity.items() if value is not None),
                          (first_bar, end))
         self.assertEqual({fill.instrument_id for fill in result.fills}, {A})
-        self.assertEqual([row["requested_years"] for row in result.windows], [50, 10, 5])
-        for row in result.windows:
+        self.assertEqual([row["window"] for row in result.windows], ["50y", "10y", "5y", "longest_sample"])
+        self.assertEqual([row["requested_years"] for row in result.windows], [50, 10, 5, None])
+        self.assertEqual([row["rf_source"] for row in result.windows], ["rf=0"] * 4)
+        self.assertIs(result.longest_sample, result.windows[-1])
+        for row in result.windows[:3]:
             self.assertEqual(row["coverage"], "insufficient")
             self.assertEqual(row["observations"], 2)
             self.assertEqual(row["missing_sessions"], row["expected_sessions"] - 2)
@@ -178,7 +186,9 @@ class PortfolioBacktestTests(unittest.TestCase):
         self.assertEqual(default.equity, supplied.equity)
         self.assertEqual(default.risk_free, {"source": "rf=0", "basis": "daily"})
         self.assertEqual(supplied.risk_free, {"source": rf.source, "basis": rf.basis})
-        self.assertEqual([row["coverage"] for row in supplied.windows], ["insufficient", "insufficient", "full"])
+        self.assertEqual([row["coverage"] for row in supplied.windows],
+                         ["insufficient", "insufficient", "full", "full"])
+        self.assertEqual([row["rf_source"] for row in supplied.windows], [rf.source] * 4)
         self.assertEqual([row["metrics"] for row in supplied.windows[:2]], [None, None])
         for base, with_rate in ((default.longest_sample, supplied.longest_sample),
                                 (default.windows[2], supplied.windows[2])):
@@ -186,13 +196,61 @@ class PortfolioBacktestTests(unittest.TestCase):
                 window_start = date.fromisoformat(with_rate["actual_start"])
                 rows = [(day, ts, supplied.equity[day]) for day, ts in closes.items() if day >= window_start]
                 self.assertEqual(with_rate["observations"], len(rows))
-                self.assertEqual(with_rate["risk_free"], supplied.risk_free)
-                self.assertEqual(base["risk_free"], default.risk_free)
-                self.assertEqual(base["metrics"]["sharpe"], sharpe_ratio(excess_returns(rows)))
-                self.assertEqual(with_rate["metrics"]["sharpe"], sharpe_ratio(excess_returns(rows, rf)))
+                self.assertEqual(with_rate["rf_source"], rf.source)
+                self.assertEqual(base["rf_source"], "rf=0")
+                self.assertEqual(base["metrics"]["sharpe"], format(sharpe_ratio(excess_returns(rows)), ".4f"))
+                self.assertEqual(with_rate["metrics"]["sharpe"], format(sharpe_ratio(excess_returns(rows, rf)), ".4f"))
                 self.assertNotEqual(base["metrics"]["sharpe"], with_rate["metrics"]["sharpe"])
-                self.assertIsInstance(with_rate["metrics"]["turnover"], Decimal)
-                self.assertGreater(with_rate["metrics"]["turnover"], 0)
+
+                with localcontext(prec=45):
+                    values = [value for _, _, value in rows]
+                    first, last = values[0], values[-1]
+                    total_return = (last / first - 1) * 100
+                    peak = first
+                    drawdown = Decimal(0)
+                    for value in values:
+                        peak = max(peak, value)
+                        drawdown = max(drawdown, (1 - value / peak) * 100)
+                    elapsed_days = Decimal((rows[-1][0] - window_start).days)
+                    cagr = ((last / first) ** (Decimal("365.2425") / elapsed_days) - 1) * 100
+                    returns = [right[2] / left[2] - 1 for left, right in pairwise(rows)]
+                    volatility = stdev(returns) * Decimal(252).sqrt() * 100
+                    turnover = sum(
+                        (fill.quantity * fill.price / supplied.equity[fill.signal_date]
+                         for fill in supplied.fills if fill.fill_date > window_start), Decimal(0),
+                    ) * 100
+                self.assertEqual(with_rate["metrics"]["return_pct"], format(total_return, ".4f"))
+                self.assertEqual(with_rate["metrics"]["max_drawdown_pct"], format(drawdown, ".4f"))
+                self.assertEqual(with_rate["metrics"]["cagr_pct"], format(cagr, ".4f"))
+                self.assertEqual(with_rate["metrics"]["volatility_pct"], format(volatility, ".4f"))
+                self.assertEqual(with_rate["metrics"]["turnover_pct"], format(turnover, ".4f"))
+                self.assertGreater(turnover, 0)
+
+    def test_window_rf_alignment_respects_late_releases_and_revisions(self):
+        first, second, third, fourth, fifth, _, _ = self.days
+        initial = RiskFreeRate(first, self.closes[first], Decimal("0.01"))
+        revision = RiskFreeRate(first, self.closes[second] + 1, Decimal("0.03"))
+        newer = RiskFreeRate(third, self.closes[fourth] + 1, Decimal("0.02"))
+        superseded = RiskFreeRate(first, self.closes[fifth] + 1, Decimal("0.20"))
+        rf = RiskFreeSeries("Revision fixture", "daily", (newer, superseded, initial, revision))
+        result = self.run_targets(rf=rf)
+        row = result.windows[-1]
+        self.assertEqual((row["window"], row["coverage"], row["rf_source"]),
+                         ("longest_sample", "full", rf.source))
+        expected_rates = tuple(map(Decimal, ("0.01", "0.01", "0.03", "0.03", "0.02", "0.02")))
+        values = tuple(result.equity.values())
+        with localcontext(prec=45):
+            excess = tuple(right / left - 1 - rate
+                           for (left, right), rate in zip(pairwise(values), expected_rates, strict=True))
+        self.assertEqual(row["metrics"]["sharpe"], format(sharpe_ratio(excess), ".4f"))
+
+        late = RiskFreeSeries("Late release fixture", "daily", (newer, superseded, revision))
+        late_result = self.run_targets(rf=late)
+        late_row = late_result.windows[-1]
+        self.assertEqual(late_result.equity, result.equity)
+        self.assertEqual((late_row["coverage"], late_row["rf_source"]), ("full", late.source))
+        self.assertIsNone(late_row["metrics"]["sharpe"])
+        self.assertEqual(late_row["metrics"]["cagr_pct"], row["metrics"]["cagr_pct"])
 
     def test_fills_use_next_session_open_or_close_after_the_signal(self):
         # Thanksgiving intervenes and Friday closes early.
@@ -285,6 +343,7 @@ class PortfolioBacktestTests(unittest.TestCase):
         self.assertEqual(blocked.total_orders, 0)
         self.assertFalse(blocked.fills)
         self.assertEqual(set(blocked.equity.values()), {PortfolioConfig().initial_cash})
+        self.assertEqual(blocked.longest_sample["metrics"]["turnover_pct"], "0.0000")
 
     def test_equal_weight_thirds_buy_one_share_per_instrument(self):
         symbols = (A, B, C)
@@ -433,6 +492,28 @@ class PortfolioBacktestTests(unittest.TestCase):
                 self.assertEqual(row["coverage"], "insufficient")
                 self.assertEqual(row["missing_sessions"], 1)
                 self.assertEqual(row["observations"], len(closes) - 1)
+                self.assertIsNone(row["metrics"])
+
+    def test_trailing_missing_close_is_reported_in_longest_window_even_with_padding(self):
+        alpha = self.assets[A]
+        sparse = replace(alpha, bars=alpha.bars[:-1])
+        for fill_missing in (False, True):
+            with self.subTest(fill_missing=fill_missing):
+                result = self.run_targets(assets=(sparse, self.assets[B]),
+                                          config=PortfolioConfig(fill_missing=fill_missing))
+                self.assertGreater(result.positions[A], 0)
+                if fill_missing:
+                    self.assertIsNotNone(result.equity[self.end])
+                else:
+                    self.assertIsNone(result.equity[self.end])
+                row = result.windows[-1]
+                self.assertEqual(row["window"], "longest_sample")
+                self.assertEqual(row["actual_end"], self.days[-2].isoformat())
+                self.assertEqual(row["calendar_end"], self.end.isoformat())
+                self.assertEqual(row["expected_sessions"], len(self.days))
+                self.assertEqual(row["observations"], len(self.days) - 1)
+                self.assertEqual(row["missing_sessions"], 1)
+                self.assertEqual(row["coverage"], "insufficient")
                 self.assertIsNone(row["metrics"])
 
     def test_missing_factor_is_excluded_unless_explicitly_filled_from_the_past(self):

@@ -4,7 +4,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal, ROUND_DOWN, localcontext
+from decimal import Context, Decimal, ROUND_DOWN, localcontext
 from fractions import Fraction
 from typing import Literal
 
@@ -19,7 +19,6 @@ from nautilus_trader.model.identifiers import ClientId
 from nautilus_trader.model.objects import QUANTITY_MAX, Money, Quantity
 from nautilus_trader.trading.strategy import Strategy
 
-from .backtest_research import coverage_windows, metrics, percent
 from .portfolio_inputs import (
     DataGap,
     FactorValue,
@@ -29,7 +28,8 @@ from .portfolio_inputs import (
     prepare_portfolio,
 )
 from .research_catalog import ResearchError
-from .research_metrics import RiskFreeSeries, excess_returns, sharpe_ratio
+from .research_metrics import RiskFreeSeries, daily_risk_free
+from .research_windows import coverage_windows
 
 
 FillTiming = Literal["next_open", "next_close"]
@@ -133,8 +133,12 @@ class PortfolioResult:
     total_orders: int
     total_positions: int
     windows: list[dict]
-    longest_sample: dict
     risk_free: dict
+
+    @property
+    def longest_sample(self) -> dict:
+        """The longest_sample row in the unified windows report."""
+        return self.windows[-1]
 
 
 class _SessionEvent(Data):
@@ -384,45 +388,19 @@ def _simulate(inputs, config):
 
 
 def _performance(equity, closes, fills, rf, *, carried_valuation_dates):
-    days = list(closes)
     observed = {day: value for day, value in equity.items()
                 if value is not None and day not in carried_valuation_dates}
-    closes_with_equity = [(day, closes[day], observed.get(day)) for day in days]
-    daily_excess = dict(zip(days[1:], excess_returns(closes_with_equity, rf), strict=True))
-    daily_turnover = defaultdict(Decimal)
-    for fill in fills:
-        daily_turnover[fill.fill_date] += fill.quantity * fill.price / equity[fill.signal_date]
-
-    def annotate(row, window_days):
-        row["observations"] = len(window_days)
-        row["risk_free"] = risk_free
-        if row["metrics"] is not None:
-            # The first mark is the return and turnover baseline for this window.
-            sharpe = sharpe_ratio([daily_excess[day] for day in window_days[1:]])
-            row["metrics"]["sharpe"] = sharpe
-            row["metrics"]["turnover"] = sum((daily_turnover[day] for day in window_days[1:]), Decimal(0))
-        return row
-
+    aligned_rf = daily_risk_free(closes, rf) if rf is not None else None
     risk_free = {"source": rf.source, "basis": rf.basis} if rf is not None else {"source": "rf=0", "basis": "daily"}
-    windows = coverage_windows(observed, days[-1])
-    for row in windows:
-        start = date.fromisoformat(row["requested_start"])
-        annotate(row, [day for day in observed if day >= start])
-    first, last = min(observed, default=None), max(observed, default=None)
-    sample_start = first or days[0]
-    expected = len(days) - days.index(sample_start)
-    missing = expected - len(observed)
-    full = len(observed) >= 2 and missing == 0
-    actual_years = format(Decimal((last - first).days) / Decimal("365.2425"), ".4f") if first else None
-    longest = annotate({
-        "requested_start": str(sample_start), "calendar_start": str(sample_start),
-        "actual_start": str(first) if first else None, "actual_end": str(last) if last else None,
-        "actual_years": actual_years, "expected_sessions": expected,
-        "missing_sessions": missing, "coverage": "full" if full else "insufficient",
-        "missing_pct": percent(Decimal(missing) / expected),
-        "metrics": metrics(observed) if full else None,
-    }, list(observed))
-    return windows, longest, risk_free
+    turnover = dict.fromkeys(closes, Decimal(0))
+    with localcontext(Context(prec=34)):
+        for fill in fills:
+            turnover[fill.fill_date] += fill.quantity * fill.price / equity[fill.signal_date]
+        windows = coverage_windows(
+            observed, next(reversed(closes)), rf=aligned_rf, rf_source=rf.source if rf is not None else None,
+            turnover=turnover, longest_through_end=True,
+        )
+    return windows, risk_free
 
 
 def run_portfolio_backtest(
@@ -442,11 +420,11 @@ def run_portfolio_backtest(
         assets, start=start, end=end, universe=universe, target_weights=targets, factors=factors, top_n=top_n,
     )
     strategy, positions, orders, total_positions = _simulate(inputs, config)
-    windows, longest, risk_free = _performance(
+    windows, risk_free = _performance(
         strategy.equity, inputs.closes, strategy.fills, rf,
         carried_valuation_dates=strategy.carried_valuation_dates,
     )
     return PortfolioResult(
         config.fill_timing, config.fill_missing, strategy.equity, positions, tuple(strategy.fills),
-        tuple(strategy.rebalances), tuple(strategy.gaps), orders, total_positions, windows, longest, risk_free,
+        tuple(strategy.rebalances), tuple(strategy.gaps), orders, total_positions, windows, risk_free,
     )

@@ -1,6 +1,6 @@
 """Point-in-time risk-free rates and Sharpe calculations for daily research."""
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Context, Decimal, localcontext
@@ -62,6 +62,44 @@ class RiskFreeSeries:
         object.__setattr__(self, "rates", tuple(sorted(rates, key=lambda rate: rate.available_ts)))
 
 
+def _validate_close(day: date, close_ts: int) -> None:
+    if type(day) is not date or _utc_day_index(close_ts) != (day - _EPOCH).days:
+        raise ValueError("Equity close timestamp must fall on its UTC session date")
+
+
+def _daily_risk_free(
+    closes: Iterable[tuple[date, int]], rf: RiskFreeSeries,
+) -> dict[date, Decimal]:
+    releases = iter(rf.rates)
+    upcoming = next(releases, None)
+    observation_day = None
+    daily_rate = None
+    aligned = {}
+    with localcontext(_METRIC_CONTEXT):
+        for (_, start_ts), (end_day, _) in pairwise(closes):
+            while upcoming is not None and upcoming.available_ts <= start_ts:
+                if observation_day is None or upcoming.observation_date >= observation_day:
+                    observation_day = upcoming.observation_date
+                    daily_rate = ((1 + upcoming.rate) ** (1 / TRADING_DAYS) - 1
+                                  if rf.basis == "annual" else upcoming.rate)
+                upcoming = next(releases, None)
+            if daily_rate is not None:
+                aligned[end_day] = daily_rate
+    return aligned
+
+
+def daily_risk_free(closes: Mapping[date, int], rf: RiskFreeSeries) -> dict[date, Decimal]:
+    """Align published rates to the ending dates of consecutive close-to-close returns.
+
+    Supply each exchange session date and its close in UTC nanoseconds, including
+    sessions with no valuation. The first date and any interval whose starting
+    close precedes the first known release are omitted from the result.
+    """
+    for day, close_ts in closes.items():
+        _validate_close(day, close_ts)
+    return _daily_risk_free(sorted(closes.items()), rf)
+
+
 def excess_returns(
     equity: Sequence[EquityClose],
     rf: RiskFreeSeries | None = None,
@@ -71,29 +109,22 @@ def excess_returns(
     Pass one row per consecutive session, using None for an unavailable valuation.
     An interval missing either valuation or an explicitly supplied RF is unavailable.
     """
+    closes = {}
     previous_day = None
     for day, close_ts, value in equity:
-        if type(day) is not date or _utc_day_index(close_ts) != (day - _EPOCH).days:
-            raise ValueError("Equity close timestamp must fall on its UTC session date")
+        _validate_close(day, close_ts)
         if previous_day is not None and day <= previous_day:
             raise ValueError("Equity close dates must be strictly increasing")
         if value is not None and (not isinstance(value, Decimal) or not value.is_finite() or value <= 0):
             raise ValueError("Equity close must be a positive finite Decimal or None")
         previous_day = day
+        closes[day] = close_ts
 
-    releases = iter(rf.rates if rf is not None else ())
-    annual = rf is not None and rf.basis == "annual"
-    upcoming = next(releases, None)
-    observation_day = None
-    daily_rate = Decimal(0) if rf is None else None
+    daily_rates = _daily_risk_free(closes.items(), rf) if rf is not None else None
     result = []
     with localcontext(_METRIC_CONTEXT):
-        for (_, start_ts, start_value), (_, _, end_value) in pairwise(equity):
-            while upcoming is not None and upcoming.available_ts <= start_ts:
-                if observation_day is None or upcoming.observation_date >= observation_day:
-                    observation_day = upcoming.observation_date
-                    daily_rate = (1 + upcoming.rate) ** (1 / TRADING_DAYS) - 1 if annual else upcoming.rate
-                upcoming = next(releases, None)
+        for (_, _, start_value), (end_day, _, end_value) in pairwise(equity):
+            daily_rate = daily_rates.get(end_day) if daily_rates is not None else Decimal(0)
             if daily_rate is None or start_value is None or end_value is None:
                 result.append(None)
             else:

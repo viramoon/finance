@@ -27,11 +27,13 @@
 
 ## 窗口与无风险利率
 
-`windows` 复用现有 50 年、10 年、5 年的 [覆盖规则](historical-backtest.md#信号执行和绩效) 并报告实际首尾与观测数。有效观测要求当日至少一个当期成员有原始且成交量大于零的日线，且所有持仓可按当日价格估值。借用历史收盘价估值的会话仍计入 `missing_sessions`，补全后的净值保留在 `PortfolioResult.equity` 中。固定窗口以回测末交易会话为终点，内部或末端存在行情缺口时覆盖为 `insufficient`、`metrics` 为 `None`。`longest_sample` 从首个有效观测算到同一终点，至少两次有效观测且期间连续时计算指标。窗口换手 `turnover` 是窗口起始净值之后各笔买卖名义金额除以各自信号日组合净值的累计值，单位为倍数。
+`PortfolioResult.windows` 使用统一的 [日线窗口合同](../python/README.md#日线窗口)，依次返回 `50y`、`10y`、`5y`、`longest_sample` 四行。`result.longest_sample` 可读取第四行。有效观测要求当日至少一个当期成员有原始且成交量大于零的日线，且所有持仓可按当日价格估值。借用历史收盘价估值的会话仍计入 `missing_sessions`，补全后的净值保留在 `PortfolioResult.equity` 中。固定窗口以回测末交易会话为终点。最长样本从首个有效观测算到同一终点，尾部缺失计入覆盖，`actual_end` 仍报告最后一个有效观测日。
 
-`risk_free` 在结果和窗口中披露来源与频率。默认来源为 `rf=0`。外部加载器可构造 `fertile_finance.research_metrics.RiskFreeSeries(source, basis, rates)`，其中 `basis` 取 `daily` 或 `annual`，`rates` 是 `RiskFreeRate(observation_date, available_ts, rate)` 序列。利率为 `Decimal` 小数，`available_ts` 为发布或修订可得的 UTC 纳秒。`annual` 表示有效年利率，以 252 个交易日折为日利率。
+覆盖不足时整行 `metrics` 为 `None`。满窗报告 `return_pct`、`cagr_pct`、`max_drawdown_pct`、`volatility_pct`、`turnover_pct` 和 `sharpe`，可计算的指标使用十进制字符串。`turnover_pct` 是窗口起始净值之后各笔买卖名义金额除以各自信号日净值的累计百分比，期间无交易的会话换手为零。
 
-对每段收盘到收盘收益，以区间**起始收盘**为截止时点，先找最新已发布的观测日期，再取该日期届时已知的最新修订。较晚发布或修订的数据仅影响随后适用的区间。当显式 RF 序列在某区间尚不可得，或窗口内的超额收益不足两段或波动为零时，该窗口的 `sharpe` 为 `None`。其余窗口按每日超额收益的均值除以样本标准差再乘 `sqrt(252)` 计算。`excess_returns(equity, rf=None)` 和 `sharpe_ratio(returns)` 可在其它研究报表中复用，`equity` 接受逐会话的 `(date, close_ts, Decimal | None)`。
+`risk_free` 在结果中披露来源与频率，每个窗口的 `rf_source` 披露所用来源。默认来源为 `rf=0`。外部加载器可构造 `fertile_finance.research_metrics.RiskFreeSeries(source, basis, rates)`，其中 `basis` 取 `daily` 或 `annual`，`rates` 是 `RiskFreeRate(observation_date, available_ts, rate)` 序列。利率为 `Decimal` 小数，`available_ts` 为发布或修订可得的 UTC 纳秒。`annual` 表示有效年利率，以 252 个交易日折为日利率。
+
+对每段收盘到收盘收益，以区间**起始收盘**为截止时点，先找最新已发布的观测日期，再取该日期届时已知的最新修订。较晚发布或修订的数据仅影响随后适用的区间。`daily_risk_free(closes, rf)` 将这些利率对齐到收益终止日，提供给统一窗口 API。当显式 RF 序列在某区间尚不可得，或窗口内的超额收益不足两段或波动为零时，该窗口的 `sharpe` 为 `None`。其余窗口按每日超额收益的均值除以样本标准差再乘 `sqrt(252)` 计算。`excess_returns(equity, rf=None)` 和 `sharpe_ratio(returns)` 可在其它研究报表中复用，`equity` 接受逐会话的 `(date, close_ts, Decimal | None)`。
 
 ## 本地 fixture
 
@@ -74,6 +76,6 @@ result = run_portfolio_backtest(
     )),
 )
 print(result.total_orders, result.positions)
-print([(row["requested_years"], row["coverage"]) for row in result.windows])
+print([(row["window"], row["coverage"]) for row in result.windows])
 print(result.risk_free, result.longest_sample["metrics"])
 ```
