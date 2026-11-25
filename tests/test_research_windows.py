@@ -77,6 +77,23 @@ class ResearchWindowTests(unittest.TestCase):
         self.assertEqual((longest["coverage"], longest["missing_sessions"]), ("full", 0))
         self.assertEqual(longest["actual_end"], "2026-11-19")
 
+    def test_longest_through_end_counts_trailing_gap_without_changing_fixed_windows(self):
+        sample = equity_fixture(date(2026, 11, 18))
+        del sample[END]
+        *fixed, longest = coverage_windows(sample, END)
+        *anchored_fixed, anchored = coverage_windows(sample, END, longest_through_end=True)
+
+        self.assertEqual(anchored_fixed, fixed)
+        self.assertEqual((longest["coverage"], longest["calendar_end"], longest["missing_sessions"]),
+                         ("full", "2026-11-19", 0))
+        self.assertEqual((anchored["coverage"], anchored["calendar_end"], anchored["missing_sessions"]),
+                         ("insufficient", str(END), 1))
+        self.assertEqual((anchored["actual_start"], anchored["actual_end"], anchored["observations"]),
+                         ("2026-11-18", "2026-11-19", 2))
+        self.assertEqual(anchored["expected_sessions"], 3)
+        self.assertIsNone(anchored["metrics"])
+        self.assertEqual(coverage_windows({}, END, longest_through_end=True), coverage_windows({}, END))
+
     def test_pre_epoch_request_retains_original_date_and_counting_boundary(self):
         sample = {day: Decimal(100) for day in sessions(date(1970, 1, 1), date(2010, 1, 4))}
         row = coverage_windows(sample)[0]

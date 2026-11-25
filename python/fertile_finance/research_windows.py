@@ -121,8 +121,13 @@ def coverage_windows(
     rf: Mapping[date, Decimal] | None = None,
     rf_source: str | None = None,
     turnover: Mapping[date, Decimal] | None = None,
+    longest_through_end: bool = False,
 ) -> list[dict]:
-    """Report 50y, 10y, 5y and longest_sample for post-epoch daily observations."""
+    """Report 50y, 10y, 5y and longest_sample for post-epoch daily observations.
+
+    With longest_through_end, count trailing missing sessions through end in
+    longest_sample when a first observation exists.
+    """
     for day in equity:
         if type(day) is not date or not EPOCH <= day <= LATEST:
             raise ValueError("equity dates must be calendar dates from 1970-01-01 through 2100-12-31")
@@ -139,8 +144,9 @@ def coverage_windows(
            for value in observed.values()):
         raise ValueError("equity must use positive finite Decimal values")
     longest = min(observed, default=None)
+    longest_end = end if longest_through_end and longest is not None else max(observed, default=None)
     requests = [(f"{years}y", years, years_before(end, years), end) for years in WINDOW_YEARS]
-    requests.append(("longest_sample", None, longest, max(observed, default=None)))
+    requests.append(("longest_sample", None, longest, longest_end))
     calendar = exchange_calendars.resolve_alias(calendar)
     supported_start, supported_end = _calendar_limits(calendar)
 

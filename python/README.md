@@ -12,14 +12,14 @@ finance-backtest-worker 使用已锁定源码环境，通过独立 Python 子进
 
 ### Unix epoch 边界
 
-本系统日线时间戳下界是 `1970-01-01T00:00:00Z`，该时刻及之后的有效时间戳均可表示。预 1970 历史不可用。最长样本从第一条可用观测起算，研究作业从 warmup 完成后的第一条净值起算。 原生 Nautilus 对负时间戳的运行时验证见 [日线时间戳下界](../docs/nautilus.md#日线时间戳下界)。
+本系统日线时间戳下界是 `1970-01-01T00:00:00Z`，该时刻及之后的有效时间戳均可表示。预 1970 历史不可用。最长样本从第一条可用观测起算，研究作业从 warmup 完成后的第一条净值起算。原生 Nautilus 对负时间戳的运行时验证见 [日线时间戳下界](../docs/nautilus.md#日线时间戳下界)。
 
 - `fertile_finance.epoch.filter_pre_epoch(rows, timestamp=..., mode="reject")` 接收返回 Python 整数的时间戳提取函数。传入值是转换为无符号类型之前的 UTC 纳秒。`mode="drop"` 返回保留行与 `DroppedTimestamps(count, earliest_ns, latest_ns)`，保留原有行序，最早和最晚值为精确的有符号 Unix 纳秒。未丢弃时计数为零，两个边界均为 `None`。类型错误和超出有符号 64 位范围的值始终报错。
 - `fertile_finance.epoch.process_bar_frame(wrangler.process, frame, mode="reject", ts_init_delta=0)` 在原生 wrangler 前检查 `DatetimeIndex`，无时区的索引按 UTC 解释，拒绝 `NaT` 和越界的事件或初始化时间。返回值是原生 Bar 列表和同一丢弃报告。历史导入可直接用 `filter_pre_epoch` 检查数据，并用 `Price` / `Quantity` 精确构造 Bar。
 
 ### 日线窗口
 
-`fertile_finance.research_windows.coverage_windows(equity, end=None, *, calendar="XNYS", rf=None, rf_source=None, turnover=None)` 接收以交易会话日期为键、正的有限 `Decimal` 为值的日终净值，按顺序返回 `50y`、`10y`、`5y` 和 `longest_sample`。前三行从最后一个观测日期按日历年回推，闰日目标年无 2 月 29 日时使用 2 月 28 日。可显式指定 `end` 作为固定窗口统计截止日。最长样本行覆盖截止日前（含）第一至最后一条可用观测，`requested_years` 为 `null`，`requested_start` 为第一条观测日期。`calendar` 使用 exchange-calendars 注册名或别名，未注册的名称会报 `InvalidCalendarName`。
+`fertile_finance.research_windows.coverage_windows(equity, end=None, *, calendar="XNYS", rf=None, rf_source=None, turnover=None, longest_through_end=False)` 接收以交易会话日期为键、正的有限 `Decimal` 为值的日终净值，按顺序返回 `50y`、`10y`、`5y` 和 `longest_sample`。前三行从最后一个观测日期按日历年回推，闰日目标年无 2 月 29 日时使用 2 月 28 日。可显式指定 `end` 作为固定窗口统计截止日。最长样本行默认覆盖截止日前（含）第一至最后一条可用观测，`requested_years` 为 `null`，`requested_start` 为第一条观测日期。`longest_through_end=True` 将最长样本的日历截止日延伸到 `end`，最后一条有效观测之后的缺失会话也计入覆盖。`calendar` 使用 exchange-calendars 注册名或别名，未注册的名称会报 `InvalidCalendarName`。
 
 行内 `window` 是稳定键，展示使用 `label`，例如 `50y (insufficient)`。覆盖字段包括 `requested_start`、`actual_start`、`actual_end`、`actual_years`、`observations`、`calendar_start`、`calendar_end`、`expected_sessions`、`missing_sessions` 和 `missing_pct`。实际跨度为首尾相差天数除以 365.2425，单位为年。固定窗口请求起点早于 epoch 时保留原日期，仅统计 epoch 当日及之后的可用交易日，覆盖标记为 `insufficient`。其余窗口仅在起始边界至首条观测之前最多缺五个交易日、内部及末端无缺失且至少两条观测时标记 `full`。周末、休市日按交易所日历处理。覆盖判定不使用跨度百分比、不填补观测。
 
@@ -80,3 +80,9 @@ read_fred(series_id: str, *, start=None, end=None) -> FredDaily
 ```
 
 `start`、`end` 为可选的 `date` 闭区间端点。`WriteReport` 提供 `series_id`、实际写入主记录的 `first` 与 `last`、`observations`、`dividends`、`splits`、`dropped_pre_epoch`。Yahoo 写入报告另用 `missing_quote_rows` 统计写入的 OHLCV 全空记录，用 `skipped_missing_non_sessions` 统计跳过的非会话日全空记录。`YahooHistory` 提供 `symbol`、`series_id`、`asset_type`、`currency`、`bars`、`dividends`、`splits` 和 `is_reference`。行情读取后有 `ts_event` 和 `ts_init` 两个 UTC 纳秒时间戳。读取 French catalog 返回完整因子行，其中 `rf` 与文件加载器单位相同。French 和 FRED 读取结果的 `dropped_pre_epoch` 为零，导入时的丢弃信息以写入报告为准。读取的日期是观察或交易标签，判断何时可用时应核对源发布元数据。存储、并发以及覆盖合同见 [目录约定](../catalog/README.md#公开历史数据)。
+
+## 多标的研究
+
+`fertile_finance.portfolio_backtest.run_portfolio_backtest` 在一个 Nautilus 引擎中运行 XNYS 权益组合，支持目标权重、横截面排序、逐会话净值和成交审计。`result.windows` 使用上方统一的四行合同，最长样本覆盖检查使用请求截止日。该 Python 入口把 Nautilus 已有的多标的能力封装成可复用的研究工具。输入契约、执行时点、估值缺口和无风险利率口径见 [多标的组合回测](../docs/portfolio-backtest.md)。HTTP 作业继续运行已注册的策略，`SmaCrossover` 的数据与执行合同见 [历史回测](../docs/historical-backtest.md)。
+
+经审核的 Yahoo 日线可以通过 `PortfolioAsset.from_yahoo` 供组合研究使用。`RiskFreeSeries.from_french` 接收日频 RF 与独立提供的准确发布时间。FRED 序列的单位及版本处理见 [历史数据与组合输入](../docs/portfolio-backtest.md#历史数据与组合输入)。
