@@ -14,7 +14,7 @@ from fertile_finance.portfolio_backtest import (
     UniverseSnapshot,
     run_portfolio_backtest,
 )
-from fertile_finance.research_catalog import bar_type, cash_equity, nyse, sessions
+from fertile_finance.research_catalog import ResearchError, bar_type, cash_equity, nyse, sessions
 from fertile_finance.research_metrics import RiskFreeRate, RiskFreeSeries, excess_returns, sharpe_ratio
 
 
@@ -107,6 +107,61 @@ class PortfolioBacktestTests(unittest.TestCase):
             self.assertEqual(row["expected_sessions"] - row["missing_sessions"], len(self.days))
         self.assertIsNotNone(result.longest_sample["metrics"])
 
+    def test_sparse_final_bars_cannot_fill_fifty_year_window(self):
+        start, first_bar, end = date(1975, 9, 15), date(2025, 9, 12), date(2025, 9, 15)
+        closes = sessions(first_bar, end)
+        first_open = int(nyse().schedule.loc[str(start), "open"].value)
+        result = run_portfolio_backtest(
+            assets=(self.asset(A, 0, closes), self.asset(B, 1, closes)),
+            universe=(UniverseSnapshot(start, first_open, (A, B)),),
+            targets=(TargetWeights(first_bar, closes[first_bar], {A: Decimal("0.50")}),),
+            start=start, end=end,
+        )
+
+        self.assertIsNone(result.equity[start])
+        self.assertEqual(tuple(day for day, value in result.equity.items() if value is not None),
+                         (first_bar, end))
+        self.assertEqual({fill.instrument_id for fill in result.fills}, {A})
+        self.assertEqual([row["requested_years"] for row in result.windows], [50, 10, 5])
+        for row in result.windows:
+            self.assertEqual(row["coverage"], "insufficient")
+            self.assertEqual(row["observations"], 2)
+            self.assertEqual(row["missing_sessions"], row["expected_sessions"] - 2)
+            self.assertEqual(row["actual_start"], str(first_bar))
+            self.assertEqual(row["actual_end"], str(end))
+            self.assertIsNone(row["metrics"])
+        self.assertEqual(result.longest_sample["actual_start"], str(first_bar))
+        self.assertEqual(result.longest_sample["observations"], 2)
+
+    def test_cash_only_session_needs_a_real_bar_from_an_active_member(self):
+        index = 3
+        missing_day = self.days[index]
+        alpha, beta = self.assets[A], self.assets[B]
+        bar = beta.bars[index]
+        zero = Bar(bar.bar_type, bar.open, bar.high, bar.low, bar.close,
+                   Quantity.from_int(0), bar.ts_event, bar.ts_init)
+        assets = (
+            replace(alpha, bars=(*alpha.bars[:index], *alpha.bars[index + 1:])),
+            replace(beta, bars=(*beta.bars[:index], zero, *beta.bars[index + 1:])),
+            self.assets[C],  # This instrument has a print, but is outside the universe.
+        )
+        for fill_missing in (False, True):
+            with self.subTest(fill_missing=fill_missing):
+                config = PortfolioConfig(fill_missing=fill_missing)
+                result = self.run_targets(
+                    assets=assets, config=config,
+                    targets=(TargetWeights(self.start, self.closes[self.start], {}),),
+                )
+                self.assertEqual(result.total_orders, 0)
+                self.assertEqual(result.equity[self.start], config.initial_cash)
+                self.assertIsNone(result.equity[missing_day])
+                self.assertEqual(result.equity[self.end], config.initial_cash)
+                report = result.longest_sample
+                self.assertEqual(report["observations"], len(self.days) - 1)
+                self.assertEqual(report["missing_sessions"], 1)
+                self.assertEqual(report["coverage"], "insufficient")
+                self.assertIsNone(report["metrics"])
+
     def test_rf_is_used_for_full_window_and_full_sample_sharpe(self):
         start, end = date(2019, 11, 27), date(2024, 11, 29)
         closes = sessions(start, end)
@@ -182,6 +237,43 @@ class PortfolioBacktestTests(unittest.TestCase):
         self.assertEqual(len(first_opening_fills(result)), 2)
         self.assertEqual(first_opening_fills(baseline), first_opening_fills(result))
         self.assertNotEqual(baseline.equity[self.days[1]], result.equity[self.days[1]])
+
+    def test_native_notional_cent_mismatch_is_rejected_before_submission(self):
+        assets = (self.constant_price_asset(A, "129160.17"), self.constant_price_asset(B, "24.00"))
+        targets = (TargetWeights(self.start, self.closes[self.start], {A: Decimal(1)}),)
+        for timing in ("next_open", "next_close"):
+            with self.subTest(timing=timing):
+                unsafe = PortfolioConfig(fill_timing=timing, rebalance_every=100,
+                                         initial_cash=Decimal("16541339673797.42"))
+                with self.assertRaisesRegex(
+                    ResearchError, r"128068426 shares.*exact notional 16541339673792\.42 USD, native 16541339673792\.43 USD",
+                ) as caught:
+                    self.run_targets(assets=assets, targets=targets, config=unsafe)
+                self.assertEqual(caught.exception.code, "native_cash_precision")
+
+                # A nearby, larger notional reconciles exactly through the native path.
+                safe = replace(unsafe, initial_cash=Decimal("16541339932117.76"))
+                result = self.run_targets(assets=assets, targets=targets, config=safe)
+                self.assertEqual(result.total_orders, 1)
+                self.assertEqual(result.positions, {A: Decimal(128_068_428)})
+                fill, = result.fills
+                self.assertEqual(fill.quantity * fill.price, Decimal("16541339932112.76"))
+                self.assertEqual(result.equity[self.end] - fill.quantity * fill.price, Decimal("5.00"))
+
+    def test_sale_checks_projected_native_cash_range_before_submission(self):
+        alpha = self.constant_price_asset(A, "10.00")
+        old = alpha.bars[2]
+        price = Price.from_str("17014118346045.00")
+        expensive = Bar(old.bar_type, price, price, price, price, old.volume, old.ts_event, old.ts_init)
+        alpha = replace(alpha, bars=(*alpha.bars[:2], expensive, *alpha.bars[3:]))
+        targets = (
+            TargetWeights(self.start, self.closes[self.start], {A: Decimal("0.10")}),
+            TargetWeights(self.days[1], self.closes[self.days[1]], {}),
+        )
+        with self.assertRaisesRegex(ResearchError, r"projected cash 17014118346135\.00 USD.*native balance range") as caught:
+            self.run_targets(assets=(alpha, self.assets[B]), targets=targets,
+                             config=PortfolioConfig(initial_cash=Decimal("100.00")))
+        self.assertEqual(caught.exception.code, "native_cash_precision")
 
     def test_rebalance_frequency_counts_sessions_and_drift_can_block_orders(self):
         result = self.run_targets(config=PortfolioConfig(rebalance_every=2))

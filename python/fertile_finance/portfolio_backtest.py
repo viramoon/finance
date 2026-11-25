@@ -28,13 +28,49 @@ from .portfolio_inputs import (
     UniverseSnapshot,
     prepare_portfolio,
 )
-from .research_catalog import CENT, ResearchError
+from .research_catalog import ResearchError
 from .research_metrics import RiskFreeSeries, excess_returns, sharpe_ratio
 
 
 FillTiming = Literal["next_open", "next_close"]
 _CLOCK_CLIENT = ClientId("PORTFOLIO-CLOCK")
 _QUOTE_SIZE = Quantity.from_int(int(QUANTITY_MAX))
+
+
+def _native_cash(amount):
+    with localcontext(prec=34):
+        money = Money.from_decimal(amount, USD)
+        if money.as_decimal() != amount:
+            raise ValueError("USD balance is not representable at cent precision")
+    return money
+
+
+def _cash_after_order(instrument, quantity, price, side, cash, day):
+    with localcontext(prec=34):
+        exact = quantity.as_decimal() * price.as_decimal()
+        projected = cash - exact if side == OrderSide.BUY else cash + exact
+        description = f"{instrument.id} {day}: {quantity} shares at {price} USD"
+        try:
+            native = instrument.notional_value(quantity, price).as_decimal()
+            # USD risk and settlement rewrap the notional in Money. The pinned
+            # constructor rounds either sign symmetrically to currency precision.
+            rewrapped = Money(native, USD).as_decimal()
+        except (ArithmeticError, ValueError) as exc:
+            raise ResearchError(
+                "native_cash_precision", f"{description}: {exact} USD is outside native notional range",
+            ) from exc
+        if native != exact or rewrapped != exact:
+            raise ResearchError(
+                "native_cash_precision",
+                f"{description}: exact notional {exact} USD, native {native} USD, cash impact magnitude {rewrapped} USD",
+            )
+        try:
+            _native_cash(projected)
+        except (ArithmeticError, ValueError) as exc:
+            raise ResearchError(
+                "native_cash_precision", f"{description}: projected cash {projected} USD is outside native balance range",
+            ) from exc
+    return projected
 
 
 @dataclass(frozen=True)
@@ -57,10 +93,7 @@ class PortfolioConfig:
         if not isinstance(cash, Decimal) or not cash.is_finite() or cash <= 0:
             raise ResearchError("invalid_parameters", "initial_cash must be positive Decimal USD")
         try:
-            if cash == cash.quantize(CENT):
-                Money.from_decimal(cash.quantize(CENT), USD)
-            else:
-                raise ValueError("Sub-cent amount")
+            _native_cash(cash)
         except (ArithmeticError, ValueError) as exc:
             raise ResearchError("invalid_parameters", "initial_cash must fit in Nautilus Money at cent precision") from exc
         if type(self.fill_missing) is not bool:
@@ -132,6 +165,7 @@ class _ExpectedFill:
     side: OrderSide
     quantity: int
     price: Decimal
+    cash_after: Decimal
     filled: bool = False
 
 
@@ -186,6 +220,13 @@ class _PortfolioStrategy(Strategy):
                 self.carried_valuation_dates.add(day)
             if equity is not None:
                 equity += shares * bar.close.as_decimal()
+
+        # A cash balance alone is not a market observation. A carried holding
+        # mark can still be used by the strategy and is excluded from coverage.
+        if day not in self.carried_valuation_dates and not any(
+            self.inputs.signal_bar(day, key)[0] is not None for key in self.inputs.bars[day]
+        ):
+            equity = None
 
         due = len(self.equity) % self.settings.rebalance_every == 0
         self.equity[day] = equity
@@ -253,10 +294,14 @@ class _PortfolioStrategy(Strategy):
                 continue
             if size > _QUOTE_SIZE.as_decimal():
                 raise ResearchError("invalid_parameters", "Order size exceeds Nautilus Quantity range")
-            order = self.order_factory.market(
-                quote.instrument_id, side, Quantity.from_int(size), time_in_force=TimeInForce.FOK,
+            quantity = Quantity.from_int(size)
+            cash_after = _cash_after_order(
+                self.inputs.assets[key], quantity, quote.bid_price, side, self.cash, day,
             )
-            plan = _ExpectedFill(key, signal_day, signal_ts, day, event.ts_event, side, size, price)
+            order = self.order_factory.market(
+                quote.instrument_id, side, quantity, time_in_force=TimeInForce.FOK,
+            )
+            plan = _ExpectedFill(key, signal_day, signal_ts, day, event.ts_event, side, size, price, cash_after)
             self.orders[order.client_order_id] = plan
             self.submit_order(order)
             if not plan.filled:
@@ -273,7 +318,7 @@ class _PortfolioStrategy(Strategy):
         plan.filled = True
         change = plan.quantity if plan.side == OrderSide.BUY else -plan.quantity
         self.shares[plan.instrument_id] += change
-        self.cash -= change * price
+        self.cash = plan.cash_after
         if self.cash < 0 or self.shares[plan.instrument_id] < 0:
             raise ResearchError("execution_audit_failed", "Portfolio incurred borrowing or a short position")
         self.fills.append(FillAudit(
@@ -289,7 +334,7 @@ def _simulate(inputs, config):
     try:
         engine.add_venue(
             venue=venue, oms_type=OmsType.NETTING, account_type=AccountType.CASH, base_currency=USD,
-            starting_balances=[Money.from_decimal(config.initial_cash.quantize(CENT), USD)],
+            starting_balances=[_native_cash(config.initial_cash)],
             fee_model=PerContractFeeModel(Money.from_decimal(Decimal(0), USD)),
             bar_execution=False, trade_execution=False, use_message_queue=False,
         )
@@ -363,15 +408,18 @@ def _performance(equity, closes, fills, rf, *, carried_valuation_dates):
     for row in windows:
         start = date.fromisoformat(row["requested_start"])
         annotate(row, [day for day in observed if day >= start])
-    full = len(observed) == len(days) and len(days) >= 2
     first, last = min(observed, default=None), max(observed, default=None)
+    sample_start = first or days[0]
+    expected = len(days) - days.index(sample_start)
+    missing = expected - len(observed)
+    full = len(observed) >= 2 and missing == 0
     actual_years = format(Decimal((last - first).days) / Decimal("365.2425"), ".4f") if first else None
     longest = annotate({
-        "requested_start": str(days[0]), "calendar_start": str(days[0]),
+        "requested_start": str(sample_start), "calendar_start": str(sample_start),
         "actual_start": str(first) if first else None, "actual_end": str(last) if last else None,
-        "actual_years": actual_years, "expected_sessions": len(days),
-        "missing_sessions": len(days) - len(observed), "coverage": "full" if full else "insufficient",
-        "missing_pct": percent(Decimal(len(days) - len(observed)) / len(days)),
+        "actual_years": actual_years, "expected_sessions": expected,
+        "missing_sessions": missing, "coverage": "full" if full else "insufficient",
+        "missing_pct": percent(Decimal(missing) / expected),
         "metrics": metrics(observed) if full else None,
     }, list(observed))
     return windows, longest, risk_free
