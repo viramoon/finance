@@ -43,3 +43,11 @@ returns = 2 * factors["Mkt-RF"]
 result = analyze_factors(returns, factors, as_of="2024-01-10", regression=True)
 print(result.sample_start, result.sample_end, result.observations, result.correlations)
 ```
+
+## 原生成交审计
+
+研究模拟可收集 Nautilus 的 `OrderFilled` 回调，并把同一次运行的事件交给 `fertile_finance.fill_audit.merge_order_fills(events)`。组件按账户、客户端订单 ID 和 `fill_ts`（事件 UTC 纳秒）归并，原始分笔保存在 `raw_fills`。同一订单跨时间的分笔各保留一笔逻辑成交。重复 trade ID（同账户同订单）或订单标的、方向、币种不一致时抛出 `ValueError`。
+
+每笔逻辑成交累加 `quantity`、`notional`（各分笔价格乘数量的和）和 `commission`。展示价格 `average_price` 为成交量加权平均价，使用 Decimal 的 28 位有效数字，保留小于最小价格跳动的部分。统计换手金额时使用 `notional`。在成交价与佣金同币种的现金股票模拟中，可用 `cash_delta` 和 `position_delta` 对账。
+
+[原生回归 fixture](../tests/test_fill_audit.py) 用相同的两根日线和一笔 10 股市价买单对比两档成交量。Nautilus 1.231.0 的 L1 日线模拟按标的最小数量生成零量 bar 的合成档位，并按偏移一跳的价格撮合耗尽第一档后的市价单余量。fixture 中零量产生同一时刻的 1 股 @ 100.50 和 9 股 @ 100.51，归并后为 10 股、成交金额 1005.09 USD。成交量 100 时产生一笔 10 股 @ 100.50，成交金额 1005.00 USD。两组各计一笔逻辑成交，并核对引擎的现金和持仓。官方历史作业继续使用 [零量意图不提交及一单一笔足额成交](../docs/historical-backtest.md#信号执行和绩效) 的合同。
