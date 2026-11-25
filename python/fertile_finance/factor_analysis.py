@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 from scipy.stats import pearsonr
 
+from .research_factors import FrenchDaily
+
 
 REQUIRED_FACTORS = ("Mkt-RF", "SMB", "HML")
 
@@ -32,30 +34,32 @@ class FactorAnalysis:
 
 def analyze_factors(
     returns: pd.Series,
-    factors: pd.DataFrame,
+    factors: pd.DataFrame | FrenchDaily,
     *,
     as_of: date | str | None = None,
     regression: bool = False,
 ) -> FactorAnalysis:
     """Calculate Pearson correlations and optionally OLS on one complete-case sample."""
+    cutoff = _session_date(as_of) if as_of is not None else None
+    french_input = isinstance(factors, FrenchDaily)
+    if french_input:
+        factors = _french_frame(factors, cutoff)
     if not factors.columns.is_unique:
         raise ValueError("Factor columns must be unique")
     missing = [name for name in REQUIRED_FACTORS if name not in factors.columns]
     if missing:
         raise ValueError(f"Missing factor columns: {', '.join(missing)}")
-    names = [*REQUIRED_FACTORS]
-    if "Mom" in factors.columns:
-        names.append("Mom")
-
-    cutoff = _session_date(as_of) if as_of is not None else None
     returns = _date_indexed(returns, cutoff)
-    factors = _date_indexed(factors[names], cutoff)
+    factors = _date_indexed(factors, cutoff)
     if returns.empty:
         factors = factors.iloc[:0]
     else:
         factors = factors.loc[returns.index[0]:returns.index[-1]]
 
-    aligned = pd.concat([returns.rename("returns"), factors], axis=1, join="outer").sort_index()
+    names = [*REQUIRED_FACTORS]
+    if "Mom" in factors.columns and (not french_input or factors["Mom"].notna().any()):
+        names.append("Mom")
+    aligned = pd.concat([returns.rename("returns"), factors[names]], axis=1, join="outer").sort_index()
     aligned = aligned.apply(pd.to_numeric)
     if np.iscomplexobj(aligned.to_numpy()):
         raise ValueError("Daily returns must be real numbers")
@@ -82,6 +86,15 @@ def analyze_factors(
         regression=fitted,
         regression_status=status,
     )
+
+
+def _french_frame(batch: FrenchDaily, cutoff: date | None) -> pd.DataFrame:
+    rows = [
+        (row.session, row.mkt_rf, row.smb, row.hml, row.mom)
+        for row in batch.rows
+        if cutoff is None or row.available_on is None or row.available_on <= cutoff
+    ]
+    return pd.DataFrame.from_records(rows, columns=["session", *REQUIRED_FACTORS, "Mom"]).set_index("session")
 
 
 def _session_date(value: date | str) -> date:

@@ -1,16 +1,23 @@
+from dataclasses import replace
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 import pandas as pd
 
 from fertile_finance.factor_analysis import analyze_factors
+from fertile_finance.historical_catalog import HistoricalCatalog
+from fertile_finance.research_factors import load_ken_french
+
+
+FIXTURES = Path(__file__).parent / "fixtures"
 
 
 class FactorAnalysisTests(unittest.TestCase):
     def setUp(self):
-        fixture = Path(__file__).parent / "fixtures" / "french_daily.csv"
-        self.factors = pd.read_csv(fixture, index_col="date")
+        self.factors = pd.read_csv(FIXTURES / "factor_returns.csv", index_col="date")
 
     def test_complete_cases_use_common_sample_without_forward_fill(self):
         market = self.factors["Mkt-RF"]
@@ -88,6 +95,46 @@ class FactorAnalysisTests(unittest.TestCase):
             analyze_factors(market, self.factors.drop(columns=["HML"]))
         with self.assertRaisesRegex(ValueError, "finite or missing"):
             analyze_factors(market, self.factors.assign(SMB=float("inf")))
+
+
+class FrenchCatalogAnalysisTests(unittest.TestCase):
+    def test_catalog_factors_and_loader_match_with_gaps_and_cutoff(self):
+        fixtures = FIXTURES / "historical"
+        batch = load_ken_french(
+            fixtures / "french_daily.csv", momentum_path=fixtures / "french_momentum_daily.csv", pre_epoch="drop",
+        )
+        returns = pd.Series({
+            date(1970, 1, 2): 0.01,
+            date(2024, 7, 1): 0.02,
+            date(2024, 7, 3): 0.03,
+            date(2024, 7, 5): 0.04,
+            date(2024, 7, 8): 0.05,
+        })
+        with TemporaryDirectory() as directory:
+            catalog = HistoricalCatalog(Path(directory))
+            catalog.write_french(batch)
+            result = analyze_factors(returns, catalog.read_french(), as_of="2024-07-05")
+
+        self.assertEqual(result, analyze_factors(returns, batch, as_of="2024-07-05"))
+        self.assertEqual((result.sample_start, result.sample_end), (date(1970, 1, 2), date(2024, 7, 3)))
+        self.assertEqual(result.observations, 2)
+        self.assertEqual(result.dropped_observations, 2)
+        self.assertEqual(list(result.correlations), ["Mkt-RF", "SMB", "HML", "Mom"])
+        self.assertAlmostEqual(result.correlations["Mkt-RF"], 1)
+
+    def test_french_historical_sample_excludes_late_publication_and_future_momentum(self):
+        batch = load_ken_french(FIXTURES / "historical" / "french_daily.csv", pre_epoch="drop")
+        first, second, incomplete = batch.rows
+        late = replace(second, available_on=date(2024, 7, 9))
+        future = replace(second, session=date(2024, 7, 8), mom=Decimal("0.0033"))
+        batch = replace(batch, rows=(first, late, incomplete, future))
+        returns = pd.Series({row.session: i / 100 for i, row in enumerate(batch.rows)})
+        result = analyze_factors(returns, batch, as_of="2024-07-05")
+
+        self.assertEqual((result.sample_start, result.sample_end), (first.session, first.session))
+        self.assertEqual(result.observations, 1)
+        self.assertEqual(result.dropped_observations, 2)
+        self.assertEqual(result.correlations, {"Mkt-RF": None, "SMB": None, "HML": None})
 
 
 if __name__ == "__main__":

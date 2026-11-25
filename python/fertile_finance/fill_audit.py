@@ -10,6 +10,8 @@ from nautilus_trader.model.events import OrderFilled
 from nautilus_trader.model.identifiers import AccountId, ClientOrderId, InstrumentId, TradeId
 from nautilus_trader.model.objects import Currency
 
+from .epoch import unix_nanos
+
 
 @dataclass(frozen=True)
 class LogicalFill:
@@ -49,6 +51,7 @@ def merge_order_fills(fills: Iterable[OrderFilled]) -> tuple[LogicalFill, ...]:
     orders: dict[tuple[AccountId, ClientOrderId], tuple[InstrumentId, OrderSide, Currency]] = {}
     seen: set[tuple[AccountId, ClientOrderId, TradeId]] = set()
     for fill in fills:
+        fill_ts = unix_nanos(fill.ts_event)
         order_key = (fill.account_id, fill.client_order_id)
         identity = (fill.instrument_id, fill.order_side, fill.currency)
         trade_key = (*order_key, fill.trade_id)
@@ -57,7 +60,7 @@ def merge_order_fills(fills: Iterable[OrderFilled]) -> tuple[LogicalFill, ...]:
         if orders.setdefault(order_key, identity) != identity or fill.commission.currency != fill.currency:
             raise ValueError(f"Inconsistent fill instrument, side, or currency for order {fill.client_order_id}")
         seen.add(trade_key)
-        groups[(*order_key, fill.ts_event)].append(fill)
+        groups[(*order_key, fill_ts)].append(fill)
 
     return tuple(_summarize(group) for group in sorted(groups.values(), key=lambda group: group[0].ts_event))
 

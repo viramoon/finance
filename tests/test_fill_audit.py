@@ -11,6 +11,7 @@ from nautilus_trader.model.events import OrderFilled
 from nautilus_trader.model.objects import Money, Price, Quantity
 from nautilus_trader.trading.strategy import Strategy
 
+from fertile_finance.epoch import MAX_UNIX_NS
 from fertile_finance.fill_audit import merge_order_fills
 from fertile_finance.research_catalog import cash_equity
 
@@ -132,6 +133,13 @@ class FillAuditTests(unittest.TestCase):
             merge_order_fills([first, edit_fill(second, order_side="SELL")])
         with self.assertRaisesRegex(ValueError, "Inconsistent fill"):
             merge_order_fills([first, edit_fill(second, commission="0.00 EUR")])
+
+    def test_fill_timestamp_obeys_epoch_range(self):
+        first = self.runs[0][0].fills[0]
+        (at_epoch,) = merge_order_fills([edit_fill(first, ts_event=0)])
+        self.assertEqual(at_epoch.fill_ts, 0)
+        with self.assertRaisesRegex(ValueError, "within int64"):
+            merge_order_fills([edit_fill(first, ts_event=MAX_UNIX_NS + 1)])
 
 
 if __name__ == "__main__":
