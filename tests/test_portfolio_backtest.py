@@ -1,8 +1,13 @@
 from dataclasses import replace
 from datetime import date, datetime, timezone
-from decimal import Decimal, localcontext
+from decimal import (
+    Context, Decimal, DivisionByZero, Inexact, ROUND_FLOOR, ROUND_HALF_EVEN, ROUND_UP, Rounded, getcontext, localcontext,
+)
 from itertools import pairwise
+from pathlib import Path
 from statistics import stdev
+import subprocess
+import sys
 import unittest
 
 from nautilus_trader.model.data import Bar
@@ -86,6 +91,106 @@ class PortfolioBacktestTests(unittest.TestCase):
                       factors=self.factors(scores), top_n=1, start=self.start, end=self.end)
         inputs.update(overrides)
         return run_portfolio_backtest(**inputs)
+
+    def assert_decimal_context_independent(self, run):
+        with localcontext(Context(prec=28, rounding=ROUND_HALF_EVEN)):
+            expected = run()
+        for caller in (
+            Context(prec=6, rounding=ROUND_HALF_EVEN),
+            Context(prec=4, rounding=ROUND_UP, Emin=-3, Emax=3, traps=[Inexact, Rounded]),
+            Context(prec=3, rounding=ROUND_FLOOR, clamp=1),
+        ):
+            with self.subTest(prec=caller.prec, rounding=caller.rounding), localcontext(caller) as context:
+                context.flags[DivisionByZero] = True
+                saved = repr(context)
+                actual = run()
+                self.assertIs(getcontext(), context)
+                self.assertEqual(repr(context), saved)
+                self.assertEqual(actual, expected)
+        return expected
+
+    def test_portfolio_modules_import_under_hostile_decimal_defaults(self):
+        script = """
+from decimal import Decimal, DefaultContext, DivisionByZero, Inexact, ROUND_UP, Rounded, getcontext
+from importlib import import_module
+import sys
+
+DefaultContext.prec = 3
+DefaultContext.Emin = -3
+DefaultContext.Emax = 3
+DefaultContext.rounding = ROUND_UP
+DefaultContext.traps[Inexact] = True
+DefaultContext.traps[Rounded] = True
+caller = getcontext()
+caller.flags[DivisionByZero] = True
+saved_caller = repr(caller)
+saved_default = repr(DefaultContext)
+
+sys.path.insert(0, 'python')
+module = import_module(sys.argv[1])
+if hasattr(module, 'PortfolioConfig'):
+    assert module.PortfolioConfig(initial_cash=Decimal('99999.99')).initial_cash == Decimal('99999.99')
+assert getcontext() is caller
+assert repr(caller) == saved_caller
+assert repr(DefaultContext) == saved_default
+"""
+        root = Path(__file__).resolve().parents[1]
+        for name in ("fertile_finance.portfolio_backtest", "fertile_finance.portfolio_inputs"):
+            with self.subTest(module=name):
+                process = subprocess.run([sys.executable, "-c", script, name], cwd=root,
+                                         capture_output=True, text=True, timeout=30, check=False)
+                self.assertEqual(process.returncode, 0, process.stderr)
+
+    def test_cent_equity_and_share_floor_are_independent_of_decimal_context(self):
+        first, second, *_ = self.days
+        assets = (self.constant_price_asset(A, "100.00"), self.constant_price_asset(B, "10.00"))
+        targets = (
+            TargetWeights(first, self.closes[first], {A: Decimal("0.500001")}),
+            TargetWeights(second, self.closes[second], {A: Decimal("0.500001"), B: Decimal("0.4")}),
+        )
+        rf = RiskFreeSeries("Annual release fixture", "annual", (
+            RiskFreeRate(first, self.closes[first], Decimal("0.0525")),
+            RiskFreeRate(first, self.closes[second] + 1, Decimal("0.0375")),
+        ))
+        for timing in ("next_open", "next_close"):
+            with self.subTest(fill_timing=timing):
+                def run():
+                    config = PortfolioConfig(initial_cash=Decimal("99999.99"), fill_timing=timing)
+                    return self.run_targets(assets=assets, targets=targets, config=config, rf=rf)
+
+                result = self.assert_decimal_context_independent(run)
+                self.assertEqual(tuple(result.equity.values()), (Decimal("99999.99"),) * len(self.days))
+                self.assertEqual([(fill.instrument_id, fill.quantity, fill.price) for fill in result.fills],
+                                 [(A, Decimal(500), Decimal("100.00")), (B, Decimal(3999), Decimal("10.00"))])
+                self.assertEqual(result.positions, {A: Decimal(500), B: Decimal(3999)})
+                self.assertIsNotNone(result.longest_sample["metrics"]["sharpe"])
+
+    def test_repeating_factor_weight_audit_is_independent_of_decimal_context(self):
+        assets = tuple(self.constant_price_asset(symbol, "100.00") for symbol in (A, B, C))
+        universe = (self.snapshot(self.start, A, B, C),)
+        scores = [{A: 3, B: 2, C: 1}] * len(self.days)
+
+        def run():
+            return self.run_factors(scores, assets=assets, universe=universe, top_n=3,
+                                    config=PortfolioConfig(initial_cash=Decimal("300.00")))
+
+        result = self.assert_decimal_context_independent(run)
+        self.assertEqual(result.positions, dict.fromkeys((A, B, C), Decimal(1)))
+        self.assertEqual(set(result.rebalances[0].targets), {A, B, C})
+
+    def test_cash_precision_error_preserves_the_calling_decimal_context(self):
+        assets = (self.constant_price_asset(A, "129160.17"), self.constant_price_asset(B, "24.00"))
+        targets = (TargetWeights(self.start, self.closes[self.start], {A: Decimal(1)}),)
+
+        def run():
+            config = PortfolioConfig(initial_cash=Decimal("16541339673797.42"), rebalance_every=100)
+            with self.assertRaises(ResearchError) as caught:
+                self.run_targets(assets=assets, targets=targets, config=config)
+            return caught.exception.code, str(caught.exception)
+
+        code, message = self.assert_decimal_context_independent(run)
+        self.assertEqual(code, "native_cash_precision")
+        self.assertIn("exact notional 16541339673792.42 USD, native 16541339673792.43 USD", message)
 
     def test_two_equities_in_one_engine_with_honest_windows(self):
         result = self.run_targets()

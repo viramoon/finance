@@ -1,6 +1,6 @@
 from dataclasses import replace
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, Inexact, ROUND_DOWN, ROUND_UP, Rounded, getcontext, localcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -77,6 +77,30 @@ class PortfolioYahooTests(unittest.TestCase):
         self.assertIn((zero, "zero_volume"), [(gap.date, gap.kind) for gap in result.gaps])
         self.assertEqual(result.longest_sample["coverage"], "insufficient")
         self.assertEqual(result.longest_sample["missing_sessions"], 2)
+
+    def test_archived_conversion_preserves_prices_volume_and_caller_context(self):
+        quote = ("123456789.17", "123456790.01", "128068426")
+        history = self.archive("LARGE", [quote] * len(self.closes))
+        expected = PortfolioAsset.from_yahoo(history, raw_split_free_reviewed=True)
+        self.assertEqual(expected.bars[0].close.as_decimal(), Decimal(quote[1]))
+        self.assertEqual(expected.bars[0].volume.as_decimal(), Decimal(quote[2]))
+
+        for precision, rounding in ((6, ROUND_UP), (1, ROUND_DOWN)):
+            with self.subTest(precision=precision, rounding=rounding), localcontext() as caller:
+                caller.prec = precision
+                caller.rounding = rounding
+                caller.Emin, caller.Emax = -2, 2
+                caller.traps[Inexact] = caller.traps[Rounded] = True
+                caller.flags[Rounded] = True
+                before = str(caller)
+                actual = PortfolioAsset.from_yahoo(history, raw_split_free_reviewed=True)
+                self.assertIs(getcontext(), caller)
+                self.assertEqual(str(caller), before)
+                self.assertEqual(actual, expected)
+            self.assertEqual(actual.instrument.to_dict(actual.instrument),
+                             expected.instrument.to_dict(expected.instrument))
+            self.assertEqual([bar.to_dict(bar) for bar in actual.bars],
+                             [bar.to_dict(bar) for bar in expected.bars])
 
     def test_archived_split_and_reference_index_are_rejected(self):
         for file, series, error in (("yahoo_ibm.json", "IBM.XNYS", "invalid_source"),

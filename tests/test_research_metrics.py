@@ -1,5 +1,5 @@
 from datetime import date
-from decimal import Decimal, localcontext
+from decimal import Decimal, Inexact, ROUND_DOWN, ROUND_UP, Rounded, getcontext, localcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -98,6 +98,41 @@ class ResearchMetrics(unittest.TestCase):
         fred = load_fred(HISTORICAL_FIXTURES / "fred_dgs10_observations.json", series_id="DGS10")
         with self.assertRaisesRegex(ValueError, "Expected a FrenchDaily or FrenchRiskFree batch"):
             RiskFreeSeries.from_french(fred, available_ts={})
+
+    def test_rf_adapter_and_metrics_are_independent_of_caller_context(self):
+        source = HISTORICAL_FIXTURES / "french_daily.csv"
+        first, last = date(2024, 7, 3), date(2024, 7, 9)
+        closes = sessions(first, last)
+        values = map(Decimal, ("99999.99", "100123.45", "100995.43", "99987.65"))
+        equity = [(day, ts, value) for (day, ts), value in zip(closes.items(), values, strict=True)]
+        epoch_session = date(1970, 1, 2)
+        releases = {epoch_session: close_ts(epoch_session), first: closes[first] + 1}
+        annual = RiskFreeSeries("Annual fixture", "annual", (
+            RiskFreeRate(first, closes[first], Decimal("0.05321456789123456789")),
+        ))
+
+        def evaluate():
+            french = RiskFreeSeries.from_french(load_ken_french_rf(source, pre_epoch="drop"), available_ts=releases)
+            excess = excess_returns(equity, french)
+            annual_excess = excess_returns(equity, annual)
+            return (french, daily_risk_free(closes, french), daily_risk_free(closes, annual),
+                    excess, annual_excess, sharpe_ratio(excess), sharpe_ratio(annual_excess))
+
+        expected = evaluate()
+        for precision, rounding in ((6, ROUND_UP), (3, ROUND_DOWN)):
+            with self.subTest(precision=precision, rounding=rounding), localcontext() as caller:
+                caller.prec = precision
+                caller.rounding = rounding
+                caller.Emin = -4
+                caller.Emax = 4
+                caller.clamp = 1
+                caller.flags[Inexact] = True
+                caller.traps[Inexact] = True
+                caller.traps[Rounded] = True
+                before = repr(caller)
+                self.assertEqual(evaluate(), expected)
+                self.assertIs(getcontext(), caller)
+                self.assertEqual(repr(getcontext()), before)
 
     def test_valuation_gaps_and_degenerate_sharpe_remain_unavailable(self):
         day, ts, _ = self.equity[1]

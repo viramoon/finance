@@ -4,18 +4,26 @@ from bisect import bisect_left, bisect_right
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
-from decimal import Context, Decimal, localcontext
+from decimal import Decimal, localcontext
 from fractions import Fraction
 
-from nautilus_trader.model.currencies import USD
-from nautilus_trader.model.data import Bar
-from nautilus_trader.model.instruments import Equity
-from nautilus_trader.model.objects import Price, Quantity
+from .research_decimal import EXACT_RESEARCH_CONTEXT, RESEARCH_CONTEXT
 
-from .collector_store import NS_PER_DAY, unix_nanos
-from .historical_catalog import YahooHistory
-from .historical_types import DailyBar
-from .research_catalog import CENT, EPOCH, ID, LATEST, ResearchError, bar_type, cash_equity, nyse
+# Keep direct imports of the asset adapter independent of Nautilus initialization.
+with localcontext(RESEARCH_CONTEXT):
+    from nautilus_trader.model.currencies import USD
+    from nautilus_trader.model.data import Bar
+    from nautilus_trader.model.instruments import Equity
+    from nautilus_trader.model.objects import FIXED_PRECISION, Price, Quantity
+
+    from .collector_store import NS_PER_DAY, unix_nanos
+    from .historical_catalog import YahooHistory
+    from .historical_types import DailyBar
+    from .research_catalog import CENT, EPOCH, ID, LATEST, ResearchError, bar_type, cash_equity, nyse
+
+
+_RAW_SHARE = 10 ** FIXED_PRECISION
+_RAW_CENT = _RAW_SHARE // 100
 
 
 @dataclass(frozen=True)
@@ -39,18 +47,19 @@ class PortfolioAsset:
             raise ResearchError("invalid_instrument", "Expected a Yahoo XNYS USD stock or ETF history")
         if raw_split_free_reviewed is not True or history.splits:
             raise ResearchError("invalid_source", "Yahoo prices require raw price review and a split-free history")
-        kind = bar_type(history.series_id)
-        schedule = nyse().schedule
-        bars = []
-        for row in history.bars:
-            if not isinstance(row, DailyBar):
-                raise ResearchError("invalid_source", "Expected Yahoo source bars with original OHLCV")
-            when = _session_time(schedule, row.session, "close")
-            if type(row.ts_event) is not int or row.ts_event != when or row.ts_init != when:
-                raise ResearchError("invalid_bar", f"{history.series_id} {row.session}: expected archived XNYS close")
-            if not row.is_missing_quote:
-                bars.append(_yahoo_quote_bar(kind, row, when))
-        return cls(cash_equity(history.series_id), tuple(bars), raw_split_free_reviewed=True)
+        with localcontext(EXACT_RESEARCH_CONTEXT):
+            kind = bar_type(history.series_id)
+            schedule = nyse().schedule
+            bars = []
+            for row in history.bars:
+                if not isinstance(row, DailyBar):
+                    raise ResearchError("invalid_source", "Expected Yahoo source bars with original OHLCV")
+                when = _session_time(schedule, row.session, "close")
+                if type(row.ts_event) is not int or row.ts_event != when or row.ts_init != when:
+                    raise ResearchError("invalid_bar", f"{history.series_id} {row.session}: expected archived XNYS close")
+                if not row.is_missing_quote:
+                    bars.append(_yahoo_quote_bar(kind, row, when))
+            return cls(cash_equity(history.series_id), tuple(bars), raw_split_free_reviewed=True)
 
 
 def _yahoo_quote_bar(kind, row, when):
@@ -59,15 +68,15 @@ def _yahoo_quote_bar(kind, row, when):
     if any(not isinstance(value, Decimal) or not value.is_finite() for value in (*prices, volume)):
         raise ResearchError("invalid_bar", f"{kind} {row.session}: expected a complete finite Yahoo quote")
     try:
-        with localcontext(Context(prec=34)):
-            cents = tuple(value.quantize(CENT) for value in prices)
-            shares = volume.quantize(Decimal(1))
-            if (cents != prices or any(value <= 0 for value in cents)
-                    or shares != volume or shares < 0):
-                raise ValueError("inexact or invalid quote")
-            native_prices = tuple(Price.from_decimal(value) for value in cents)
-            native_volume = Quantity.from_decimal(shares)
-            return Bar(kind, *native_prices, native_volume, when, when)
+        cents = tuple(value.quantize(CENT) for value in prices)
+        shares = volume.quantize(Decimal(1))
+        if any(value <= 0 for value in cents) or shares < 0:
+            raise ValueError("invalid quote")
+        native_prices = tuple(Price.from_decimal(value) for value in cents)
+        native_volume = Quantity.from_decimal(shares)
+        if tuple(value.as_decimal() for value in native_prices) != cents or native_volume.as_decimal() != shares:
+            raise ValueError("native quote conversion changed the input")
+        return Bar(kind, *native_prices, native_volume, when, when)
     except (ArithmeticError, ValueError) as exc:
         raise ResearchError("invalid_bar", f"{kind} {row.session}: expected representable USD cents and whole shares") from exc
 
@@ -135,7 +144,7 @@ class _PortfolioInputs:
         if instrument_id not in self.members[day]:
             return None, None
         bar = self.bars[day].get(instrument_id)
-        if bar is not None and bar.volume.as_decimal() > 0:
+        if bar is not None and bar.volume.raw > 0:
             return bar, day
         if fill_missing:
             previous = self._prior_date(day, instrument_id, self._price_dates[instrument_id])
@@ -149,7 +158,7 @@ class _PortfolioInputs:
         eligible = []
         for instrument_id in sorted(self.members[day]):
             raw = self.bars[day].get(instrument_id)
-            if raw is not None and raw.volume.as_decimal() == 0:
+            if raw is not None and raw.volume.raw == 0:
                 gaps.append(DataGap(day, instrument_id, "zero_volume"))
                 continue
             bar, price_date = self.signal_bar(day, instrument_id, fill_missing=fill_missing)
@@ -214,8 +223,8 @@ def _prepare_assets(assets, schedule, closes):
         instrument = asset.instrument
         if not isinstance(instrument, Equity) or not ID.fullmatch(str(instrument.id)) or (
             instrument.quote_currency != USD or instrument.price_precision != 2
-            or instrument.price_increment.as_decimal() != CENT or instrument.size_precision != 0
-            or instrument.lot_size.as_decimal() != 1
+            or instrument.price_increment.raw != _RAW_CENT or instrument.size_precision != 0
+            or instrument.lot_size.raw != _RAW_SHARE
         ):
             raise ResearchError("invalid_instrument", "Expected cent-priced XNYS equities in USD with one-share lots")
         if asset.raw_split_free_reviewed is not True:
@@ -239,10 +248,10 @@ def _prepare_assets(assets, schedule, closes):
             if bar.ts_init != when:
                 raise ResearchError("invalid_bar", f"Bar availability must equal the official close for {key} on {day}")
             prices = (bar.open, bar.high, bar.low, bar.close)
-            opening, high, low, close = (value.as_decimal() for value in prices)
-            if (any(value.precision != instrument.price_precision for value in prices)
+            opening, high, low, close = (value.raw for value in prices)
+            if (any(value.precision != instrument.price_precision or value.raw % _RAW_CENT for value in prices)
                     or not 0 < low <= min(opening, close) <= max(opening, close) <= high
-                    or bar.volume.precision != instrument.size_precision):
+                    or bar.volume.precision != instrument.size_precision or bar.volume.raw % _RAW_SHARE):
                 raise ResearchError("invalid_bar", f"Invalid cent USD OHLC or whole-share volume for {key} on {day}")
             observed.add(day)
             if day in bars:
@@ -347,7 +356,7 @@ def prepare_portfolio(assets, *, start, end, universe, target_weights=None, fact
     price_dates = {key: [] for key in instruments}
     for day, by_instrument in bars.items():
         for key, bar in by_instrument.items():
-            if bar.volume.as_decimal() > 0:
+            if bar.volume.raw > 0:
                 price_dates[key].append(day)
     return _PortfolioInputs(instruments, bars, opens, closes, members, entered,
                             sorted(weights), weights, scores, factor_dates, price_dates, top_n)

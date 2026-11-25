@@ -4,41 +4,46 @@ from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
-from decimal import Context, Decimal, ROUND_DOWN, localcontext
+from decimal import Decimal, ROUND_DOWN, localcontext
 from fractions import Fraction
 from typing import Literal
 
-from nautilus_trader.backtest.engine import BacktestEngine
-from nautilus_trader.backtest.models import PerContractFeeModel
-from nautilus_trader.config import BacktestEngineConfig, LoggingConfig
-from nautilus_trader.core.data import Data
-from nautilus_trader.model.currencies import USD
-from nautilus_trader.model.data import CustomData, DataType, QuoteTick
-from nautilus_trader.model.enums import AccountType, OmsType, OrderSide, TimeInForce
-from nautilus_trader.model.identifiers import ClientId
-from nautilus_trader.model.objects import QUANTITY_MAX, Money, Quantity
-from nautilus_trader.trading.strategy import Strategy
+from .research_decimal import EXACT_RESEARCH_CONTEXT, RESEARCH_CONTEXT
 
-from .portfolio_inputs import (
-    DataGap,
-    FactorValue,
-    PortfolioAsset,
-    TargetWeights,
-    UniverseSnapshot,
-    prepare_portfolio,
-)
-from .research_catalog import ResearchError
-from .research_metrics import RiskFreeSeries, daily_risk_free
-from .research_windows import coverage_windows
+# Nautilus computes its fixed-point Decimal scale when loading its native types.
+with localcontext(RESEARCH_CONTEXT):
+    from nautilus_trader.backtest.engine import BacktestEngine
+    from nautilus_trader.backtest.models import PerContractFeeModel
+    from nautilus_trader.config import BacktestEngineConfig, LoggingConfig
+    from nautilus_trader.core.data import Data
+    from nautilus_trader.model.currencies import USD
+    from nautilus_trader.model.data import CustomData, DataType, QuoteTick
+    from nautilus_trader.model.enums import AccountType, OmsType, OrderSide, TimeInForce
+    from nautilus_trader.model.identifiers import ClientId
+    from nautilus_trader.model.objects import QUANTITY_MAX, Money, Quantity
+    from nautilus_trader.trading.strategy import Strategy
+
+    from .portfolio_inputs import (
+        DataGap,
+        FactorValue,
+        PortfolioAsset,
+        TargetWeights,
+        UniverseSnapshot,
+        prepare_portfolio,
+    )
+    from .research_catalog import ResearchError
+    from .research_metrics import RiskFreeSeries, daily_risk_free
+    from .research_windows import coverage_windows
 
 
 FillTiming = Literal["next_open", "next_close"]
 _CLOCK_CLIENT = ClientId("PORTFOLIO-CLOCK")
-_QUOTE_SIZE = Quantity.from_int(int(QUANTITY_MAX))
+_MAX_SHARES = int(QUANTITY_MAX)
+_QUOTE_SIZE = Quantity.from_int(_MAX_SHARES)
 
 
 def _native_cash(amount):
-    with localcontext(prec=34):
+    with localcontext(EXACT_RESEARCH_CONTEXT):
         money = Money.from_decimal(amount, USD)
         if money.as_decimal() != amount:
             raise ValueError("USD balance is not representable at cent precision")
@@ -46,10 +51,13 @@ def _native_cash(amount):
 
 
 def _cash_after_order(instrument, quantity, price, side, cash, day):
-    with localcontext(prec=34):
-        exact = quantity.as_decimal() * price.as_decimal()
-        projected = cash - exact if side == OrderSide.BUY else cash + exact
+    with localcontext(EXACT_RESEARCH_CONTEXT):
         description = f"{instrument.id} {day}: {quantity} shares at {price} USD"
+        try:
+            exact = quantity.as_decimal() * price.as_decimal()
+            projected = cash - exact if side == OrderSide.BUY else cash + exact
+        except ArithmeticError as exc:
+            raise ResearchError("native_cash_precision", f"{description}: cash arithmetic exceeds exact range") from exc
         try:
             native = instrument.notional_value(quantity, price).as_decimal()
             # USD risk and settlement rewrap the notional in Money. The pinned
@@ -203,8 +211,7 @@ class _PortfolioStrategy(Strategy):
         if event.closing:
             self.mark_and_signal(event)
 
-    def mark_and_signal(self, event):
-        day = event.date
+    def _mark_equity(self, day):
         equity = self.cash
         members = self.inputs.members[day]
         for key, shares in sorted(self.shares.items()):
@@ -232,6 +239,15 @@ class _PortfolioStrategy(Strategy):
         ):
             equity = None
 
+        return equity
+
+    def mark_and_signal(self, event):
+        day = event.date
+        try:
+            with localcontext(EXACT_RESEARCH_CONTEXT):
+                equity = self._mark_equity(day)
+        except ArithmeticError as exc:
+            raise ResearchError("valuation_precision", f"Portfolio equity for {day} exceeds exact Decimal range") from exc
         due = len(self.equity) % self.settings.rebalance_every == 0
         self.equity[day] = equity
         if not due:
@@ -239,7 +255,7 @@ class _PortfolioStrategy(Strategy):
         targets, gaps = self.inputs.resolve_targets(day, fill_missing=self.settings.fill_missing)
         self.gaps.extend(gaps)
         # A repeating equal weight is rounded only for the public Decimal audit.
-        with localcontext(rounding=ROUND_DOWN):
+        with localcontext(RESEARCH_CONTEXT, prec=28, rounding=ROUND_DOWN):
             audit_targets = {
                 key: Decimal(weight.numerator) / Decimal(weight.denominator)
                 if isinstance(weight, Fraction) else weight
@@ -296,7 +312,7 @@ class _PortfolioStrategy(Strategy):
                 side = OrderSide.SELL
             if not size:
                 continue
-            if size > _QUOTE_SIZE.as_decimal():
+            if size > _MAX_SHARES:
                 raise ResearchError("invalid_parameters", "Order size exceeds Nautilus Quantity range")
             quantity = Quantity.from_int(size)
             cash_after = _cash_after_order(
@@ -352,7 +368,7 @@ def _simulate(inputs, config):
             execution_at_close = config.fill_timing == "next_close"
             for key, bar in sorted(inputs.bars[day].items()):
                 bars_by_asset[key].append(bar)
-                if key in inputs.members[day] and bar.volume.as_decimal() > 0:
+                if key in inputs.members[day] and bar.volume.raw > 0:
                     when = close if execution_at_close else opening
                     price = bar.close if execution_at_close else bar.open
                     quotes_by_asset[key].append(QuoteTick(
@@ -393,7 +409,7 @@ def _performance(equity, closes, fills, rf, *, carried_valuation_dates):
     aligned_rf = daily_risk_free(closes, rf) if rf is not None else None
     risk_free = {"source": rf.source, "basis": rf.basis} if rf is not None else {"source": "rf=0", "basis": "daily"}
     turnover = dict.fromkeys(closes, Decimal(0))
-    with localcontext(Context(prec=34)):
+    with localcontext(RESEARCH_CONTEXT):
         for fill in fills:
             turnover[fill.fill_date] += fill.quantity * fill.price / equity[fill.signal_date]
         windows = coverage_windows(
@@ -416,15 +432,18 @@ def run_portfolio_backtest(
     rf: RiskFreeSeries | None = None,
 ) -> PortfolioResult:
     """Run a long-only cash portfolio, selecting by target weights or a ranked factor."""
-    inputs = prepare_portfolio(
-        assets, start=start, end=end, universe=universe, target_weights=targets, factors=factors, top_n=top_n,
-    )
-    strategy, positions, orders, total_positions = _simulate(inputs, config)
-    windows, risk_free = _performance(
-        strategy.equity, inputs.closes, strategy.fills, rf,
-        carried_valuation_dates=strategy.carried_valuation_dates,
-    )
-    return PortfolioResult(
-        config.fill_timing, config.fill_missing, strategy.equity, positions, tuple(strategy.fills),
-        tuple(strategy.rebalances), tuple(strategy.gaps), orders, total_positions, windows, risk_free,
-    )
+    # The engine invokes Python callbacks synchronously and also converts native
+    # fixed-point objects through Decimal on this thread.
+    with localcontext(RESEARCH_CONTEXT):
+        inputs = prepare_portfolio(
+            assets, start=start, end=end, universe=universe, target_weights=targets, factors=factors, top_n=top_n,
+        )
+        strategy, positions, orders, total_positions = _simulate(inputs, config)
+        windows, risk_free = _performance(
+            strategy.equity, inputs.closes, strategy.fills, rf,
+            carried_valuation_dates=strategy.carried_valuation_dates,
+        )
+        return PortfolioResult(
+            config.fill_timing, config.fill_missing, strategy.equity, positions, tuple(strategy.fills),
+            tuple(strategy.rebalances), tuple(strategy.gaps), orders, total_positions, windows, risk_free,
+        )

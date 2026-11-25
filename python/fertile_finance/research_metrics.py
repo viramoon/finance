@@ -3,18 +3,18 @@
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
-from decimal import Context, Decimal, localcontext
+from decimal import Decimal, localcontext
 from itertools import pairwise
 from statistics import mean, stdev
 from typing import Literal
 
+from .research_decimal import RESEARCH_CONTEXT
 from .research_factors import FrenchDaily, FrenchRiskFree
 
 
 TRADING_DAYS = Decimal(252)
 _EPOCH = date(1970, 1, 1)
 _NS_PER_DAY = 86_400_000_000_000
-_METRIC_CONTEXT = Context(prec=34)
 
 type EquityClose = tuple[date, int, Decimal | None]
 
@@ -97,7 +97,7 @@ def _daily_risk_free(
     observation_day = None
     daily_rate = None
     aligned = {}
-    with localcontext(_METRIC_CONTEXT):
+    with localcontext(RESEARCH_CONTEXT):
         for (_, start_ts), (end_day, _) in pairwise(closes):
             while upcoming is not None and upcoming.available_ts <= start_ts:
                 if observation_day is None or upcoming.observation_date >= observation_day:
@@ -144,7 +144,7 @@ def excess_returns(
 
     daily_rates = _daily_risk_free(closes.items(), rf) if rf is not None else None
     result = []
-    with localcontext(_METRIC_CONTEXT):
+    with localcontext(RESEARCH_CONTEXT):
         for (_, _, start_value), (end_day, _, end_value) in pairwise(equity):
             daily_rate = daily_rates.get(end_day) if daily_rates is not None else Decimal(0)
             if daily_rate is None or start_value is None or end_value is None:
@@ -159,6 +159,6 @@ def sharpe_ratio(returns: Sequence[Decimal | None]) -> Decimal | None:
     available = [value for value in returns if value is not None]
     if len(available) < 2 or len(available) != len(returns):
         return None
-    with localcontext(_METRIC_CONTEXT):
+    with localcontext(RESEARCH_CONTEXT):
         volatility = stdev(available)
         return mean(available) / volatility * TRADING_DAYS.sqrt() if volatility else None
