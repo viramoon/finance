@@ -190,3 +190,42 @@ class ResearchWindowTests(unittest.TestCase):
             self.assertEqual(row["expected_sessions"], 0)
             self.assertIsNone(row["missing_pct"])
             self.assertIsNone(row["metrics"])
+
+    def test_xtae_builds_longest_sample_when_fixed_calendars_fail(self):
+        start, end = "2026-01-12", "2026-01-16"
+        calendar = exchange_calendars.get_calendar("XTAE", start=start, end=end)
+        sample = {day.date(): Decimal(100 + i) for i, day in enumerate(calendar.sessions)}
+        self.assertEqual(len(sample), 5)
+        *fixed, longest = coverage_windows(sample, date.fromisoformat(end), calendar="XTAE")
+        self.assertEqual([row["window"] for row in fixed], ["50y", "10y", "5y"])
+        for row in fixed:
+            self.assertEqual(row["coverage"], "insufficient")
+            self.assertEqual(row["coverage_reason"], "calendar_unavailable")
+            self.assertIn(f"XTAE {row['requested_start']} to {end}: ValueError", row["calendar_diagnostic"])
+            self.assertIn("are not sessions", row["calendar_diagnostic"])
+            self.assertEqual(row["observations"], 5)
+            self.assertTrue(all(row[field] is None for field in (
+                "calendar_start", "calendar_end", "expected_sessions", "missing_sessions", "missing_pct", "metrics",
+            )))
+        self.assertEqual(longest["window"], "longest_sample")
+        self.assertEqual((longest["actual_start"], longest["actual_end"]), (start, end))
+        self.assertEqual((longest["coverage"], longest["expected_sessions"], longest["missing_sessions"]),
+                         ("full", 5, 0))
+        self.assertIsNotNone(longest["metrics"]["cagr_pct"])
+        self.assertNotIn("coverage_reason", longest)
+
+    def test_registered_but_unimplemented_calendar_reports_insufficient_in_each_row(self):
+        sample = {date(2026, 1, day): Decimal(100) for day in range(12, 17)}
+        with self.assertRaises(NotImplementedError):
+            exchange_calendars.get_calendar("ASEX", start="2026-01-12", end="2026-01-16")
+        rows = coverage_windows(sample, calendar="ASEX")
+        self.assertEqual([row["window"] for row in rows], ["50y", "10y", "5y", "longest_sample"])
+        for row in rows:
+            self.assertEqual(row["coverage"], "insufficient")
+            self.assertEqual(row["coverage_reason"], "calendar_unavailable")
+            self.assertIn(f"ASEX {row['requested_start']} to 2026-01-16: NotImplementedError",
+                          row["calendar_diagnostic"])
+            self.assertEqual(row["observations"], 5)
+            self.assertTrue(all(row[field] is None for field in (
+                "calendar_start", "calendar_end", "expected_sessions", "missing_sessions", "missing_pct", "metrics",
+            )))

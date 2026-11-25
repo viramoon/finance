@@ -81,27 +81,36 @@ def _window_metrics(equity, elapsed, rf, turnover):
     }
 
 
-def _calendar_sessions(name, start, end):
+def _calendar_limits(name):
     if name == "XNYS":
-        return EPOCH, LATEST, nyse().schedule.loc[str(start):str(end)].index.date
+        return EPOCH, LATEST
 
-    # The default schedule is a rolling slice. The declared bounds describe
-    # which historical dates we can actually request from the exchange rules.
-    calendar = exchange_calendars.get_calendar(name)
-    lower, upper = calendar.bound_min(), calendar.bound_max()
+    # A default schedule is only a way to discover declared bounds. Some
+    # calendars can build an explicit window even when their default fails.
+    try:
+        calendar = exchange_calendars.get_calendar(name)
+        lower, upper = calendar.bound_min(), calendar.bound_max()
+    except Exception:
+        return EPOCH, LATEST
     first_supported = max(EPOCH, lower.date()) if lower is not None else EPOCH
     last_supported = min(LATEST, upper.date()) if upper is not None else LATEST
-    first, last = max(first_supported, start), min(last_supported, end)
+    return first_supported, last_supported
+
+
+def _calendar_sessions(name, first, last, first_supported, last_supported):
     if first > last:
-        return first_supported, last_supported, ()
+        return ()
+    if name == "XNYS":
+        return nyse().schedule.loc[str(first):str(last)].index.date
+
     # The constructor requires a span of at least two calendar dates.
     build_start = max(first_supported, first - timedelta(days=1)) if first == last else first
     build_end = min(last_supported, last + timedelta(days=1)) if first == last else last
     try:
         schedule = exchange_calendars.get_calendar(name, start=str(build_start), end=str(build_end))
     except NoSessionsError:
-        return first_supported, last_supported, ()
-    return first_supported, last_supported, schedule.schedule.loc[str(first):str(last)].index.date
+        return ()
+    return schedule.schedule.loc[str(first):str(last)].index.date
 
 
 def coverage_windows(
@@ -132,12 +141,8 @@ def coverage_windows(
     longest = min(observed, default=None)
     requests = [(f"{years}y", years, years_before(end, years), end) for years in WINDOW_YEARS]
     requests.append(("longest_sample", None, longest, max(observed, default=None)))
-    first_date = max(EPOCH, min(start for _, _, start, _ in requests if start is not None))
-    supported_start, supported_end, trading_days = _calendar_sessions(calendar, first_date, end)
-    trading_set = set(trading_days)
-    for day in observed:
-        if supported_start <= day <= supported_end and day not in trading_set:
-            raise ValueError(f"{day} is not a {calendar} session")
+    calendar = exchange_calendars.resolve_alias(calendar)
+    supported_start, supported_end = _calendar_limits(calendar)
 
     output = []
     for name, years, start, window_end in requests:
@@ -146,15 +151,30 @@ def coverage_windows(
         calendar_out_of_range = start is not None and (
             max(EPOCH, start) < supported_start or window_end > supported_end
         )
-        expected = [day for day in trading_days if calendar_start is not None
-                    and calendar_start <= day <= calendar_end]
         window = {day: value for day, value in observed.items() if start is not None
                   and start <= day <= window_end}
+        diagnostic = None
+        expected = ()
+        if calendar_start is not None:
+            try:
+                expected = _calendar_sessions(calendar, calendar_start, calendar_end, supported_start, supported_end)
+            except Exception as exc:
+                # Only isolate failures while constructing/reading the dependency's calendar.
+                detail = str(exc)
+                if len(detail) > 200:
+                    detail = f"{detail[:160]} … {detail[-35:]}"
+                diagnostic = f"{calendar} {calendar_start} to {calendar_end}: {type(exc).__name__}: {detail}"
+        if diagnostic is None:
+            trading_set = set(expected)
+            for day in window:
+                if calendar_start <= day <= calendar_end and day not in trading_set:
+                    raise ValueError(f"{day} is not a {calendar} session")
+
         first = next(iter(window), None)
         last = next(reversed(window), None)
         missing = [day for day in expected if day not in window]
-        full = (not calendar_out_of_range and start == calendar_start and len(window) >= 2 and len(missing) <= 5
-                and all(day < first for day in missing))
+        full = (diagnostic is None and not calendar_out_of_range and start == calendar_start
+                and len(window) >= 2 and len(missing) <= 5 and all(day < first for day in missing))
         elapsed = Decimal((last - first).days) / DAYS_PER_YEAR if first is not None else None
         row = {
             "window": name,
@@ -163,15 +183,20 @@ def coverage_windows(
             "actual_start": str(first) if first is not None else None,
             "actual_end": str(last) if last is not None else None,
             "actual_years": format(elapsed, ".4f") if elapsed is not None else None,
-            "calendar_start": str(calendar_start) if calendar_start is not None else None,
-            "calendar_end": str(calendar_end) if calendar_end is not None else None,
-            "observations": len(window), "expected_sessions": len(expected), "missing_sessions": len(missing),
-            "missing_pct": percent(Decimal(len(missing)) / len(expected)) if expected else None,
+            "calendar_start": str(calendar_start) if diagnostic is None and calendar_start is not None else None,
+            "calendar_end": str(calendar_end) if diagnostic is None and calendar_end is not None else None,
+            "observations": len(window),
+            "expected_sessions": len(expected) if diagnostic is None else None,
+            "missing_sessions": len(missing) if diagnostic is None else None,
+            "missing_pct": percent(Decimal(len(missing)) / len(expected)) if len(expected) else None,
             "coverage": "full" if full else "insufficient",
             "rf_source": source,
             "metrics": _window_metrics(window, elapsed, rf, turnover) if full else None,
         }
-        if calendar_out_of_range:
+        if diagnostic is not None:
+            row["coverage_reason"] = "calendar_unavailable"
+            row["calendar_diagnostic"] = diagnostic
+        elif calendar_out_of_range:
             row["coverage_reason"] = "calendar_out_of_range"
         output.append(row)
     return output

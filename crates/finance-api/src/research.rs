@@ -69,13 +69,16 @@ pub struct Window {
     pub calendar_end: Option<NaiveDate>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observations: Option<u32>,
-    pub expected_sessions: u32,
-    pub missing_sessions: u32,
+    pub expected_sessions: Option<u32>,
+    pub missing_sessions: Option<u32>,
     pub missing_pct: Option<String>,
     pub coverage: Coverage,
-    /// Reason reported when requested dates extend beyond the exchange calendar bounds.
+    /// Reason reported when the calendar cannot cover the requested dates.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coverage_reason: Option<String>,
+    /// Calendar name, attempted dates, and construction error when unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calendar_diagnostic: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rf_source: Option<String>,
     pub metrics: Option<WindowMetrics>,
@@ -145,6 +148,25 @@ mod tests {
         assert_eq!(serialized["calendar_start"], "1990-12-03");
         assert_eq!(serialized["calendar_end"], "2024-06-05");
         assert_eq!(serialized["coverage_reason"], "calendar_out_of_range");
+        assert_eq!(serialized["metrics"], Value::Null);
+    }
+
+    #[test]
+    fn window_json_preserves_unavailable_calendar_diagnostic_and_unknown_counts() {
+        let report = json!({
+            "window": "50y",
+            "calendar_diagnostic": "XTAE 1976-01-16 to 2026-01-16: ValueError: Special dates are not sessions.",
+            "coverage_reason": "calendar_unavailable",
+            "coverage": "insufficient",
+            "expected_sessions": null,
+            "missing_sessions": null
+        });
+        let data: Window = from_value(report.clone()).unwrap();
+        let serialized = to_value(data).unwrap();
+        assert_eq!(serialized["calendar_diagnostic"], report["calendar_diagnostic"]);
+        assert_eq!(serialized["coverage_reason"], "calendar_unavailable");
+        assert_eq!(serialized["expected_sessions"], Value::Null);
+        assert_eq!(serialized["missing_sessions"], Value::Null);
         assert_eq!(serialized["metrics"], Value::Null);
     }
 }

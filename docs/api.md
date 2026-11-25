@@ -65,4 +65,6 @@ GET /api/v1/backtests/datasets 返回具名日线 catalog 的可选标的、来�
 
 `coverage=insufficient` 时 `metrics` 为 `null`。满窗的 `metrics` 包含 `return_pct`、`cagr_pct`、`max_drawdown_pct`、`volatility_pct`、`turnover_pct` 和无量纲的 `sharpe`，计算值为十进制字符串，无法计算的单项为 `null`。当前作业标记 `rf_source="rf=0"`。已有的成功摘要仍可读取，可能只有三个固定窗口及原有字段。判定和计算口径见 [日线窗口](../python/README.md#日线窗口)。
 
+日历构造失败的行记录 `coverage_reason="calendar_unavailable"` 和 `calendar_diagnostic`，该行的 `calendar_start`、应有交易日数、缺失交易日数及缺失比例为 `null`。`calendar_end` 省略。
+
 GET /api/v1/backtests/by-key 使用提交时的同一 `Idempotency-Key` 请求头。存在时返回原作业 ID，不存在时返回 404。经 web 查询时也使用提交凭据。详情继续用 GET /api/v1/backtests/{id}。回测条件和风险边界见 [历史回测](historical-backtest.md)。
