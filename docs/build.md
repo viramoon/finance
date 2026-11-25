@@ -18,7 +18,7 @@
 
 ## 官方最小示例
 
-执行 `bash scripts/smoke.sh`，直接运行 vendor 内 examples/backtest/example_01_load_bars_from_custom_csv/run_example.py；使用上游自带 CSV 和计数策略，核对处理了 9 根 bar。无网络请求、无真实账户、无自研策略，测试不可用导入成功代替实际 BacktestEngine 运行。
+执行 `bash scripts/smoke.sh`，通过与示例回测作业共用的 `run_sample` 包装运行 vendor 内的 `examples/backtest/example_01_load_bars_from_custom_csv/run_example.py`。使用上游自带 CSV 和计数策略，核对 BacktestEngine 实际处理了 9 根 bar。包装在 wrangler 转换前拒收预 1970 时间戳，正常运行只生成 smoke 日志。该步骤全程离线，使用模拟账户和上游策略。
 
 CI 使用 GitHub 托管 ubuntu-24.04 runner，checkout submodules，缓存 LLVM、cargo 编译产物和源码构建 wheel；setup-uv 的缓存目录与构建入口的 uv-cache 一致。首次构建后立即第二次验证 wheel 缓存，之后的 CI 运行可恢复 GitHub cache；日志、回测与两次耗时上传 artifact。缓存命中仍运行来源校验和上游回测。
 

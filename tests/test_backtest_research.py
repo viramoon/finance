@@ -1,14 +1,17 @@
 import csv
 from datetime import date, datetime, timezone
 from decimal import Decimal
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from nautilus_trader.model.data import Bar
 from nautilus_trader.model.objects import Price, Quantity
 from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 
+from fertile_finance.backtest_job import execute
 from fertile_finance.backtest_research import coverage_windows, run_research
 from fertile_finance.collector_store import open_store
 from fertile_finance.research_catalog import ResearchError, bar_type, import_catalog, sessions
@@ -117,3 +120,19 @@ class BacktestResearch(unittest.TestCase):
         self.assertEqual([row["coverage"] for row in coverage_windows(sample, end)], ["full"]*3)
         sample.pop(days_50[5])
         self.assertEqual(coverage_windows(sample, end)[0]["coverage"], "insufficient")
+
+    def test_successful_job_persists_window_metrics_as_decimal_text(self):
+        days = list(sessions(date(2024, 11, 25), date(2024, 12, 2)))
+        self.load(zip(days, [100, 100, 110, 120, 120], [100] * 5, strict=True))
+        target = self.root / "result.json"
+        with patch.dict("os.environ", {"FERTILE_RESEARCH_ROOT": str(self.catalog)}):
+            execute(self.job(end="2024-12-02"), target)
+        out = json.loads(target.read_text())
+        rows = out["research"]["windows"]
+        self.assertEqual([row["window"] for row in rows], ["50y", "10y", "5y", "longest_sample"])
+        self.assertTrue(all(row["metrics"] is None for row in rows[:3]))
+        longest = rows[-1]
+        self.assertEqual((longest["actual_start"], longest["observations"]), ("2024-11-27", 3))
+        self.assertEqual(longest["rf_source"], "rf=0")
+        self.assertEqual(longest["metrics"]["turnover_pct"], "1.2006")
+        self.assertTrue(all(isinstance(value, str) for value in longest["metrics"].values()))
