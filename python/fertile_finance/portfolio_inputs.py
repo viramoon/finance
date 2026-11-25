@@ -1,11 +1,12 @@
 """Point-in-time inputs for the XNYS portfolio research API."""
 
 from bisect import bisect_left, bisect_right
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, localcontext
 from fractions import Fraction
+from types import MappingProxyType
 
 from .research_decimal import EXACT_RESEARCH_CONTEXT, RESEARCH_CONTEXT
 
@@ -110,6 +111,20 @@ class FactorValue:
 
 
 @dataclass(frozen=True)
+class SignalContext:
+    """Values available to a target-weight function at the current session close."""
+
+    date: date
+    signal_ts: int
+    members: frozenset[str]
+    closes: Mapping[str, Decimal]
+    equity: Decimal | None
+
+
+type TargetFunction = Callable[[SignalContext], Mapping[str, Decimal]]
+
+
+@dataclass(frozen=True)
 class DataGap:
     date: date
     instrument_id: str
@@ -131,6 +146,8 @@ class _PortfolioInputs:
     _factor_dates: dict[str, list[date]]
     _price_dates: dict[str, list[date]]
     _top_n: int | None
+    _target_fn: TargetFunction | None
+    fixture_zero_volume: bool
 
     def _prior_date(self, day, instrument_id, dates):
         entered = self._entered[day].get(instrument_id)
@@ -140,11 +157,11 @@ class _PortfolioInputs:
         return None
 
     def signal_bar(self, day, instrument_id, *, fill_missing=False):
-        """Return the current real print or an explicitly carried earlier print."""
+        """Return an eligible current bar or an explicitly carried earlier bar."""
         if instrument_id not in self.members[day]:
             return None, None
         bar = self.bars[day].get(instrument_id)
-        if bar is not None and bar.volume.raw > 0:
+        if bar is not None and (bar.volume.raw > 0 or self.fixture_zero_volume):
             return bar, day
         if fill_missing:
             previous = self._prior_date(day, instrument_id, self._price_dates[instrument_id])
@@ -152,13 +169,14 @@ class _PortfolioInputs:
                 return self.bars[previous][instrument_id], previous
         return None, None
 
-    def resolve_targets(self, day, *, fill_missing=False):
+    def resolve_targets(self, day, *, fill_missing=False, equity=None):
         """Select weights from eligible members and return the observed input gaps."""
         gaps = []
         eligible = []
+        callback_closes = {} if self._target_fn is not None else None
         for instrument_id in sorted(self.members[day]):
             raw = self.bars[day].get(instrument_id)
-            if raw is not None and raw.volume.raw == 0:
+            if raw is not None and raw.volume.raw == 0 and not self.fixture_zero_volume:
                 gaps.append(DataGap(day, instrument_id, "zero_volume"))
                 continue
             bar, price_date = self.signal_bar(day, instrument_id, fill_missing=fill_missing)
@@ -173,6 +191,15 @@ class _PortfolioInputs:
                 gaps.append(DataGap(day, instrument_id, "missing_factor", factor_date))
             if bar is not None and factor_date is not None:
                 eligible.append((instrument_id, factor_date))
+                if callback_closes is not None:
+                    callback_closes[instrument_id] = bar.close.as_decimal()
+
+        if self._target_fn is not None:
+            context = SignalContext(day, self.closes[day], self.members[day], MappingProxyType(callback_closes), equity)
+            with localcontext(RESEARCH_CONTEXT):
+                targets = self._target_fn(context)
+            weights = _validated_weights(targets, self.assets)
+            return {key: weights[key] for key, _ in eligible if key in weights}, gaps
 
         if self._top_n is not None:
             ranked = sorted(eligible, key=lambda item: self._factors[item[0]][item[1]], reverse=True)
@@ -214,7 +241,7 @@ def _require_known(available_ts, deadline, description):
         raise ResearchError("lookahead", f"{description} is only available after its required session time")
 
 
-def _prepare_assets(assets, schedule, closes):
+def _prepare_assets(assets, schedule, closes, *, min_assets):
     instruments = {}
     bars = {day: {} for day in closes}
     for asset in assets:
@@ -256,7 +283,9 @@ def _prepare_assets(assets, schedule, closes):
             observed.add(day)
             if day in bars:
                 bars[day][key] = bar
-    if len(instruments) < 2:
+    if len(instruments) < min_assets:
+        if min_assets == 1:
+            raise ResearchError("invalid_instrument", "Supply at least one XNYS equity")
         raise ResearchError("invalid_instrument", "Supply at least two distinct XNYS equities")
     if not any(bars.values()):
         raise ResearchError("no_data", "No portfolio bars in the requested range")
@@ -295,6 +324,17 @@ def _prepare_universe(universe, instruments, schedule, opens):
     return members_by_date, entered_by_date
 
 
+def _validated_weights(weights, instruments):
+    if not isinstance(weights, Mapping) or not weights.keys() <= instruments.keys():
+        raise ResearchError("invalid_weights", "Supply a target mapping with supplied instrument IDs")
+    values = weights.values()
+    if any(not isinstance(value, Decimal) or not value.is_finite() or not 0 <= value <= 1 for value in values):
+        raise ResearchError("invalid_weights", "Each target weight must be a finite Decimal between zero and one")
+    if sum(map(Fraction, values)) > 1:
+        raise ResearchError("invalid_weights", "Total target weight cannot exceed one")
+    return dict(weights)
+
+
 def _prepare_weights(rows, instruments, schedule):
     weights = {}
     for row in rows:
@@ -304,12 +344,7 @@ def _prepare_weights(rows, instruments, schedule):
         _require_known(row.available_ts, deadline, f"Target weights for {row.date}")
         if row.date in weights or not row.weights.keys() <= instruments.keys():
             raise ResearchError("invalid_weights", "Use at most one target per date and supplied instrument IDs")
-        values = row.weights.values()
-        if any(not isinstance(value, Decimal) or not value.is_finite() or not 0 <= value <= 1 for value in values):
-            raise ResearchError("invalid_weights", "Each target weight must be a finite Decimal between zero and one")
-        if sum(map(Fraction, values)) > 1:
-            raise ResearchError("invalid_weights", "Total target weight cannot exceed one")
-        weights[row.date] = dict(row.weights)
+        weights[row.date] = _validated_weights(row.weights, instruments)
     if not weights:
         raise ResearchError("invalid_weights", "Provide at least one dated target weight row")
     return weights
@@ -329,17 +364,20 @@ def _prepare_factors(rows, instruments, schedule):
     return factors
 
 
-def prepare_portfolio(assets, *, start, end, universe, target_weights=None, factors=None, top_n=None):
+def prepare_portfolio(
+    assets, *, start, end, universe, target_weights=None, factors=None, top_n=None, target_fn=None, min_assets=2,
+    fixture_zero_volume=False,
+):
     """Validate chronological input contracts before running Nautilus."""
     _valid_date(start)
     _valid_date(end)
     if start > end:
         raise ResearchError("invalid_date", "Portfolio start must be on or before end")
-    if (target_weights is None) == (factors is None):
-        raise ResearchError("invalid_parameters", "Choose dated target weights or cross-sectional factors")
+    if sum(source is not None for source in (target_weights, factors, target_fn)) != 1:
+        raise ResearchError("invalid_parameters", "Choose dated target weights, a target function or cross-sectional factors")
     if factors is not None and (type(top_n) is not int or top_n < 1):
         raise ResearchError("invalid_parameters", "Factor ranking requires a positive integer top_n")
-    if target_weights is not None and top_n is not None:
+    if factors is None and top_n is not None:
         raise ResearchError("invalid_parameters", "top_n applies to factor ranking")
 
     schedule = nyse().schedule
@@ -348,7 +386,7 @@ def prepare_portfolio(assets, *, start, end, universe, target_weights=None, fact
     closes = {label.date(): unix_nanos(value.value) for label, value in days["close"].items()}
     if len(opens) < 2:
         raise ResearchError("no_data", "Require at least two XNYS sessions")
-    instruments, bars = _prepare_assets(assets, schedule, closes)
+    instruments, bars = _prepare_assets(assets, schedule, closes, min_assets=min_assets)
     members, entered = _prepare_universe(universe, instruments, schedule, opens)
     weights = _prepare_weights(target_weights, instruments, schedule) if target_weights is not None else {}
     scores = _prepare_factors(factors, instruments, schedule) if factors is not None else {}
@@ -356,7 +394,7 @@ def prepare_portfolio(assets, *, start, end, universe, target_weights=None, fact
     price_dates = {key: [] for key in instruments}
     for day, by_instrument in bars.items():
         for key, bar in by_instrument.items():
-            if bar.volume.raw > 0:
+            if bar.volume.raw > 0 or fixture_zero_volume:
                 price_dates[key].append(day)
     return _PortfolioInputs(instruments, bars, opens, closes, members, entered,
-                            sorted(weights), weights, scores, factor_dates, price_dates, top_n)
+                            sorted(weights), weights, scores, factor_dates, price_dates, top_n, target_fn, fixture_zero_volume)

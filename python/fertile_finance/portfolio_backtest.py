@@ -20,13 +20,15 @@ with localcontext(RESEARCH_CONTEXT):
     from nautilus_trader.model.data import CustomData, DataType, QuoteTick
     from nautilus_trader.model.enums import AccountType, OmsType, OrderSide, TimeInForce
     from nautilus_trader.model.identifiers import ClientId
-    from nautilus_trader.model.objects import QUANTITY_MAX, Money, Quantity
+    from nautilus_trader.model.objects import QUANTITY_MAX, Money, Price, Quantity
     from nautilus_trader.trading.strategy import Strategy
 
+    from .fill_audit import FillSignal, audit_logical_fills
     from .portfolio_inputs import (
         DataGap,
         FactorValue,
         PortfolioAsset,
+        TargetFunction,
         TargetWeights,
         UniverseSnapshot,
         prepare_portfolio,
@@ -40,6 +42,7 @@ FillTiming = Literal["next_open", "next_close"]
 _CLOCK_CLIENT = ClientId("PORTFOLIO-CLOCK")
 _MAX_SHARES = int(QUANTITY_MAX)
 _QUOTE_SIZE = Quantity.from_int(_MAX_SHARES)
+_FIXTURE_SIZE = Quantity.from_int(1)
 
 
 def _native_cash(amount):
@@ -121,6 +124,11 @@ class FillAudit:
     order_id: str
     trade_id: str
 
+    @property
+    def notional(self) -> Decimal:
+        with localcontext(EXACT_RESEARCH_CONTEXT):
+            return self.quantity * self.price
+
 
 @dataclass(frozen=True)
 class RebalanceAudit:
@@ -176,13 +184,13 @@ class _ExpectedFill:
     fill_ts: int
     side: OrderSide
     quantity: int
-    price: Decimal
+    parts: tuple[tuple[Quantity, Price], ...]
     cash_after: Decimal
-    filled: bool = False
+    received: int = 0
 
 
 class _PortfolioStrategy(Strategy):
-    def __init__(self, inputs, config):
+    def __init__(self, inputs, config, *, research_details):
         super().__init__()
         self.inputs = inputs
         self.settings = config
@@ -193,6 +201,8 @@ class _PortfolioStrategy(Strategy):
         self.gaps = []
         self.rebalances = []
         self.fills = []
+        self.raw_fills = [] if research_details else None
+        self.weights = {} if research_details else None
         self.orders = {}
         self.quotes = {}
         self.pending = None
@@ -213,6 +223,7 @@ class _PortfolioStrategy(Strategy):
 
     def _mark_equity(self, day):
         equity = self.cash
+        marked_positions = {} if self.weights is not None else None
         members = self.inputs.members[day]
         for key, shares in sorted(self.shares.items()):
             if not shares:
@@ -230,7 +241,10 @@ class _PortfolioStrategy(Strategy):
                 self.gaps.append(DataGap(day, key, "valuation_price", source_day))
                 self.carried_valuation_dates.add(day)
             if equity is not None:
-                equity += shares * bar.close.as_decimal()
+                value = shares * bar.close.as_decimal()
+                equity += value
+                if marked_positions is not None:
+                    marked_positions[key] = value
 
         # A cash balance alone is not a market observation. A carried holding
         # mark can still be used by the strategy and is excluded from coverage.
@@ -239,6 +253,11 @@ class _PortfolioStrategy(Strategy):
         ):
             equity = None
 
+        if marked_positions is not None:
+            with localcontext(RESEARCH_CONTEXT):
+                self.weights[day] = None if equity is None else {
+                    key: value / equity for key, value in marked_positions.items()
+                }
         return equity
 
     def mark_and_signal(self, event):
@@ -252,7 +271,7 @@ class _PortfolioStrategy(Strategy):
         self.equity[day] = equity
         if not due:
             return
-        targets, gaps = self.inputs.resolve_targets(day, fill_missing=self.settings.fill_missing)
+        targets, gaps = self.inputs.resolve_targets(day, fill_missing=self.settings.fill_missing, equity=equity)
         self.gaps.extend(gaps)
         # A repeating equal weight is rounded only for the public Decimal audit.
         with localcontext(RESEARCH_CONTEXT, prec=28, rounding=ROUND_DOWN):
@@ -301,9 +320,17 @@ class _PortfolioStrategy(Strategy):
                 self.gaps.append(DataGap(day, key, kind))
                 continue
             change = changes[key]
-            price = quote.bid_price.as_decimal()
+            instrument = self.inputs.assets[key]
+            price = quote.bid_price
+            fixture_execution = self.inputs.fixture_zero_volume and quote.bid_size == _FIXTURE_SIZE
             if change > 0:
-                size = min(change, Fraction(self.cash) // Fraction(price))
+                first_price = Fraction(price.as_decimal())
+                cash = Fraction(self.cash)
+                affordable = cash // first_price
+                if fixture_execution and affordable:
+                    next_price = first_price + Fraction(instrument.price_increment.as_decimal())
+                    affordable = 1 + (cash - first_price) // next_price
+                size = min(change, affordable)
                 if size < change:
                     self.gaps.append(DataGap(day, key, "execution_cash"))
                 side = OrderSide.BUY
@@ -315,41 +342,68 @@ class _PortfolioStrategy(Strategy):
             if size > _MAX_SHARES:
                 raise ResearchError("invalid_parameters", "Order size exceeds Nautilus Quantity range")
             quantity = Quantity.from_int(size)
-            cash_after = _cash_after_order(
-                self.inputs.assets[key], quantity, quote.bid_price, side, self.cash, day,
-            )
+            parts = _execution_parts(instrument, price, quantity, side, fixture_execution)
+            cash_after = self.cash
+            for part_quantity, part_price in parts:
+                cash_after = _cash_after_order(instrument, part_quantity, part_price, side, cash_after, day)
             order = self.order_factory.market(
-                quote.instrument_id, side, quantity, time_in_force=TimeInForce.FOK,
+                quote.instrument_id, side, quantity,
+                time_in_force=TimeInForce.GTC if fixture_execution else TimeInForce.FOK,
             )
-            plan = _ExpectedFill(key, signal_day, signal_ts, day, event.ts_event, side, size, price, cash_after)
+            plan = _ExpectedFill(key, signal_day, signal_ts, day, event.ts_event, side, size, parts, cash_after)
             self.orders[order.client_order_id] = plan
             self.submit_order(order)
-            if not plan.filled:
+            if plan.received != len(plan.parts):
                 raise ResearchError("execution_audit_failed", f"Expected an immediate full fill of {key} at {day}")
 
     def on_order_filled(self, event):
         plan = self.orders.get(event.client_order_id)
-        size = event.last_qty.as_decimal()
-        price = event.last_px.as_decimal()
-        if (plan is None or plan.filled or str(event.instrument_id) != plan.instrument_id
-                or not plan.signal_ts < plan.fill_ts == event.ts_event or plan.quantity != size
-                or plan.side != event.order_side or plan.price != price or event.commission.as_decimal() != 0):
+        if (plan is None or plan.received >= len(plan.parts) or str(event.instrument_id) != plan.instrument_id
+                or not plan.signal_ts < plan.fill_ts == event.ts_event or plan.side != event.order_side
+                or (event.last_qty, event.last_px) != plan.parts[plan.received]
+                or event.commission.as_decimal() != 0):
             raise ResearchError("execution_audit_failed", "Unexpected time, size, price or fee for portfolio fill")
-        plan.filled = True
+        if self.raw_fills is not None:
+            self.raw_fills.append(event)
+        plan.received += 1
+        if plan.received != len(plan.parts):
+            return
         change = plan.quantity if plan.side == OrderSide.BUY else -plan.quantity
         self.shares[plan.instrument_id] += change
         self.cash = plan.cash_after
         if self.cash < 0 or self.shares[plan.instrument_id] < 0:
             raise ResearchError("execution_audit_failed", "Portfolio incurred borrowing or a short position")
-        self.fills.append(FillAudit(
-            plan.instrument_id, plan.signal_date, plan.signal_ts, plan.fill_date, event.ts_event,
-            "buy" if change > 0 else "sell", size, price, str(event.client_order_id), str(event.trade_id),
-        ))
+        if self.raw_fills is None:
+            self.fills.append(FillAudit(
+                plan.instrument_id, plan.signal_date, plan.signal_ts, plan.fill_date, event.ts_event,
+                "buy" if change > 0 else "sell", event.last_qty.as_decimal(), event.last_px.as_decimal(),
+                str(event.client_order_id), str(event.trade_id),
+            ))
 
 
-def _simulate(inputs, config):
+def _execution_parts(instrument, price, quantity, side, fixture_execution):
+    if not fixture_execution or quantity == _FIXTURE_SIZE:
+        return ((quantity, price),)
+    # The pinned L1 engine exhausts the one-share quote, then continues a
+    # market order one tick away. Require that exact pattern for fixture fills.
+    try:
+        with localcontext(EXACT_RESEARCH_CONTEXT):
+            initial = price.as_decimal()
+            tick = instrument.price_increment.as_decimal()
+            continuation = initial + tick if side == OrderSide.BUY else initial - tick
+            if continuation <= 0:
+                raise ValueError("fixture continuation price must be positive")
+            next_price = Price.from_decimal(continuation)
+            if next_price.as_decimal() != continuation:
+                raise ValueError("fixture continuation is outside native price range")
+    except (ArithmeticError, ValueError) as exc:
+        raise ResearchError("fixture_price", f"{instrument.id}: {exc}") from exc
+    return ((_FIXTURE_SIZE, price), (Quantity.from_int(int(quantity.as_decimal()) - 1), next_price))
+
+
+def _simulate(inputs, config, *, research_details=False):
     engine = BacktestEngine(BacktestEngineConfig(logging=LoggingConfig(bypass_logging=True)))
-    strategy = _PortfolioStrategy(inputs, config)
+    strategy = _PortfolioStrategy(inputs, config, research_details=research_details)
     venue = next(iter(inputs.assets.values())).id.venue
     try:
         engine.add_venue(
@@ -368,11 +422,12 @@ def _simulate(inputs, config):
             execution_at_close = config.fill_timing == "next_close"
             for key, bar in sorted(inputs.bars[day].items()):
                 bars_by_asset[key].append(bar)
-                if key in inputs.members[day] and bar.volume.raw > 0:
+                if key in inputs.members[day] and (bar.volume.raw > 0 or inputs.fixture_zero_volume):
                     when = close if execution_at_close else opening
                     price = bar.close if execution_at_close else bar.open
+                    size = _QUOTE_SIZE if bar.volume.raw > 0 else _FIXTURE_SIZE
                     quotes_by_asset[key].append(QuoteTick(
-                        inputs.assets[key].id, price, price, _QUOTE_SIZE, _QUOTE_SIZE, when, when,
+                        inputs.assets[key].id, price, price, size, size, when, when,
                     ))
             if not execution_at_close:
                 clocks.append(CustomData(_SESSION_EVENT, _SessionEvent(day, opening, closing=False)))
@@ -393,8 +448,9 @@ def _simulate(inputs, config):
                      for position in open_positions if position.is_long}
         account = engine.cache.account_for_venue(venue)
         held = {key: shares for key, shares in strategy.shares.items() if shares}
+        fill_count = len(strategy.fills) if strategy.raw_fills is None else len(strategy.orders)
         if (set(inputs.closes) != strategy.equity.keys() or native_orders != audited_orders
-                or result.total_orders != len(strategy.fills) or positions != held
+                or result.total_orders != fill_count or positions != held
                 or len(positions) != len(open_positions)
                 or account.balance_total(USD).as_decimal() != strategy.cash):
             raise ResearchError("execution_audit_failed", "Engine orders, positions, cash or session marks disagree")
@@ -411,7 +467,7 @@ def _performance(equity, closes, fills, rf, *, carried_valuation_dates):
     turnover = dict.fromkeys(closes, Decimal(0))
     with localcontext(RESEARCH_CONTEXT):
         for fill in fills:
-            turnover[fill.fill_date] += fill.quantity * fill.price / equity[fill.signal_date]
+            turnover[fill.fill_date] += fill.notional / equity[fill.signal_date]
         windows = coverage_windows(
             observed, next(reversed(closes)), rf=aligned_rf, rf_source=rf.source if rf is not None else None,
             turnover=turnover, longest_through_end=True,
@@ -432,18 +488,40 @@ def run_portfolio_backtest(
     rf: RiskFreeSeries | None = None,
 ) -> PortfolioResult:
     """Run a long-only cash portfolio, selecting by target weights or a ranked factor."""
+    result, _, _, _ = _run_portfolio_backtest(
+        assets=assets, universe=universe, start=start, end=end, config=config,
+        targets=targets, factors=factors, top_n=top_n, rf=rf,
+    )
+    return result
+
+
+def _run_portfolio_backtest(
+    *, assets, universe, start, end, config, targets=None, factors=None, top_n=None, rf=None,
+    target_fn: TargetFunction | None = None, research_details=False, fixture_zero_volume=False,
+):
     # The engine invokes Python callbacks synchronously and also converts native
     # fixed-point objects through Decimal on this thread.
     with localcontext(RESEARCH_CONTEXT):
         inputs = prepare_portfolio(
             assets, start=start, end=end, universe=universe, target_weights=targets, factors=factors, top_n=top_n,
+            target_fn=target_fn, min_assets=1 if research_details else 2, fixture_zero_volume=fixture_zero_volume,
         )
-        strategy, positions, orders, total_positions = _simulate(inputs, config)
+        strategy, positions, orders, total_positions = _simulate(inputs, config, research_details=research_details)
+        logical_fills = ()
+        if strategy.raw_fills is not None:
+            signals = {
+                str(order_id): FillSignal(plan.signal_date, plan.signal_ts, plan.fill_date)
+                for order_id, plan in strategy.orders.items()
+            }
+            logical_fills = audit_logical_fills(strategy.raw_fills, signals)
+            if len(logical_fills) != orders:
+                raise ResearchError("execution_audit_failed", "Expected one logical fill per portfolio order")
         windows, risk_free = _performance(
-            strategy.equity, inputs.closes, strategy.fills, rf,
+            strategy.equity, inputs.closes, logical_fills if research_details else strategy.fills, rf,
             carried_valuation_dates=strategy.carried_valuation_dates,
         )
-        return PortfolioResult(
+        result = PortfolioResult(
             config.fill_timing, config.fill_missing, strategy.equity, positions, tuple(strategy.fills),
             tuple(strategy.rebalances), tuple(strategy.gaps), orders, total_positions, windows, risk_free,
         )
+        return result, strategy.weights, logical_fills, strategy.cash
