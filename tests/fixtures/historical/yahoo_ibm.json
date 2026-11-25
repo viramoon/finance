@@ -1,0 +1,42 @@
+{
+  "chart": {
+    "result": [
+      {
+        "meta": {
+          "currency": "USD",
+          "symbol": "IBM",
+          "exchangeName": "NYQ",
+          "fullExchangeName": "NYSE",
+          "instrumentType": "EQUITY",
+          "exchangeTimezoneName": "America/New_York",
+          "dataGranularity": "1d"
+        },
+        "timestamp": [1704292200, 1719927000, 1720013400, 1732890600],
+        "indicators": {
+          "quote": [
+            {
+              "open": [148.1234567890123456, 149, 75.40, 77.35],
+              "high": [153.35, 151, 78.15, 80.45],
+              "low": [146.25, 147, 74.60, 76.20],
+              "close": [150.1234567890123456, 150, 77.50, 79.35],
+              "volume": [12345678, 23456789, 34567890, 0]
+            }
+          ],
+          "adjclose": [
+            {"adjclose": [75.0617283945061728, 100, 76.25, 79.35]}
+          ]
+        },
+        "events": {
+          "dividends": {
+            "1704292200": {"amount": 0.212345678901234567, "date": 1704292200},
+            "1733149800": {"amount": 0.375, "date": 1733149800}
+          },
+          "splits": {
+            "1720013400": {"date": 1720013400, "numerator": 2.0, "denominator": 1.0, "splitRatio": "2:1"}
+          }
+        }
+      }
+    ],
+    "error": null
+  }
+}

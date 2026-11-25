@@ -74,3 +74,65 @@ curl -sS http://127.0.0.1:8081/api/v1/market/status
 记录断开和恢复的 UTC 时间、订阅重建、补数区间、首尾 bar 时间和数量。核对 Nautilus 在受影响交易时段读回的时间戳与 IB 历史返回一致，再确认 ready 为 200。休市和无成交区间要单独标注，不能用合成行情填补。遇到 2FA、无权限或历史数据不可用时保存脱敏错误并保留未验证状态。
 
 历史回测导入、信号和审计见 [研究回测手册](docs/historical-backtest.md)。部署时向 API 和 worker 配置同一只读研究 catalog；请求状态和结果仍由持久作业队列管理。
+
+## 手工保存公开历史数据
+
+先确认 Yahoo、Ken French Data Library、FRED 及底层提供商允许所需的下载、使用和本地归档，并确认有网络访问。以下是有许可的人工步骤。CI 使用仓库内构造的小样本。下载文件存放在仓库之外。若服务端拒绝请求，检查数据许可与端点要求。
+
+从 finance 仓库根使用源码构建的 Python。示例下载 IBM 日线、French 日因子与动量、FRED 的 DGS10 日序列。若取得的是 FRED observations API JSON，可保存在本地后交给同一加载器读取。示例 Graph CSV 不需 API 密钥。
+
+```sh
+export FINANCE_PYTHON=/path/to/source-built/venv/bin/python
+export FINANCE_HISTORY_ARCHIVE=/path/to/permitted/archive
+export FERTILE_DATA_ROOT=/path/to/new/data-root
+export PYTHONPATH=python
+mkdir -p "$FINANCE_HISTORY_ARCHIVE"
+
+finance_yahoo_url=$("$FINANCE_PYTHON" - <<'PY'
+from datetime import date
+from fertile_finance.yahoo_daily import yahoo_chart_url
+
+print(yahoo_chart_url("IBM", date(2024, 1, 1), date(2024, 12, 31)))
+PY
+)
+curl --fail --location "$finance_yahoo_url" -o "$FINANCE_HISTORY_ARCHIVE/yahoo-IBM.json"
+curl --fail --location 'https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_Factors_daily_CSV.zip' \
+  -o "$FINANCE_HISTORY_ARCHIVE/french-factors.zip"
+curl --fail --location 'https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Momentum_Factor_daily_CSV.zip' \
+  -o "$FINANCE_HISTORY_ARCHIVE/french-momentum.zip"
+curl --fail --location 'https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS10&cosd=2024-01-01&coed=2024-12-31' \
+  -o "$FINANCE_HISTORY_ARCHIVE/fred-DGS10.csv"
+```
+
+记录各文件的获取日期和来源，核对 FRED 频率及单位。将下例的 `FINANCE_YAHOO_AS_OF` 改为 Yahoo 存档实际观测截止日。French 的完整存档通常含预 1970 记录，示例显式丢弃并报告。重复导入已存在区间时，应先核对覆盖范围，再向 `write_*` 传入 `mode="replace"` 及确认过的 `start`、`end`。
+
+```sh
+export FINANCE_YAHOO_AS_OF=YYYY-MM-DD
+"$FINANCE_PYTHON" - <<'PY'
+from datetime import date
+import os
+from pathlib import Path
+
+from fertile_finance.historical_catalog import HistoricalCatalog
+from fertile_finance.research_factors import load_fred, load_ken_french
+from fertile_finance.yahoo_daily import load_yahoo_daily
+
+archive = Path(os.environ["FINANCE_HISTORY_ARCHIVE"])
+catalog = HistoricalCatalog()
+yahoo = load_yahoo_daily(
+    archive / "yahoo-IBM.json",
+    adjustment_as_of=date.fromisoformat(os.environ["FINANCE_YAHOO_AS_OF"]),
+)
+french = load_ken_french(
+    archive / "french-factors.zip",
+    momentum_path=archive / "french-momentum.zip",
+    pre_epoch="drop",
+)
+fred = load_fred(archive / "fred-DGS10.csv", series_id="DGS10")
+print(catalog.write_yahoo(yahoo))
+print(catalog.write_french(french))
+print(catalog.write_fred(fred))
+PY
+```
+
+核对报告里的实际写入首尾、记录数与预 1970 丢弃范围。导入 Yahoo 时，同时核对写入的缺失行情行数 `missing_quote_rows` 和跳过的全空非会话行数 `skipped_missing_non_sessions`。读取及旧 SPY 数据迁移约定见 [Python 研究接口](python/README.md#历史数据接口) 和 [历史数据目录](catalog/README.md#既有-spy-固定-2100-utc-数据)。
