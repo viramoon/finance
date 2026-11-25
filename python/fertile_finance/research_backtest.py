@@ -30,6 +30,7 @@ class BacktestMetadata:
     costs: Decimal
     risk_free: dict[str, str]
     benchmark: str | None
+    fixture_zero_volume: bool
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,7 @@ class BacktestResult:
     weights: dict[date, dict[str, Decimal] | None]
     targets: tuple[RebalanceAudit, ...]
     positions: dict[str, Decimal]
+    cash: Decimal
     fill_audit: tuple[AuditedFill, ...]
     gaps: tuple[DataGap, ...]
     total_orders: int
@@ -76,63 +78,72 @@ def run_backtest(
     universe: Sequence[UniverseSnapshot],
     raw_split_free_reviewed: bool = False,
     rf_available_ts: Mapping[date, int] | None = None,
+    fixture_zero_volume: bool = False,
 ) -> BacktestResult:
-    """Run reviewed catalog data with point-in-time targets and execution."""
-    if costs is not None and not (
-        (type(costs) is int and costs == 0) or (isinstance(costs, Decimal) and costs.is_zero())
-    ):
-        raise ResearchError("unsupported_costs", "Research backtests support only zero costs")
-    config = PortfolioConfig(fill_timing=fill_timing)
-    start = iso_date(start.isoformat() if type(start) is date else start)
-    end = iso_date(end.isoformat() if type(end) is date else end)
-    if start > end:
-        raise ResearchError("invalid_date", "Portfolio start must be on or before end")
-    if not isinstance(instruments, Sequence) or isinstance(instruments, (str, bytes)) or (
-        not instruments or any(not isinstance(instrument, str) for instrument in instruments)
-        or len(set(instruments)) != len(instruments)
-    ):
-        raise ResearchError("invalid_instrument", "Supply a sequence of distinct Yahoo catalog instrument IDs")
-    instruments = tuple(instruments)
-    if raw_split_free_reviewed is not True:
-        raise ResearchError("invalid_source", "Review supplied prices as raw, unadjusted and split-free")
-    if benchmark is not None and not isinstance(benchmark, str):
-        raise ResearchError("invalid_instrument", "Supply a Yahoo catalog ID for the benchmark")
-    target_fn = strategy if callable(strategy) else None
-    if target_fn is None and (
-        not isinstance(strategy, Sequence) or isinstance(strategy, (str, bytes))
-    ):
-        raise ResearchError("invalid_weights", "Supply a target function or a sequence of TargetWeights")
+    """Run reviewed catalog data with point-in-time targets and execution.
 
-    catalog = HistoricalCatalog() if catalog is None else catalog
-    risk_free = _risk_free(catalog, start, end, rf, rf_available_ts)
-    assets = tuple(
-        PortfolioAsset.from_yahoo(catalog.read_yahoo(key, start=start, end=end), raw_split_free_reviewed=True)
-        for key in instruments
-    )
-    reference = catalog.read_yahoo(benchmark, start=start, end=end) if benchmark is not None else None
-    portfolio, weights, fills = _run_portfolio_backtest(
-        assets=assets, universe=universe, start=start, end=end, config=config,
-        targets=strategy if target_fn is None else None, target_fn=target_fn,
-        rf=risk_free, research_details=True,
-    )
-    benchmark_nav, benchmark_windows = (
-        _benchmark(reference, sessions(start, end), risk_free) if reference is not None else (None, None)
-    )
-    return BacktestResult(
-        metadata=BacktestMetadata(
-            instruments, start, end, config.fill_timing, config.initial_cash, Decimal(0), portfolio.risk_free, benchmark,
-        ),
-        nav=portfolio.equity,
-        weights=weights,
-        targets=portfolio.rebalances,
-        positions=portfolio.positions,
-        fill_audit=fills,
-        gaps=portfolio.gaps,
-        total_orders=portfolio.total_orders,
-        windows=portfolio.windows,
-        benchmark_nav=benchmark_nav,
-        benchmark_windows=benchmark_windows,
-    )
+    Enable fixture_zero_volume only for synthetic equity data in a research fixture.
+    """
+    with localcontext(RESEARCH_CONTEXT):
+        if costs is not None and not (
+            (type(costs) is int and costs == 0) or (isinstance(costs, Decimal) and costs.is_zero())
+        ):
+            raise ResearchError("unsupported_costs", "Research backtests support only zero costs")
+        if type(fixture_zero_volume) is not bool:
+            raise ResearchError("invalid_parameters", "fixture_zero_volume must be a boolean")
+        config = PortfolioConfig(fill_timing=fill_timing)
+        start = iso_date(start.isoformat() if type(start) is date else start)
+        end = iso_date(end.isoformat() if type(end) is date else end)
+        if start > end:
+            raise ResearchError("invalid_date", "Portfolio start must be on or before end")
+        if not isinstance(instruments, Sequence) or isinstance(instruments, (str, bytes)) or (
+            not instruments or any(not isinstance(instrument, str) for instrument in instruments)
+            or len(set(instruments)) != len(instruments)
+        ):
+            raise ResearchError("invalid_instrument", "Supply a sequence of distinct Yahoo catalog instrument IDs")
+        instruments = tuple(instruments)
+        if raw_split_free_reviewed is not True:
+            raise ResearchError("invalid_source", "Review supplied prices as raw, unadjusted and split-free")
+        if benchmark is not None and not isinstance(benchmark, str):
+            raise ResearchError("invalid_instrument", "Supply a Yahoo catalog ID for the benchmark")
+        target_fn = strategy if callable(strategy) else None
+        if target_fn is None and (
+            not isinstance(strategy, Sequence) or isinstance(strategy, (str, bytes))
+        ):
+            raise ResearchError("invalid_weights", "Supply a target function or a sequence of TargetWeights")
+
+        catalog = HistoricalCatalog() if catalog is None else catalog
+        risk_free = _risk_free(catalog, start, end, rf, rf_available_ts)
+        assets = tuple(
+            PortfolioAsset.from_yahoo(catalog.read_yahoo(key, start=start, end=end), raw_split_free_reviewed=True)
+            for key in instruments
+        )
+        reference = catalog.read_yahoo(benchmark, start=start, end=end) if benchmark is not None else None
+        portfolio, weights, fills, cash = _run_portfolio_backtest(
+            assets=assets, universe=universe, start=start, end=end, config=config,
+            targets=strategy if target_fn is None else None, target_fn=target_fn,
+            rf=risk_free, research_details=True, fixture_zero_volume=fixture_zero_volume,
+        )
+        benchmark_nav, benchmark_windows = (
+            _benchmark(reference, sessions(start, end), risk_free) if reference is not None else (None, None)
+        )
+        return BacktestResult(
+            metadata=BacktestMetadata(
+                instruments, start, end, config.fill_timing, config.initial_cash, Decimal(0),
+                portfolio.risk_free, benchmark, fixture_zero_volume,
+            ),
+            nav=portfolio.equity,
+            weights=weights,
+            targets=portfolio.rebalances,
+            positions=portfolio.positions,
+            cash=cash,
+            fill_audit=fills,
+            gaps=portfolio.gaps,
+            total_orders=portfolio.total_orders,
+            windows=portfolio.windows,
+            benchmark_nav=benchmark_nav,
+            benchmark_windows=benchmark_windows,
+        )
 
 
 def _risk_free(catalog, start, end, rf, available_ts):
@@ -164,8 +175,7 @@ def _benchmark(history: YahooHistory, closes: Mapping[date, int], rf: RiskFreeSe
         observed = {row.session: row.close for row in history.bars if row.close is not None}
     else:
         asset = PortfolioAsset.from_yahoo(history, raw_split_free_reviewed=True)
-        with localcontext(RESEARCH_CONTEXT):
-            prices = {bar.ts_event: bar.close.as_decimal() for bar in asset.bars if bar.volume.raw > 0}
+        prices = {bar.ts_event: bar.close.as_decimal() for bar in asset.bars if bar.volume.raw > 0}
         observed = {day: prices[when] for day, when in closes.items() if when in prices}
     nav = {day: observed.get(day) for day in closes}
     aligned_rf = daily_risk_free(closes, rf) if rf is not None else None

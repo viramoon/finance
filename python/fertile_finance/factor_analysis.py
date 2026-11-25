@@ -2,12 +2,16 @@
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import localcontext
 
 import numpy as np
 import pandas as pd
 from scipy.stats import pearsonr
 
-from .research_factors import FrenchDaily
+from .research_decimal import RESEARCH_CONTEXT
+
+with localcontext(RESEARCH_CONTEXT):
+    from .research_factors import FrenchDaily
 
 
 REQUIRED_FACTORS = ("Mkt-RF", "SMB", "HML")
@@ -59,11 +63,12 @@ def analyze_factors(
     names = [*REQUIRED_FACTORS]
     if "Mom" in factors.columns and (not french_input or factors["Mom"].notna().any()):
         names.append("Mom")
-    aligned = pd.concat([returns.rename("returns"), factors[names]], axis=1, join="outer").sort_index()
-    aligned = aligned.apply(pd.to_numeric)
-    if np.iscomplexobj(aligned.to_numpy()):
-        raise ValueError("Daily returns must be real numbers")
-    aligned = aligned.astype(float)
+    with localcontext(RESEARCH_CONTEXT):
+        aligned = pd.concat([returns.rename("returns"), factors[names]], axis=1, join="outer").sort_index()
+        aligned = aligned.apply(pd.to_numeric)
+        if np.iscomplexobj(aligned.to_numpy()):
+            raise ValueError("Daily returns must be real numbers")
+        aligned = aligned.astype(float)
     if np.isinf(aligned.to_numpy()).any():
         raise ValueError("Daily returns must be finite or missing")
     sample = aligned.dropna()

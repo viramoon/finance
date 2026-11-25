@@ -147,6 +147,7 @@ class _PortfolioInputs:
     _price_dates: dict[str, list[date]]
     _top_n: int | None
     _target_fn: TargetFunction | None
+    fixture_zero_volume: bool
 
     def _prior_date(self, day, instrument_id, dates):
         entered = self._entered[day].get(instrument_id)
@@ -156,11 +157,11 @@ class _PortfolioInputs:
         return None
 
     def signal_bar(self, day, instrument_id, *, fill_missing=False):
-        """Return the current real print or an explicitly carried earlier print."""
+        """Return an eligible current bar or an explicitly carried earlier bar."""
         if instrument_id not in self.members[day]:
             return None, None
         bar = self.bars[day].get(instrument_id)
-        if bar is not None and bar.volume.raw > 0:
+        if bar is not None and (bar.volume.raw > 0 or self.fixture_zero_volume):
             return bar, day
         if fill_missing:
             previous = self._prior_date(day, instrument_id, self._price_dates[instrument_id])
@@ -175,7 +176,7 @@ class _PortfolioInputs:
         callback_closes = {} if self._target_fn is not None else None
         for instrument_id in sorted(self.members[day]):
             raw = self.bars[day].get(instrument_id)
-            if raw is not None and raw.volume.raw == 0:
+            if raw is not None and raw.volume.raw == 0 and not self.fixture_zero_volume:
                 gaps.append(DataGap(day, instrument_id, "zero_volume"))
                 continue
             bar, price_date = self.signal_bar(day, instrument_id, fill_missing=fill_missing)
@@ -365,6 +366,7 @@ def _prepare_factors(rows, instruments, schedule):
 
 def prepare_portfolio(
     assets, *, start, end, universe, target_weights=None, factors=None, top_n=None, target_fn=None, min_assets=2,
+    fixture_zero_volume=False,
 ):
     """Validate chronological input contracts before running Nautilus."""
     _valid_date(start)
@@ -392,7 +394,7 @@ def prepare_portfolio(
     price_dates = {key: [] for key in instruments}
     for day, by_instrument in bars.items():
         for key, bar in by_instrument.items():
-            if bar.volume.raw > 0:
+            if bar.volume.raw > 0 or fixture_zero_volume:
                 price_dates[key].append(day)
     return _PortfolioInputs(instruments, bars, opens, closes, members, entered,
-                            sorted(weights), weights, scores, factor_dates, price_dates, top_n, target_fn)
+                            sorted(weights), weights, scores, factor_dates, price_dates, top_n, target_fn, fixture_zero_volume)

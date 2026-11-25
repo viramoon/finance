@@ -106,18 +106,19 @@ read_fred(series_id: str, *, start=None, end=None) -> FredDaily
 ```text
 fertile_finance.run_backtest(strategy, instruments, start, end, *, benchmark=None, costs=None,
              rf="kenfrench", fill_timing="next_open", catalog=None, universe=...,
-             raw_split_free_reviewed=False, rf_available_ts=None)
+             raw_split_free_reviewed=False, rf_available_ts=None, fixture_zero_volume=False)
 ```
 
 - `instruments` 是一个或多个不同的 Yahoo catalog 标的 ID。可成交标的为 XNYS 美元股票或 ETF。`start`、`end` 是含边界的 `date` 或 ISO 日期字符串，至少覆盖两个 XNYS 会话。默认 `catalog=None` 按 `FERTILE_DATA_ROOT` 打开 `HistoricalCatalog`。调用方先核实供应商 OHLCV 的原始、未复权及无拆股归一化口径，再设置 `raw_split_free_reviewed=True`。
 - `universe` 是调用方提供的 `UniverseSnapshot` 序列。首个会话开盘前须已有成员表，后续按实际可得时点更新成员。`strategy` 接收 `TargetWeights` 序列，或接收 `SignalContext` 并返回 `{标的 ID: Decimal 权重}` 的函数。每次回调只有当期会话的 `date`、收盘 `signal_ts`、`members`、可用原始收盘价 `closes` 和 `equity`。缺少持仓估值时 `equity` 为 `None`。函数可自行保留先前回调的状态。目标权重在 0 到 1 之间且总和至多为 1。
-- `fill_timing` 默认 `next_open`，可选 `next_close`。收盘信号仅在下一 XNYS 会话执行，零量或缺少执行价的意图会记录在 `gaps`。初始现金为 `100000.00` USD。佣金和滑点为零，`costs` 接受 `None`、整数 `0` 或 `Decimal(0)`。非零成本会报错。
+- `fill_timing` 默认 `next_open`，可选 `next_close`。收盘信号仅在下一 XNYS 会话执行，默认把零量或缺少执行价的意图记录在 `gaps`。初始现金为 `100000.00` USD。佣金为零，正成交量行情按指定开盘或收盘价成交，`costs` 接受 `None`、整数 `0` 或 `Decimal(0)`。非零成本会报错。
+- `fixture_zero_volume=True` 仅用于隔离的合成研究 fixture。调用方可用合成价格和零成交量构造具备 XNYS 权益规格的指数风格日线，将其写入临时 catalog，使零量 OHLC 参与信号、估值和执行。执行时给原生 L1 引擎提供一股的报价，市价单的余量由引擎按对买卖方向不利的一跳价格即时成交。系统在下单前核对各档金额与可用现金，并逐笔核对方向、时间、数量、价格和佣金。真实参考指数仍仅用于基准，常规组合及官方单标的作业继续执行原有零量和成交规则。 [公开回测回归](../tests/test_run_backtest.py)
 - `rf="kenfrench"` 从 catalog 读取 French 日 RF，并要求 `rf_available_ts` 为按观测日期索引、已核实的 UTC 纳秒发布时间。较早的观测可通过在该映射中提供较早日期来纳入读取范围，读取到的每条非空 RF 都需要时间证据。组合引擎按每段收益的起始收盘对齐已知利率，缺少当时可得 RF 的窗口 Sharpe 为 `None`。也可传入已构造的 `RiskFreeSeries`，或用 `rf=None` 显式选择 `rf=0`。
 - `benchmark` 可传入独立的 Yahoo catalog ID，包括只用于比较的美元参考指数。基准按源收盘价序列计算价格收益，窗口内换手为零。基准报告使用其自身有效观测和相同的区间截止日与 RF 对齐规则。缺失的基准观测保留为缺口。
 
-`BacktestResult.metadata` 记录标的、请求区间、成交时点、初始现金、成本、RF 来源及频率和基准 ID。`nav` 按会话返回组合净值，`weights` 返回当日已持有头寸的收盘权重，现金为剩余权重。估值缺失的净值和权重为 `None`。`targets` 提供解析后的目标权重审计，`positions` 为期末持仓，`total_orders` 为实际订单数。
+`BacktestResult.metadata` 记录标的、请求区间、成交时点、初始现金、成本、RF 来源及频率、基准 ID 和零量 fixture 开关。`nav` 按会话返回组合净值，`weights` 返回当日已持有头寸的收盘权重，现金为剩余权重。估值缺失的净值和权重为 `None`。`targets` 提供解析后的目标权重审计，`positions` 和 `cash` 分别为与原生模拟账户核对后的期末持仓和现金，`total_orders` 为实际订单数。
 
-`fill_audit` 中每条记录提供 `signal_date`、`signal_ts`、`fill_date`、`fill_ts` 和归并后的 `fill`，每笔均满足 `signal_ts < fill_ts`。换手使用每笔逻辑成交的精确名义金额除以信号日净值。原生零量分笔的回归使用同一套归并和换手计算，组合执行继续将零量交易意图记为缺口。`windows` 依次给出 50 年、10 年、5 年和最长样本，覆盖不足的行 `metrics` 为 `None`。`benchmark_nav` 和 `benchmark_windows` 独立呈现基准结果，省略基准时两者为 `None`。
+`fill_audit` 中每条记录提供 `signal_date`、`signal_ts`、`fill_date`、`fill_ts` 和归并后的 `fill`，每笔均满足 `signal_ts < fill_ts`。换手使用每笔逻辑成交的精确名义金额除以信号日净值。零量 fixture 的同订单、同纳秒分笔合并为一笔逻辑成交，`fill.parts` 提供各分笔的数量、价格、佣金、成交 ID 和时间。`windows` 依次给出 50 年、10 年、5 年和最长样本，覆盖不足的行 `metrics` 为 `None`。`benchmark_nav` 和 `benchmark_windows` 独立呈现基准结果，省略基准时两者为 `None`。
 
 `result.analyze_factors(factors, as_of=..., regression=False)` 复用下方的相关工具，以相邻会话净值计算日收益。任一净值缺失的区间保留缺值。分析默认截在请求结束日，也可显式截在更早日期。
 
@@ -189,6 +190,6 @@ print(result.sample_start, result.sample_end, result.observations, result.correl
 
 研究模拟可收集 Nautilus 的 `OrderFilled` 回调，并把同一次运行的事件交给 `fertile_finance.fill_audit.merge_order_fills(events)`。组件按账户、客户端订单 ID 和 `fill_ts`（事件 UTC 纳秒）归并，原始分笔保存在 `raw_fills`。成交时间沿用 [Unix epoch 边界](#unix-epoch-边界)，接受从 0 到有符号 64 位整数上限的值。同一订单跨时间的分笔各保留一笔逻辑成交。重复 trade ID（同账户同订单）或订单标的、方向、币种不一致时抛出 `ValueError`。
 
-每笔逻辑成交累加 `quantity`、`notional`（各分笔价格乘数量的和）和 `commission`。展示价格 `average_price` 为成交量加权平均价，使用 Decimal 的 28 位有效数字，保留小于最小价格跳动的部分。统计换手金额时使用 `notional`。在成交价与佣金同币种的现金股票模拟中，可用 `cash_delta` 和 `position_delta` 对账。
+每笔逻辑成交累加 `quantity`、`notional`（各分笔价格乘数量的和）和 `commission`。展示价格 `average_price` 为成交量加权平均价，使用 Decimal 的 28 位有效数字和四舍六入五成双，保留小于最小价格跳动的部分。组合和基准窗口、分笔明细、归并金额及因子数值转换使用独立的 Decimal 上下文，调用方的精度、舍入方式、异常开关和状态标志保持原值。查看稳定的十进制分笔请使用 `parts`。直接格式化 `raw_fills` 原生对象时沿用 Nautilus 的规则。统计换手金额时使用 `notional`。在成交价与佣金同币种的现金股票模拟中，可用 `cash_delta` 和 `position_delta` 对账。
 
 [原生回归 fixture](../tests/test_fill_audit.py) 用相同的两根日线和一笔 10 股市价买单对比两档成交量。Nautilus 1.231.0 的 L1 日线模拟按标的最小数量生成零量 bar 的合成档位，并按偏移一跳的价格撮合耗尽第一档后的市价单余量。fixture 中零量产生同一时刻的 1 股 @ 100.50 和 9 股 @ 100.51，归并后为 10 股、成交金额 1005.09 USD。成交量 100 时产生一笔 10 股 @ 100.50，成交金额 1005.00 USD。两组各计一笔逻辑成交，并核对引擎的现金和持仓。官方历史作业继续使用 [零量意图不提交及一单一笔足额成交](../docs/historical-backtest.md#信号执行和绩效) 的合同。

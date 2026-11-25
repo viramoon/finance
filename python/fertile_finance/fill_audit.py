@@ -2,16 +2,29 @@
 
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, localcontext
 
-from nautilus_trader.model.enums import OrderSide
-from nautilus_trader.model.events import OrderFilled
-from nautilus_trader.model.identifiers import AccountId, ClientOrderId, InstrumentId, TradeId
-from nautilus_trader.model.objects import Currency
+from .research_decimal import EXACT_RESEARCH_CONTEXT, RESEARCH_CONTEXT
 
-from .epoch import unix_nanos
+# Native fixed-point types compute their scale when first imported.
+with localcontext(RESEARCH_CONTEXT):
+    from nautilus_trader.model.enums import OrderSide
+    from nautilus_trader.model.events import OrderFilled
+    from nautilus_trader.model.identifiers import AccountId, ClientOrderId, InstrumentId, TradeId
+    from nautilus_trader.model.objects import Currency
+
+    from .epoch import unix_nanos
+
+
+@dataclass(frozen=True)
+class FillPart:
+    trade_id: TradeId
+    fill_ts: int
+    quantity: Decimal
+    price: Decimal
+    commission: Decimal
 
 
 @dataclass(frozen=True)
@@ -25,14 +38,17 @@ class LogicalFill:
     quantity: Decimal
     notional: Decimal
     commission: Decimal
-    raw_fills: tuple[OrderFilled, ...]
+    parts: tuple[FillPart, ...]
+    raw_fills: tuple[OrderFilled, ...] = field(compare=False, repr=False)
 
     @property
     def average_price(self) -> Decimal:
         """Volume-weighted price for display, without rounding to a price tick."""
-        with localcontext() as context:
-            context.prec = 28
-            return self.notional / self.quantity
+        try:
+            with localcontext(RESEARCH_CONTEXT, prec=28):
+                return self.notional / self.quantity
+        except ArithmeticError as exc:
+            raise ValueError(f"Cannot represent average price for order {self.order_id}") from exc
 
     @property
     def position_delta(self) -> Decimal:
@@ -40,10 +56,12 @@ class LogicalFill:
 
     @property
     def cash_delta(self) -> Decimal:
-        with localcontext() as context:
-            context.prec = 80
-            proceeds = self.notional.copy_negate() if self.side == OrderSide.BUY else self.notional
-            return proceeds - self.commission
+        try:
+            with localcontext(EXACT_RESEARCH_CONTEXT, prec=80):
+                proceeds = self.notional.copy_negate() if self.side == OrderSide.BUY else self.notional
+                return proceeds - self.commission
+        except ArithmeticError as exc:
+            raise ValueError(f"Cash delta for order {self.order_id} exceeds exact Decimal range") from exc
 
 
 @dataclass(frozen=True)
@@ -104,16 +122,19 @@ def merge_order_fills(fills: Iterable[OrderFilled]) -> tuple[LogicalFill, ...]:
 
 def _summarize(group: list[OrderFilled]) -> LogicalFill:
     first = group[0]
-    with localcontext() as context:
-        # Keep products of high-precision fixed-point quantities and prices exact.
-        context.prec = 80
-        amounts = [fill.last_qty.as_decimal() for fill in group]
-        quantity = sum(amounts, Decimal(0))
-        notional = sum(
-            (amount * fill.last_px.as_decimal() for amount, fill in zip(amounts, group, strict=True)),
-            Decimal(0),
-        )
-        commission = sum((fill.commission.as_decimal() for fill in group), Decimal(0))
+    # Native fixed-point products and sums must remain exact.
+    try:
+        with localcontext(EXACT_RESEARCH_CONTEXT, prec=80):
+            parts = tuple(
+                FillPart(event.trade_id, event.ts_event, event.last_qty.as_decimal(),
+                         event.last_px.as_decimal(), event.commission.as_decimal())
+                for event in group
+            )
+            quantity = sum((part.quantity for part in parts), Decimal(0))
+            notional = sum((part.quantity * part.price for part in parts), Decimal(0))
+            commission = sum((part.commission for part in parts), Decimal(0))
+    except ArithmeticError as exc:
+        raise ValueError(f"Fills for order {first.client_order_id} exceed exact Decimal range") from exc
     return LogicalFill(
         account_id=first.account_id,
         order_id=first.client_order_id,
@@ -124,5 +145,6 @@ def _summarize(group: list[OrderFilled]) -> LogicalFill:
         quantity=quantity,
         notional=notional,
         commission=commission,
+        parts=parts,
         raw_fills=tuple(group),
     )

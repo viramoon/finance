@@ -1,10 +1,16 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
-from decimal import Decimal, Inexact, getcontext
+from decimal import (
+    Context, Decimal, FloatOperation, Inexact, InvalidOperation, Overflow, ROUND_FLOOR,
+    ROUND_HALF_EVEN, ROUND_UP, Rounded, Underflow, getcontext, localcontext,
+)
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Barrier
 import unittest
 
 import pandas as pd
+from nautilus_trader.model.events import OrderFilled
 
 from fertile_finance import run_backtest
 from fertile_finance.historical_catalog import HistoricalCatalog
@@ -12,6 +18,7 @@ from fertile_finance.historical_types import DailyBar, EpochDiscard
 from fertile_finance.portfolio_backtest import TargetWeights, UniverseSnapshot
 from fertile_finance.research_backtest import BacktestResult
 from fertile_finance.research_catalog import ResearchError, nyse, sessions
+from fertile_finance.research_decimal import RESEARCH_CONTEXT
 from fertile_finance.research_factors import FrenchDaily, FrenchFactor
 from fertile_finance.yahoo_daily import YahooDaily
 
@@ -35,7 +42,7 @@ class RunBacktestTests(unittest.TestCase):
             start=self.start, end=self.end, catalog=self.catalog, raw_split_free_reviewed=True,
         )
 
-    def archive(self, instrument, quotes):
+    def archive(self, instrument, quotes, *, mode="append"):
         rows = []
         for day, quote in zip(self.days, quotes, strict=True):
             if quote is None:
@@ -49,7 +56,7 @@ class RunBacktestTests(unittest.TestCase):
         self.catalog.write_yahoo(YahooDaily(
             symbol, asset_type, "USD", None if venue == "INDEX" else venue,
             self.end, tuple(rows), (), (), EpochDiscard(),
-        ))
+        ), mode=mode)
 
     def universe(self, *instruments):
         return (UniverseSnapshot(self.start, self.opens[self.start], instruments),)
@@ -126,8 +133,10 @@ class RunBacktestTests(unittest.TestCase):
         equity = run_backtest(self.targets(), [ALPHA], benchmark=ALPHA, **params)
         self.assertEqual(equity.benchmark_nav[self.end], Decimal(100))
         self.assertEqual(equity.benchmark_windows[-1]["metrics"]["turnover_pct"], "0.0000")
-        with self.assertRaisesRegex(ResearchError, "XNYS USD stock or ETF"):
-            run_backtest(self.targets(), [INDEX], **dict(params, universe=self.universe(INDEX)))
+        for enabled in (False, True):
+            with self.subTest(fixture_zero_volume=enabled), self.assertRaisesRegex(ResearchError, "XNYS USD stock or ETF"):
+                run_backtest(self.targets(), [INDEX], fixture_zero_volume=enabled,
+                             **dict(params, universe=self.universe(INDEX)))
 
     def test_nonzero_costs_epoch_and_unreviewed_prices_are_rejected(self):
         params = dict(self.params, universe=self.universe(ALPHA), rf=None)
@@ -199,6 +208,121 @@ class RunBacktestTests(unittest.TestCase):
         self.assertEqual(audit.fill_date, self.days[3])
         self.assertEqual(audit.notional, Decimal("25000"))
         self.assertEqual(result.windows[-1]["metrics"]["turnover_pct"], "25.0000")
+
+    def test_zero_volume_fixture_returns_one_logical_trade_with_native_cash_and_turnover(self):
+        cases = [
+            (0, [("1", "68.27"), ("6", "68.28")], "477.95", "68.27857142857142857142857143",
+             "99522.05", "99999.94", "0.4780"),
+            (100, [("7", "68.27")], "477.89", "68.27", "99522.11", "100000.00", "0.4779"),
+        ]
+        targets = self.targets(**{ALPHA: Decimal("0.0048")})
+        params = dict(self.params, universe=self.universe(ALPHA), rf=None, end=self.days[1])
+        for volume, parts, notional, price, cash, nav, turnover in cases:
+            self.archive(ALPHA, [("68.27", "68.27", str(volume))] * len(self.days),
+                         mode="replace" if volume else "append")
+            if volume == 0:
+                default = run_backtest(targets, [ALPHA], **params)
+                self.assertFalse(default.metadata.fixture_zero_volume)
+                self.assertEqual((default.total_orders, default.fill_audit, default.positions), (0, (), {}))
+                self.assertTrue(all(value is None for value in default.nav.values()))
+            for timing, expected_ts in (("next_open", self.opens[self.days[1]]),
+                                        ("next_close", self.closes[self.days[1]])):
+                with self.subTest(volume=volume, timing=timing):
+                    result = run_backtest(targets, [ALPHA], **params, fixture_zero_volume=True, fill_timing=timing)
+                    self.assertTrue(result.metadata.fixture_zero_volume)
+                    self.assertEqual(result.total_orders, 1)
+                    (trade,) = result.fill_audit
+                    fill = trade.fill
+                    self.assertEqual(trade.fill_ts, expected_ts)
+                    self.assertLess(trade.signal_ts, trade.fill_ts)
+                    self.assertEqual(len(fill.raw_fills), len(parts))
+                    self.assertEqual([(part.quantity, part.price) for part in fill.parts],
+                                     [tuple(map(Decimal, part)) for part in parts])
+                    self.assertTrue(all(part.fill_ts == expected_ts for part in fill.parts))
+                    self.assertEqual(fill.quantity, Decimal(7))
+                    self.assertEqual(fill.average_price, Decimal(price))
+                    self.assertEqual(fill.notional, Decimal(notional))
+                    self.assertEqual(fill.cash_delta, Decimal(notional).copy_negate())
+                    self.assertEqual(result.cash, Decimal(cash))
+                    self.assertEqual(result.nav[self.days[1]], Decimal(nav))
+                    self.assertEqual(result.positions, {ALPHA: Decimal(7)})
+                    self.assertEqual(result.windows[-1]["metrics"]["turnover_pct"], turnover)
+                    print(f"fixture volume={volume} timing={timing} raw={len(fill.raw_fills)} "
+                          f"logical={len(result.fill_audit)} qty={fill.quantity} notional={fill.notional} "
+                          f"cash={result.cash} positions={result.positions} turnover_pct={turnover}")
+
+    def test_fixture_continuation_preflights_cash_and_rejects_zero_sell_price(self):
+        self.archive(ALPHA, [("1000", "1000", "0")] * len(self.days))
+        params = dict(self.params, universe=self.universe(ALPHA), rf=None, fixture_zero_volume=True, end=self.days[1])
+        funded = run_backtest(self.targets(**{ALPHA: Decimal(1)}), [ALPHA], **params)
+        self.assertEqual(funded.positions, {ALPHA: Decimal(99)})
+        self.assertEqual(funded.cash, Decimal("999.02"))
+        self.assertIn("execution_cash", [gap.kind for gap in funded.gaps])
+
+        second, third = self.days[1:3]
+        flat = TargetWeights(second, self.closes[second], {})
+        targets = (*self.targets(**{ALPHA: Decimal("0.07")}), flat)
+        sold = run_backtest(targets, [ALPHA], **dict(params, end=third))
+        self.assertEqual(sold.positions, {})
+        self.assertEqual(sold.cash, Decimal("99999.88"))
+        self.assertEqual([(part.quantity, part.price) for part in sold.fill_audit[-1].fill.parts],
+                         [(Decimal(1), Decimal("1000")), (Decimal(6), Decimal("999.99"))])
+
+        self.archive(ALPHA, [("1000", "1000", "0"), ("1000", "1000", "0"),
+                             ("0.01", "0.01", "0"), ("1000", "1000", "0"), ("1000", "1000", "0")],
+                     mode="replace")
+        with self.assertRaisesRegex(ResearchError, "fixture continuation price must be positive"):
+            run_backtest(targets, [ALPHA], **dict(params, end=third))
+
+    def test_benchmark_and_native_split_results_are_independent_of_decimal_context(self):
+        self.archive(ALPHA, [("68.27", "68.27", "0")] * len(self.days))
+        self.archive(INDEX, [("100", "100", "0"), None, ("101", "101", "0"), None, None])
+        end = self.days[2]
+        params = dict(self.params, universe=self.universe(ALPHA), rf=None, benchmark=INDEX,
+                      end=end, fixture_zero_volume=True)
+        targets = self.targets(**{ALPHA: Decimal("0.0048")})
+        factors = pd.DataFrame(
+            {key: [Decimal("0.01"), Decimal("0.02")] for key in ("Mkt-RF", "SMB", "HML")},
+            index=self.days[1:3],
+        )
+
+        def run_in_context(caller, barrier=None):
+            with localcontext(caller) as context:
+                context.flags[Rounded] = True
+                before = str(context)
+                if barrier is not None:
+                    barrier.wait(timeout=10)
+                result = run_backtest(targets, [ALPHA], **params)
+                (trade,) = result.fill_audit
+                comparisons = (result, repr(result), trade.fill.average_price, trade.fill.cash_delta,
+                               result.analyze_factors(factors))
+                self.assertIs(getcontext(), context)
+                self.assertEqual(str(context), before)
+                # The native event UUID is random. Compare the rest of its payload,
+                # including trade ID, timestamps, quantities, price and commission.
+                with localcontext(RESEARCH_CONTEXT):
+                    raw = tuple(OrderFilled.to_dict(event) for event in trade.fill.raw_fills)
+                for event in raw:
+                    del event["event_id"]
+                return (*comparisons, raw)
+
+        standard = run_in_context(Context(prec=28, rounding=ROUND_HALF_EVEN))
+        window = standard[0].benchmark_windows[-1]
+        self.assertEqual((window["actual_years"], window["missing_pct"]), ("0.0137", "33.3333"))
+        self.assertEqual(standard[2], Decimal("68.27857142857142857142857143"))
+        callers = (
+            Context(prec=2, rounding=ROUND_UP, Emin=-2, Emax=2, traps=[]),
+            Context(prec=3, rounding=ROUND_FLOOR, Emin=-3, Emax=3, clamp=1,
+                    traps=[Inexact, Rounded, FloatOperation, InvalidOperation, Overflow, Underflow]),
+        )
+        for caller in callers:
+            with self.subTest(prec=caller.prec, rounding=caller.rounding):
+                self.assertEqual(run_in_context(caller), standard)
+        barrier = Barrier(2)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            jobs = [pool.submit(run_in_context, caller, barrier) for caller in callers]
+            for job in jobs:
+                self.assertEqual(job.result(timeout=30), standard)
 
     def test_result_factor_analysis_does_not_bridge_missing_nav(self):
         self.archive(ALPHA, [
