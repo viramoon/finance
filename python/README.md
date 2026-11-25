@@ -21,7 +21,9 @@ finance-backtest-worker 使用已锁定源码环境，通过独立 Python 子进
 
 `fertile_finance.research_windows.coverage_windows(equity, end=None, *, calendar="XNYS", rf=None, rf_source=None, turnover=None)` 接收以交易会话日期为键、正的有限 `Decimal` 为值的日终净值，按顺序返回 `50y`、`10y`、`5y` 和 `longest_sample`。前三行从最后一个观测日期按日历年回推，闰日目标年无 2 月 29 日时使用 2 月 28 日。可显式指定 `end` 作为固定窗口统计截止日。最长样本行覆盖截止日前（含）第一至最后一条可用观测，`requested_years` 为 `null`，`requested_start` 为第一条观测日期。交易所日历可用 exchange-calendars 注册名指定。
 
-行内 `window` 是稳定键，展示使用 `label`，例如 `50y (insufficient)`。覆盖字段包括 `requested_start`、`actual_start`、`actual_end`、`actual_years`、`observations`、`calendar_start`、`expected_sessions`、`missing_sessions` 和 `missing_pct`。实际跨度为首尾相差天数除以 365.2425，单位为年。固定窗口请求起点早于 epoch 时保留原日期，从 `calendar_start=1970-01-01` 开始统计交易日，覆盖标记为 `insufficient`。其余窗口仅在起始边界至首条观测之前最多缺五个交易日、内部及末端无缺失且至少两条观测时标记 `full`。周末、休市日按交易所日历处理。覆盖判定不使用跨度百分比、不填补观测。
+行内 `window` 是稳定键，展示使用 `label`，例如 `50y (insufficient)`。覆盖字段包括 `requested_start`、`actual_start`、`actual_end`、`actual_years`、`observations`、`calendar_start`、`calendar_end`、`expected_sessions`、`missing_sessions` 和 `missing_pct`。实际跨度为首尾相差天数除以 365.2425，单位为年。固定窗口请求起点早于 epoch 时保留原日期，仅统计 epoch 当日及之后的可用交易日，覆盖标记为 `insufficient`。其余窗口仅在起始边界至首条观测之前最多缺五个交易日、内部及末端无缺失且至少两条观测时标记 `full`。周末、休市日按交易所日历处理。覆盖判定不使用跨度百分比、不填补观测。
+
+注册日历的规则可能只覆盖有限日期。例如锁定的 XSHG 日历从 1990-12-03 起可用。只要某行的 epoch 后请求区间超出这些规则的起止范围，该行就报告 `coverage=insufficient`、`coverage_reason="calendar_out_of_range"` 和 `metrics=null`，即使日历内缺失交易日数为零。其他行独立判定。`calendar_start` 和 `calendar_end` 给出该行统计交易日使用的上下界。无重叠时上下界逆序，应有与缺失交易日数为零，缺失比例为 `null`。实际起止和观测数仍包括请求区间内的输入净值，日历规则未覆盖的日期不参与交易日计数。
 
 `metrics` 为 `null` 时，该行全部绩效不可用。满窗的 `return_pct`、`cagr_pct`、`max_drawdown_pct`、`volatility_pct`、`turnover_pct` 和无量纲 `sharpe` 均用十进制字符串，单项不可用时为 `null`。CAGR 按实际跨度计算，最大回撤是正的峰谷跌幅。波动用日简单收益样本标准差乘以 √252。Sharpe 用日超额收益均值除以其样本标准差，再乘以 √252。少于两条日收益时波动和 Sharpe 为空，超额收益零方差时 Sharpe 也为空。
 

@@ -2,6 +2,8 @@ from datetime import date
 from decimal import Decimal
 import unittest
 
+import exchange_calendars
+
 from fertile_finance.research_catalog import sessions
 from fertile_finance.research_windows import coverage_windows
 
@@ -123,3 +125,68 @@ class ResearchWindowTests(unittest.TestCase):
         empty = coverage_windows({}, END)[-1]
         self.assertEqual((empty["coverage"], empty["observations"]), ("insufficient", 0))
         self.assertIsNone(empty["metrics"])
+
+    def test_bounded_calendars_return_all_rows_with_only_unsupported_windows_insufficient(self):
+        for name, available_start in (("XSHG", "1990-12-03"), ("XBOM", "1997-01-01"),
+                                      ("XTKS", "1997-01-01")):
+            with self.subTest(calendar=name):
+                calendar = exchange_calendars.get_calendar(name, start="2014-06-01", end="2024-06-05")
+                sample = {day.date(): Decimal(100 + i) for i, day in enumerate(calendar.sessions)}
+                fifty, ten, five, longest = coverage_windows(sample, calendar=name)
+                self.assertEqual(fifty["requested_start"], "1974-06-05")
+                self.assertEqual(fifty["calendar_start"], available_start)
+                self.assertEqual(fifty["calendar_end"], "2024-06-05")
+                self.assertEqual(fifty["coverage"], "insufficient")
+                self.assertEqual(fifty["coverage_reason"], "calendar_out_of_range")
+                self.assertEqual(fifty["actual_start"], str(min(sample)))
+                self.assertEqual(fifty["actual_end"], "2024-06-05")
+                self.assertEqual(fifty["observations"], len(sample))
+                self.assertEqual(fifty["expected_sessions"] - len(sample), fifty["missing_sessions"])
+                self.assertIsNone(fifty["metrics"])
+                for row in (ten, five, longest):
+                    self.assertEqual(row["coverage"], "full")
+                    self.assertEqual(row["missing_sessions"], 0)
+                    self.assertIsNotNone(row["metrics"]["cagr_pct"])
+                print(f"{name} calendar starts {available_start}: "
+                      f"50y={fifty['coverage']}, 10y={ten['coverage']}, "
+                      f"5y={five['coverage']}, longest_sample={longest['coverage']}")
+
+    def test_calendar_boundary_gap_is_never_counted_as_a_trading_day_tolerance(self):
+        end = date(1995, 12, 2)
+        calendar = exchange_calendars.get_calendar("XSHG", start="1990-12-03", end=str(end))
+        sample = {day.date(): Decimal(100) for day in calendar.sessions}
+        _, _, five, longest = coverage_windows(sample, end, calendar="XSHG")
+        self.assertEqual((five["requested_start"], five["calendar_start"]), ("1990-12-02", "1990-12-03"))
+        self.assertEqual(five["missing_sessions"], 0)
+        self.assertEqual(five["coverage_reason"], "calendar_out_of_range")
+        self.assertEqual(five["coverage"], "insufficient")
+        self.assertIsNone(five["metrics"])
+        self.assertEqual(longest["coverage"], "full")
+
+        sample[date(1990, 12, 2)] = Decimal(99)
+        longest = coverage_windows(sample, end, calendar="XSHG")[-1]
+        self.assertEqual(longest["actual_start"], "1990-12-02")
+        self.assertEqual(longest["observations"], len(sample))
+        self.assertEqual(longest["coverage"], "insufficient")
+        self.assertIsNone(longest["metrics"])
+
+    def test_calendar_can_end_before_cutoff_or_start_after_entire_request(self):
+        calendar = exchange_calendars.get_calendar("XSHG")
+        end = calendar.bound_max().date()
+        sample = {day.date(): Decimal(100) for day in calendar.sessions[-3:]}
+        rows = coverage_windows(sample, date(end.year + 1, 1, 1), calendar="XSHG")
+        for row in rows[:3]:
+            self.assertEqual(row["calendar_end"], str(end))
+            self.assertEqual(row["coverage_reason"], "calendar_out_of_range")
+            self.assertEqual(row["coverage"], "insufficient")
+            self.assertIsNone(row["metrics"])
+        self.assertEqual(rows[-1]["coverage"], "full")
+
+        rows = coverage_windows({}, date(1985, 1, 1), calendar="XSHG")
+        self.assertEqual(len(rows), 4)
+        for row in rows[:3]:
+            self.assertEqual(row["calendar_start"], "1990-12-03")
+            self.assertEqual(row["coverage_reason"], "calendar_out_of_range")
+            self.assertEqual(row["expected_sessions"], 0)
+            self.assertIsNone(row["missing_pct"])
+            self.assertIsNone(row["metrics"])

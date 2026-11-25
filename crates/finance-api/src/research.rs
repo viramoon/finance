@@ -64,12 +64,18 @@ pub struct Window {
     pub actual_years: Option<String>,
     /// First supported date counted in the calendar totals.
     pub calendar_start: Option<NaiveDate>,
+    /// Upper date bound used for the calendar totals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calendar_end: Option<NaiveDate>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observations: Option<u32>,
     pub expected_sessions: u32,
     pub missing_sessions: u32,
     pub missing_pct: Option<String>,
     pub coverage: Coverage,
+    /// Reason reported when requested dates extend beyond the exchange calendar bounds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rf_source: Option<String>,
     pub metrics: Option<WindowMetrics>,
@@ -120,6 +126,26 @@ mod tests {
         });
         let current: Window = from_value(longest.clone()).unwrap();
         assert_eq!(to_value(current).unwrap(), longest);
+    }
+
+    #[test]
+    fn window_json_preserves_partial_calendar_bounds() {
+        let report = json!({
+            "requested_start": "1974-06-05",
+            "calendar_start": "1990-12-03",
+            "calendar_end": "2024-06-05",
+            "expected_sessions": 8200,
+            "missing_sessions": 5700,
+            "coverage": "insufficient",
+            "coverage_reason": "calendar_out_of_range",
+            "metrics": null
+        });
+        let data: Window = from_value(report).unwrap();
+        let serialized = to_value(data).unwrap();
+        assert_eq!(serialized["calendar_start"], "1990-12-03");
+        assert_eq!(serialized["calendar_end"], "2024-06-05");
+        assert_eq!(serialized["coverage_reason"], "calendar_out_of_range");
+        assert_eq!(serialized["metrics"], Value::Null);
     }
 }
 

@@ -7,6 +7,7 @@ from itertools import pairwise
 from statistics import mean, stdev
 
 import exchange_calendars
+from exchange_calendars.errors import NoSessionsError
 
 from .epoch import EPOCH
 from .research_catalog import LATEST, nyse
@@ -80,6 +81,29 @@ def _window_metrics(equity, elapsed, rf, turnover):
     }
 
 
+def _calendar_sessions(name, start, end):
+    if name == "XNYS":
+        return EPOCH, LATEST, nyse().schedule.loc[str(start):str(end)].index.date
+
+    # The default schedule is a rolling slice. The declared bounds describe
+    # which historical dates we can actually request from the exchange rules.
+    calendar = exchange_calendars.get_calendar(name)
+    lower, upper = calendar.bound_min(), calendar.bound_max()
+    first_supported = max(EPOCH, lower.date()) if lower is not None else EPOCH
+    last_supported = min(LATEST, upper.date()) if upper is not None else LATEST
+    first, last = max(first_supported, start), min(last_supported, end)
+    if first > last:
+        return first_supported, last_supported, ()
+    # The constructor requires a span of at least two calendar dates.
+    build_start = max(first_supported, first - timedelta(days=1)) if first == last else first
+    build_end = min(last_supported, last + timedelta(days=1)) if first == last else last
+    try:
+        schedule = exchange_calendars.get_calendar(name, start=str(build_start), end=str(build_end))
+    except NoSessionsError:
+        return first_supported, last_supported, ()
+    return first_supported, last_supported, schedule.schedule.loc[str(first):str(last)].index.date
+
+
 def coverage_windows(
     equity: Mapping[date, Decimal],
     end: date | None = None,
@@ -101,7 +125,7 @@ def coverage_windows(
         raise ValueError("rf_source requires an RF series")
     source = "rf=0" if rf is None else (rf_source or "provided")
 
-    observed = {day: value for day, value in equity.items() if day <= end}
+    observed = {day: equity[day] for day in sorted(equity) if day <= end}
     if any(not isinstance(value, Decimal) or not value.is_finite() or value <= 0
            for value in observed.values()):
         raise ValueError("equity must use positive finite Decimal values")
@@ -109,26 +133,30 @@ def coverage_windows(
     requests = [(f"{years}y", years, years_before(end, years), end) for years in WINDOW_YEARS]
     requests.append(("longest_sample", None, longest, max(observed, default=None)))
     first_date = max(EPOCH, min(start for _, _, start, _ in requests if start is not None))
-    schedule = nyse() if calendar == "XNYS" else exchange_calendars.get_calendar(
-        calendar, start=str(first_date), end=str(max(end, first_date + timedelta(days=7))),
-    )
-    trading_days = [day.date() for day in schedule.schedule.loc[str(first_date):str(end)].index]
-    if outside := observed.keys() - set(trading_days):
-        raise ValueError(f"{min(outside)} is not a {calendar} session")
+    supported_start, supported_end, trading_days = _calendar_sessions(calendar, first_date, end)
+    trading_set = set(trading_days)
+    for day in observed:
+        if supported_start <= day <= supported_end and day not in trading_set:
+            raise ValueError(f"{day} is not a {calendar} session")
 
     output = []
     for name, years, start, window_end in requests:
-        calendar_start = max(EPOCH, start) if start is not None else None
+        calendar_start = max(supported_start, start) if start is not None else None
+        calendar_end = min(supported_end, window_end) if window_end is not None else None
+        calendar_out_of_range = start is not None and (
+            max(EPOCH, start) < supported_start or window_end > supported_end
+        )
         expected = [day for day in trading_days if calendar_start is not None
-                    and calendar_start <= day <= window_end]
-        window = {day: observed[day] for day in expected if day in observed}
+                    and calendar_start <= day <= calendar_end]
+        window = {day: value for day, value in observed.items() if start is not None
+                  and start <= day <= window_end}
         first = next(iter(window), None)
         last = next(reversed(window), None)
         missing = [day for day in expected if day not in window]
-        full = (start == calendar_start and len(window) >= 2 and len(missing) <= 5
+        full = (not calendar_out_of_range and start == calendar_start and len(window) >= 2 and len(missing) <= 5
                 and all(day < first for day in missing))
         elapsed = Decimal((last - first).days) / DAYS_PER_YEAR if first is not None else None
-        output.append({
+        row = {
             "window": name,
             "label": name if full or years is None else f"{name} (insufficient)",
             "requested_years": years, "requested_start": str(start) if start is not None else None,
@@ -136,10 +164,14 @@ def coverage_windows(
             "actual_end": str(last) if last is not None else None,
             "actual_years": format(elapsed, ".4f") if elapsed is not None else None,
             "calendar_start": str(calendar_start) if calendar_start is not None else None,
+            "calendar_end": str(calendar_end) if calendar_end is not None else None,
             "observations": len(window), "expected_sessions": len(expected), "missing_sessions": len(missing),
             "missing_pct": percent(Decimal(len(missing)) / len(expected)) if expected else None,
             "coverage": "full" if full else "insufficient",
             "rf_source": source,
             "metrics": _window_metrics(window, elapsed, rf, turnover) if full else None,
-        })
+        }
+        if calendar_out_of_range:
+            row["coverage_reason"] = "calendar_out_of_range"
+        output.append(row)
     return output
