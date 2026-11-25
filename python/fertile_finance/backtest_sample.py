@@ -36,15 +36,31 @@ def run_sample(repo: Path, *, start: str | None = None, end: str | None = None) 
     from nautilus_trader.backtest import engine as engine_module
     from nautilus_trader.model.currencies import USD
     from nautilus_trader.model.identifiers import Venue
+    from nautilus_trader.persistence import wranglers
+
+    from .epoch import process_bar_frame
 
     captured = {}
+    engine = None
     original = engine_module.BacktestEngine
 
+    class GuardedWrangler(wranglers.BarDataWrangler):
+        def process(self, data, default_volume=1_000_000, ts_init_delta=0):
+            bars, _ = process_bar_frame(super().process, data, default_volume=default_volume,
+                                        ts_init_delta=ts_init_delta)
+            return bars
+
     class CapturingEngine(original):
+        def __init__(self, **kwargs):
+            nonlocal engine
+            super().__init__(**kwargs)
+            engine = self
+
         def run(self):
             return super().run(start=start, end=end)
 
         def dispose(self):
+            nonlocal engine
             try:
                 result = self.get_result()
                 account = self.cache.account_for_venue(Venue("XCME"))
@@ -55,6 +71,7 @@ def run_sample(repo: Path, *, start: str | None = None, end: str | None = None) 
                                 start=timestamp(result.backtest_start), end=timestamp(result.backtest_end),
                                 pnl=format(pnl, "f"), currency="USD")
             finally:
+                engine = None
                 super().dispose()
 
     example = repo / "vendor/nautilus_trader/examples/backtest/example_01_load_bars_from_custom_csv"
@@ -62,7 +79,8 @@ def run_sample(repo: Path, *, start: str | None = None, end: str | None = None) 
     sys.path.insert(0, str(example))
     try:
         os.chdir(example)
-        with patch.object(engine_module, "BacktestEngine", CapturingEngine):
+        with (patch.object(engine_module, "BacktestEngine", CapturingEngine),
+              patch.object(wranglers, "BarDataWrangler", GuardedWrangler)):
             namespace = runpy.run_path(str(example / "run_example.py"), run_name="__main__")
         captured.update(strategy=namespace["DemoStrategy"].__name__,
                         instrument=str(namespace["EURUSD_FUTURES_INSTRUMENT"].id),
@@ -71,6 +89,8 @@ def run_sample(repo: Path, *, start: str | None = None, end: str | None = None) 
     finally:
         os.chdir(previous)
         sys.path.remove(str(example))
+        if engine is not None:
+            original.dispose(engine)
 
 
 def main():
