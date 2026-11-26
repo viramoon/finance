@@ -81,6 +81,69 @@ def yahoo(symbol, exchange, full_exchange, asset, timestamps, quote, adjusted_cl
 '''
 
 
+def hyperliquid():
+    # Fixed, fictional venue messages. Prices and sizes are quoted strings.
+    base = 1_700_000_000_000
+    large_id = 9_007_199_254_740_993
+    coins = ("BTC", "ETH", "SOL")
+
+    def book(coin, offset, bids, asks):
+        levels = [[{"px": px, "sz": sz, "n": 1} for px, sz in side] for side in (bids, asks)]
+        return {"channel": "l2Book", "data": {"coin": coin, "time": base + offset, "levels": levels}}
+
+    def trade(coin, offset, tid, side, px, sz, users=None):
+        row = {"coin": coin, "time": base + offset, "tid": tid}
+        if side is not None:
+            row["side"] = side
+        row.update(px=px, sz=sz)
+        if users is not None:
+            row["users"] = users
+        return row
+
+    def trades(*entries):
+        return {"channel": "trades", "data": entries}
+
+    def context(coin, funding, interest, mark):
+        return {"channel": "activeAssetCtx",
+                "data": {"coin": coin, "ctx": {"funding": funding, "openInterest": interest, "markPx": mark}}}
+
+    unknown = trade("BTC", 2, large_id + 2, "?", "123.1", "0.00007")
+    initial = (
+        book("BTC", 1, [("123.1", "0.10000"), ("123.0", "0.00001")], [("123.2", "0.01000")]),
+        book("ETH", 1, [("54.10", "0.1000")], [("54.11", "0.0001")]),
+        book("SOL", 1, [("9.1234", "0.10")], [("9.1235", "0.01")]),
+        trades(
+            trade("BTC", 2, large_id, "B", "123.2", "0.12345", ["synthetic-buyer", "synthetic-seller"]),
+            trade("BTC", 2, large_id + 1, "A", "123.1", "0.02345"),
+            unknown,
+        ),
+        trades(trade("ETH", 2, large_id, "B", "54.10", "0.0123")),
+        trades(trade("SOL", 2, 1, "A", "9.1234", "0.99")),
+        context("BTC", "-0.0000123400", "7.12345", "123.456789"),
+        context("ETH", "0.0000200000", "0", "54.10001"),
+        context("SOL", "0", "1.23", "9.123456"),
+    )
+    reconnected = (
+        book("BTC", 0, [("100.0", "1.00000")], []),
+        book("BTC", 301, [("123.4", "0.00003")], []),
+        book("ETH", 301, [("54.12", "0.1001")], [("54.13", "0.0001")]),
+        book("SOL", 301, [], [("9.1237", "0.07")]),
+        trades(unknown, trade("BTC", 302, large_id, None, "123.4", "0.00008")),
+        trades(trade("ETH", 302, 2, "A", "54.12", "0.1000")),
+        trades(trade("SOL", 302, 3, "B", "9.1237", "0.23")),
+        context("BTC", "0.0000123400", "7.00001", "123.41234"),
+        context("ETH", "-0.0000200000", "1.0001", "54.12101"),
+        context("SOL", "0", "1.25", "9.123499"),
+    )
+    meta = {"universe": [{"name": coin, "szDecimals": decimals}
+                         for coin, decimals in zip(coins, (5, 4, 2), strict=True)]}
+    files = {"meta.json": [meta], "ws-initial.jsonl": initial, "ws-reconnected.jsonl": reconnected}
+    return {
+        f"tests/fixtures/hyperliquid/{name}": "".join(json.dumps(row, separators=(",", ":")) + "\n" for row in messages)
+        for name, messages in files.items()
+    }
+
+
 def fixtures():
     ibm_events = ''',
         "events": {
@@ -133,6 +196,7 @@ def fixtures():
     }
     return {
         **{f"tests/fixtures/historical/{name}": text for name, text in historical.items()},
+        **hyperliquid(),
         "config/collector/replay.csv": rows(
             ("open", "high", "low", "close", "volume"),
             ("591.123456789", "591.220000000", "591.010000000", "591.131234567", "153"),

@@ -1,6 +1,6 @@
 # 本地行情 WAL、投影与封段接口
 
-[F1 事件协议](market-protocol.md) 的生产者可以把已授权事件交给 `finance_collector::market_ingress::MarketIngress`。每个 source/product 有自己的 WAL 和投影游标。旧 `BarSource`、Nautilus bar catalog 和 [旧采集状态](../catalog/README.md) 继续使用原有路径。本接口供后续适配器、查询实现和 fertile 备份接入。
+[F1 事件协议](market-protocol.md) 的生产者可以把已授权事件交给 `finance_collector::market_ingress::MarketIngress`。每个 source/product 有自己的 WAL 和投影游标。[Hyperliquid](integrations/hyperliquid.md) 同时发布 v1.0 事件和 v2.0 永续上下文，投影在现有 `event_json` 列保留完整事件并索引原始位置。旧 `BarSource`、Nautilus bar catalog 和 [旧采集状态](../catalog/README.md) 继续使用原有路径。本接口供后续适配器、查询实现和 fertile 备份接入。
 
 ## 生产者与许可
 

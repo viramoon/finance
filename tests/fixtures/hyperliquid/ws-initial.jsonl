@@ -1,0 +1,9 @@
+{"channel":"l2Book","data":{"coin":"BTC","time":1700000000001,"levels":[[{"px":"123.1","sz":"0.10000","n":1},{"px":"123.0","sz":"0.00001","n":1}],[{"px":"123.2","sz":"0.01000","n":1}]]}}
+{"channel":"l2Book","data":{"coin":"ETH","time":1700000000001,"levels":[[{"px":"54.10","sz":"0.1000","n":1}],[{"px":"54.11","sz":"0.0001","n":1}]]}}
+{"channel":"l2Book","data":{"coin":"SOL","time":1700000000001,"levels":[[{"px":"9.1234","sz":"0.10","n":1}],[{"px":"9.1235","sz":"0.01","n":1}]]}}
+{"channel":"trades","data":[{"coin":"BTC","time":1700000000002,"tid":9007199254740993,"side":"B","px":"123.2","sz":"0.12345","users":["synthetic-buyer","synthetic-seller"]},{"coin":"BTC","time":1700000000002,"tid":9007199254740994,"side":"A","px":"123.1","sz":"0.02345"},{"coin":"BTC","time":1700000000002,"tid":9007199254740995,"side":"?","px":"123.1","sz":"0.00007"}]}
+{"channel":"trades","data":[{"coin":"ETH","time":1700000000002,"tid":9007199254740993,"side":"B","px":"54.10","sz":"0.0123"}]}
+{"channel":"trades","data":[{"coin":"SOL","time":1700000000002,"tid":1,"side":"A","px":"9.1234","sz":"0.99"}]}
+{"channel":"activeAssetCtx","data":{"coin":"BTC","ctx":{"funding":"-0.0000123400","openInterest":"7.12345","markPx":"123.456789"}}}
+{"channel":"activeAssetCtx","data":{"coin":"ETH","ctx":{"funding":"0.0000200000","openInterest":"0","markPx":"54.10001"}}}
+{"channel":"activeAssetCtx","data":{"coin":"SOL","ctx":{"funding":"0","openInterest":"1.23","markPx":"9.123456"}}}

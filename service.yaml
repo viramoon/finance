@@ -59,6 +59,18 @@ processes:
       ready_path: /healthz/ready
       status_path: /status
     restart_policy: fertile deploy/
+  - name: finance-hyperliquid
+    command: finance-hyperliquid config/collector/hyperliquid.yaml
+    working_directory: finance
+    python_path: python
+    python_env: FINANCE_PYTHON
+    activation: fertile deploy/ 显式启用并提供已审核产品许可配置
+    dependencies: [data_root, nautilus_source_wheel]
+    product: hyperliquid/perp-public
+    output: finance-state/market-wal/hyperliquid/perp-public # 仅当 record_local 为 true
+    health: 记录模式通过 finance-market-wal watermarks 和 quality 核对
+    documentation: docs/integrations/hyperliquid.md
+    restart_policy: fertile deploy/
   - name: finance-projector
     command: 'python -m fertile_finance.market_projector --data-root "$FERTILE_DATA_ROOT" --wal-bin finance-market-wal'
     working_directory: finance

@@ -15,6 +15,7 @@ use crate::{ErrorKind, ValidationError, diagnostics::serde_validation_error, wir
 wire_enum! {
     pub enum SchemaVersion {
         V1 = "1.0",
+        V2 = "2.0",
     }
 }
 

@@ -13,9 +13,8 @@ struct Examples {
 }
 
 impl Examples {
-    fn validated() -> Result<Self, Box<dyn Error>> {
-        let examples: Self =
-            serde_json::from_str(include_str!("../../fixtures/examples.input.json"))?;
+    fn validated(input: &str) -> Result<Self, Box<dyn Error>> {
+        let examples: Self = serde_json::from_str(input)?;
         let mut instruments = HashMap::new();
         for instrument in &examples.instruments {
             if instruments
@@ -73,7 +72,7 @@ fn use_local_refs(value: &mut Value) {
     }
 }
 
-fn schema<T: ToSchema>(id: &str) -> Result<Value, Box<dyn Error>> {
+fn schema<T: ToSchema>(id: &str, version: &str) -> Result<Value, Box<dyn Error>> {
     let mut root = serde_json::to_value(T::schema())?;
     let object = root
         .as_object_mut()
@@ -95,7 +94,7 @@ fn schema<T: ToSchema>(id: &str) -> Result<Value, Box<dyn Error>> {
     );
     object.insert(
         "$id".into(),
-        format!("urn:viramoon:finance:market-protocol:1.0:{id}").into(),
+        format!("urn:viramoon:finance:market-protocol:{version}:{id}").into(),
     );
     if !definitions.is_empty() {
         object.insert("$defs".into(), Value::Object(definitions));
@@ -124,30 +123,95 @@ fn schema<T: ToSchema>(id: &str) -> Result<Value, Box<dyn Error>> {
             .remove("format");
     }
     use_local_refs(&mut root);
+    root["$defs"]["SchemaVersion"]["enum"] = serde_json::json!([version]);
+    if id == "event" {
+        root.pointer_mut("/$defs/Message/oneOf")
+            .and_then(Value::as_array_mut)
+            .ok_or("event schema is missing the message union")?
+            .retain(|branch| {
+                let context = branch["properties"]["kind"]["enum"][0] == "perpetual_context";
+                context == (version == "2.0")
+            });
+        let defs = root["$defs"].as_object_mut().unwrap();
+        if version == "1.0" {
+            defs.remove("PerpetualContext");
+            defs["Message"]["description"] =
+                "The version 1.0 kind tag and its corresponding payload.".into();
+        } else {
+            for name in [
+                "AssetKind",
+                "BookDelta",
+                "BookLevel",
+                "BookSide",
+                "BookSnapshot",
+                "BookUpdate",
+                "ClosedBar",
+                "ConnectionState",
+                "Correction",
+                "Gap",
+                "Heartbeat",
+                "MarketMessage",
+                "Reset",
+                "Status",
+                "Trade",
+                "TradeSide",
+            ] {
+                defs.remove(name);
+            }
+            root["allOf"][1]["properties"]["asset_kind"] =
+                serde_json::json!({"const": "perpetual"});
+            root["allOf"][1]["properties"]["revision"] = serde_json::json!({"const": "0"});
+        }
+    }
+    if id == "capability" {
+        if version == "1.0" {
+            root["$defs"]["MarketKind"]["enum"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|kind| kind != "perpetual_context");
+            root["properties"]["message_kinds"]["maxItems"] = 4.into();
+        } else {
+            root["$defs"]["MarketKind"]["description"] =
+                "Market data kinds a source/product can advertise in version 2.0.".into();
+            root["properties"]["message_kinds"]["contains"] =
+                serde_json::json!({"const": "perpetual_context"});
+        }
+    }
     Ok(root)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = env::args_os().skip(1);
-    let Some(directory) = args.next().filter(|_| args.next().is_none()) else {
-        return Err("usage: export-market-protocol OUTPUT_DIRECTORY".into());
+    let Some(directory) = args.next() else {
+        return Err("usage: export-market-protocol OUTPUT_DIRECTORY [--v2]".into());
+    };
+    let version = match args.next() {
+        None => "1.0",
+        Some(flag) if flag == "--v2" && args.next().is_none() => "2.0",
+        _ => return Err("usage: export-market-protocol OUTPUT_DIRECTORY [--v2]".into()),
     };
     let directory = PathBuf::from(directory);
-    let documents = [
-        (
+    let mut documents = Vec::new();
+    let input = if version == "1.0" {
+        documents.push((
             "instrument.schema.json",
-            schema::<Instrument>("instrument")?,
-        ),
+            schema::<Instrument>("instrument", version)?,
+        ));
+        include_str!("../../fixtures/examples.input.json")
+    } else {
+        include_str!("../../fixtures/examples-v2.input.json")
+    };
+    documents.extend([
         (
             "capability.schema.json",
-            schema::<Capability>("capability")?,
+            schema::<Capability>("capability", version)?,
         ),
-        ("event.schema.json", schema::<Event>("event")?),
+        ("event.schema.json", schema::<Event>("event", version)?),
         (
             "examples.json",
-            serde_json::to_value(Examples::validated()?)?,
+            serde_json::to_value(Examples::validated(input)?)?,
         ),
-    ];
+    ]);
     fs::create_dir_all(&directory)?;
     for (file, mut document) in documents {
         // Canonical key ordering stays stable when other workspace crates enable
