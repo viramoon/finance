@@ -15,7 +15,6 @@ use futures::StreamExt;
 use log::{debug, error, info, warn};
 use tokio::sync::{broadcast, mpsc, watch, Mutex, RwLock};
 use tokio::task;
-use tokio::time::Duration;
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::connection::r#async::AsyncConnection;
@@ -302,7 +301,7 @@ impl<S: AsyncStream> AsyncTcpMessageBus<S> {
     }
 
     /// Start processing messages from TWS
-    pub fn process_messages(self: Arc<Self>, _server_version: i32, _reconnect_delay: Duration) -> Result<(), Error> {
+    pub fn process_messages(self: Arc<Self>, auto_reconnect: bool) -> Result<(), Error> {
         // Publish the handle before returning the client. An immediate disconnect
         // must be able to join the task even before its first poll.
         let mut process_task = self.process_task.try_lock().map_err(|_| Error::Shutdown)?;
@@ -322,7 +321,7 @@ impl<S: AsyncStream> AsyncTcpMessageBus<S> {
                 _ = shutdown.wait_for(|requested| *requested) => {
                     debug!("Shutdown requested, stopping message processing");
                 }
-                _ = message_bus.dispatch_messages() => {}
+                _ = message_bus.dispatch_messages(auto_reconnect) => {}
             }
             message_bus.request_shutdown_sync();
             message_bus.close_subscription_channels().await;
@@ -331,14 +330,14 @@ impl<S: AsyncStream> AsyncTcpMessageBus<S> {
         Ok(())
     }
 
-    async fn dispatch_messages(&self) {
+    async fn dispatch_messages(&self, auto_reconnect: bool) {
         use crate::client::error_handler::{is_connection_error, is_timeout_error};
 
         loop {
             match self.read_and_route_message().await {
                 Ok(()) => {}
                 Err(err) if is_timeout_error(&err) => {}
-                Err(err) if is_connection_error(&err) => {
+                Err(err) if auto_reconnect && is_connection_error(&err) => {
                     error!("Connection error detected, attempting to reconnect: {err:?}");
                     self.connected.store(false, Ordering::Relaxed);
 

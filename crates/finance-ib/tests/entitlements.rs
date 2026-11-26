@@ -37,6 +37,15 @@ enum Fault {
     ConfirmTimeout,
     SubscribeTimeout,
     SubscribeReportedTimeout,
+    ActiveDisconnect(CancelAfterDisconnect),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CancelAfterDisconnect {
+    Success,
+    Disconnected,
+    Transport,
+    Timeout,
 }
 
 #[derive(Default)]
@@ -196,6 +205,9 @@ impl MarketSubscription for SyntheticLine {
 
     async fn next(&mut self) -> Result<Option<MarketEvent>, MarketError> {
         let Some((delay, event)) = self.events.pop_front() else {
+            if matches!(self.fault, Fault::ActiveDisconnect(_)) {
+                return Err(MarketError::Disconnected);
+            }
             return if self.ends { Ok(None) } else { pending().await };
         };
         if !delay.is_zero() {
@@ -206,8 +218,15 @@ impl MarketSubscription for SyntheticLine {
 
     async fn cancel(&mut self) -> Result<(), MarketError> {
         self.cancellations.fetch_add(1, Ordering::SeqCst);
-        if self.fault == Fault::Cancel {
-            return Err(MarketError::Transport);
+        match self.fault {
+            Fault::ActiveDisconnect(CancelAfterDisconnect::Disconnected) => {
+                return Err(MarketError::Disconnected);
+            }
+            Fault::Cancel | Fault::ActiveDisconnect(CancelAfterDisconnect::Transport) => {
+                return Err(MarketError::Transport);
+            }
+            Fault::ActiveDisconnect(CancelAfterDisconnect::Timeout) => return pending().await,
+            _ => {}
         }
         assert!(self.active.swap(false, Ordering::SeqCst));
         Ok(())
@@ -487,6 +506,57 @@ async fn uncertain_subscribe_or_failed_cancel_stops_opening_lines() {
         assert_eq!(report.products[1].probes[0].reason, Reason::SweepStopped);
         assert_eq!(source.confirmed.lock().unwrap().len(), 1);
         assert_eq!(source.cancellations.load(Ordering::SeqCst), cancellations);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn active_subscription_disconnect_remains_the_failure_after_cancellation() {
+    for outcome in [
+        CancelAfterDisconnect::Success,
+        CancelAfterDisconnect::Disconnected,
+        CancelAfterDisconnect::Transport,
+        CancelAfterDisconnect::Timeout,
+    ] {
+        let source = SyntheticSource {
+            fault: Fault::ActiveDisconnect(outcome),
+            ..SyntheticSource::default()
+        };
+        let report = probe_products(
+            &source,
+            ProbeOptions {
+                opra_con_id: Some(OPRA_CON_ID),
+                equity_l1_permission_confirmed: true,
+                opra_permission_confirmed: true,
+            },
+            REQUEST_TIME,
+        )
+        .await;
+        assert_eq!(
+            report.failure,
+            Some(Reason::GatewayDisconnected),
+            "{outcome:?}"
+        );
+        let [equity, opra] = &report.products;
+        assert_eq!(equity.verdict, Verdict::Pending);
+        let first = &equity.probes[0];
+        assert!(first.contract_confirmed);
+        assert!(first.bid_ask_valid);
+        assert_eq!(first.verdict, Verdict::Pending);
+        assert_eq!(first.reason, Reason::GatewayDisconnected);
+        assert!(
+            equity.probes[1..]
+                .iter()
+                .all(|probe| probe.reason == Reason::SweepStopped)
+        );
+        assert_eq!(opra.probes[0].reason, Reason::SweepStopped);
+        assert_eq!(source.confirmed.lock().unwrap().len(), 1);
+        assert_eq!(source.cancellations.load(Ordering::SeqCst), 1);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["failure"], "gateway_disconnected");
+        assert_eq!(
+            json["products"][0]["probes"][0]["reason"],
+            "gateway_disconnected"
+        );
     }
 }
 

@@ -118,11 +118,18 @@ pub trait Transport: Send + Sync {
     async fn connect(&self, address: &str, id: i32) -> Result<Self::S>;
 }
 pub struct IbTransport;
+impl IbTransport {
+    fn paper_client_builder() -> ibapi::ClientBuilder {
+        // ConnectionManager verifies an account on each new connection. The
+        // SDK must never silently replace the socket behind that verification.
+        Client::builder().auto_reconnect(false)
+    }
+}
 #[async_trait]
 impl Transport for IbTransport {
     type S = PaperPeer;
     async fn connect(&self, address: &str, id: i32) -> Result<PaperPeer> {
-        let (client, notices) = Client::builder()
+        let (client, notices) = Self::paper_client_builder()
             .address(address)
             .client_id(id)
             .connect_with_notice_stream()

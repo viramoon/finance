@@ -491,10 +491,11 @@ async fn probe_target(
         timeout(read_timeout, subscription.cancel()).await,
         Ok(Ok(()))
     );
-    let stop = if cancelled {
-        failure.filter(|reason| *reason == Reason::GatewayDisconnected)
-    } else {
-        Some(Reason::CancelFailed)
+    let stop = match (failure, cancelled) {
+        // Cleanup can also fail after the subscription detects a disconnect.
+        (Some(Reason::GatewayDisconnected), _) => failure,
+        (_, true) => None,
+        (_, false) => Some(Reason::CancelFailed),
     };
     (
         ProbeEvidence::from_observation(

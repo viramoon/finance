@@ -79,8 +79,8 @@ impl PaperMarket {
     /// Global farm notices are separate from request-scoped data and notices.
     pub async fn disconnected(&self) -> MarketError {
         let check_socket = async {
-            // The SDK retries dropped sockets internally. Discard the verified
-            // session before allowing work to continue after such a reconnect.
+            // A dropped socket ends this verified peer. The poll only detects
+            // that terminal state and other latched market invalidations.
             while check_session(&self.peer, &self.invalidated).is_ok() {
                 sleep(Duration::from_millis(100)).await;
             }
@@ -506,6 +506,7 @@ impl MarketSubscription for PaperSubscription {
                 }
             }
         }
+        check_session(&self.peer, &self.invalidated)?;
         Ok(None)
     }
 

@@ -230,3 +230,107 @@ async fn immediate_sdk_close_joins_dispatcher_without_reconnect() {
     assert_eq!(replay.reconnect_attempts(), 0);
     assert!(!replay.handshake_is_pending());
 }
+
+#[tokio::test(start_paused = true)]
+async fn paper_market_rejects_old_requests_without_reconnecting() {
+    const REPLACEMENT_ACCOUNTS: &str = "SYNTHETIC-LIVE";
+
+    // The same script can complete auto-reconnect with a different account
+    // and leave a client connected before any caller observes its socket loss.
+    let (control, client) = MarketReplay::open_with_dispatcher().unwrap();
+    control.disconnect_and_answer_reconnect(REPLACEMENT_ACCOUNTS);
+    assert_eq!(
+        timeout(WAIT, control.reconnected_accounts()).await.unwrap(),
+        REPLACEMENT_ACCOUNTS
+    );
+    assert!(client.is_connected());
+    assert_eq!(control.reconnect_attempts(), 1);
+    assert_eq!(control.writes(), [MarketWrite::StartApi(Some(91))]);
+    client.disconnect().await;
+
+    let (replay, client) =
+        MarketReplay::open_with_builder(crate::IbTransport::paper_client_builder()).unwrap();
+    let notices = Mutex::new(client.notice_stream().unwrap());
+    let market = PaperMarket::new(Arc::new(PaperPeer { client, notices }), WAIT)
+        .await
+        .unwrap();
+    let cached = request(&market, 91001, ContractKind::Equity).await;
+    let mut previous_line = market.subscribe(&cached).await.unwrap();
+    let original_writes = replay.writes();
+    replay.disconnect_and_answer_reconnect(REPLACEMENT_ACCOUNTS);
+
+    // Observe SDK channel teardown without polling the finance session/watch
+    // or marking the old verification invalid from an active line reader.
+    let sdk_line = previous_line.subscription.as_mut().unwrap();
+    let _ = timeout(WAIT, sdk_line.next())
+        .await
+        .expect("dispatcher did not close or reset the old line");
+
+    let query = ContractQuery::Equity {
+        symbol: "SYNTH".into(),
+        primary_exchange: "NASDAQ".into(),
+    };
+    let (confirmed, subscribed) = tokio::join!(market.confirm(&query), market.subscribe(&cached));
+    assert_eq!(replay.writes(), original_writes);
+    assert_eq!(replay.reconnect_attempts(), 0);
+    assert_eq!(confirmed, Err(MarketError::Disconnected));
+    assert!(matches!(subscribed, Err(MarketError::Disconnected)));
+    market.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn active_probe_reports_disconnection_before_session_poll() {
+    let (replay, client) =
+        MarketReplay::open_with_builder(crate::IbTransport::paper_client_builder()).unwrap();
+    let notices = Mutex::new(client.notice_stream().unwrap());
+    let market = PaperMarket::new(Arc::new(PaperPeer { client, notices }), WAIT)
+        .await
+        .unwrap();
+
+    let disconnect_active_line = async {
+        replay.wait_for_writes(2).await;
+        let request_id = match replay.writes().last() {
+            Some(MarketWrite::Confirm(Some(request_id))) => *request_id,
+            _ => panic!("the probe did not start equity confirmation"),
+        };
+        replay
+            .equity_contract(request_id, 91001, "QQQ", "NASDAQ")
+            .await
+            .unwrap();
+        replay.wait_for_writes(3).await;
+        assert!(matches!(
+            replay.writes().last(),
+            Some(MarketWrite::Subscribe {
+                con_id: Some(91001),
+                ..
+            })
+        ));
+        replay.disconnect_and_stall_reconnect();
+    };
+    let started = tokio::time::Instant::now();
+    let (report, ()) = timeout(WAIT, async {
+        tokio::join!(
+            probe_open_market(&market, ProbeOptions::default(), WAIT),
+            disconnect_active_line
+        )
+    })
+    .await
+    .expect("the probe did not report loss of the active line");
+
+    assert!(started.elapsed() < Duration::from_millis(100));
+    let report = serde_json::to_value(report).unwrap();
+    assert_eq!(report["failure"], "gateway_disconnected");
+    assert_eq!(
+        report["products"][0]["probes"][0]["contract_confirmed"],
+        true
+    );
+    assert_eq!(
+        report["products"][0]["probes"][0]["reason"],
+        "gateway_disconnected"
+    );
+    assert_eq!(
+        report["products"][0]["probes"][1]["reason"],
+        "sweep_stopped"
+    );
+    assert_eq!(replay.reconnect_attempts(), 0);
+}

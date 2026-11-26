@@ -16,11 +16,13 @@ use super::AsyncTcpMessageBus;
 use crate::connection::{r#async::AsyncConnection, ConnectionMetadata};
 use crate::contracts::tick_types::TickType;
 use crate::messages::{encode_protobuf_message, IncomingMessages, OutgoingMessages, PROTOBUF_MSG_ID};
-use crate::{proto, server_versions, Client, Error};
+use crate::{proto, server_versions, Client, ClientBuilder, Error};
 
 /// One successfully written market data operation, decoded from an outbound frame.
 #[derive(Debug, Eq, PartialEq)]
 pub enum MarketWrite {
+    /// Start the API during a scripted reconnect.
+    StartApi(Option<i32>),
     /// Session-level preference.
     SelectType(Option<i32>),
     /// Contract confirmation for the assigned request ID.
@@ -51,18 +53,26 @@ pub struct MarketReplay {
 impl MarketReplay {
     /// Create a synthetic post-handshake client. This neither opens a socket nor records frames to disk.
     pub fn open() -> Result<(Self, Client), Error> {
-        Self::open_mode(ReplayStream::default())
+        Self::open_mode(ReplayStream::default(), true)
     }
 
     /// Create a replay that reads frames in the production background dispatcher.
     pub fn open_with_dispatcher() -> Result<(Self, Client), Error> {
-        Self::open_mode(ReplayStream {
-            dispatcher: Some(Arc::new(DispatcherSignals::default())),
-            ..ReplayStream::default()
-        })
+        Self::open_with_builder(Client::builder())
     }
 
-    fn open_mode(stream: ReplayStream) -> Result<(Self, Client), Error> {
+    /// Use a client builder's reconnect policy with the in-memory dispatcher.
+    pub fn open_with_builder(builder: ClientBuilder) -> Result<(Self, Client), Error> {
+        Self::open_mode(
+            ReplayStream {
+                dispatcher: Some(Arc::new(DispatcherSignals::default())),
+                ..ReplayStream::default()
+            },
+            builder.auto_reconnect_enabled(),
+        )
+    }
+
+    fn open_mode(stream: ReplayStream, auto_reconnect: bool) -> Result<(Self, Client), Error> {
         let metadata = ConnectionMetadata {
             client_id: 91,
             server_version: server_versions::PROTOBUF_REST_MESSAGES_3,
@@ -71,10 +81,33 @@ impl MarketReplay {
         let connection = AsyncConnection::replay(stream.clone(), metadata.client_id, metadata.server_version);
         let bus = Arc::new(AsyncTcpMessageBus::new(connection)?);
         if stream.dispatcher.is_some() {
-            bus.clone().process_messages(metadata.server_version, Duration::from_secs(1))?;
+            bus.clone().process_messages(auto_reconnect)?;
         }
         let client = Client::new(metadata, bus.clone())?;
         Ok((Self { stream, bus }, client))
+    }
+
+    /// Answer an equity confirmation from synthetic SMART contract metadata.
+    pub async fn equity_contract(&self, request_id: i32, con_id: i32, symbol: &str, primary_exchange: &str) -> Result<(), Error> {
+        self.inject(
+            IncomingMessages::ContractData,
+            proto::ContractData {
+                req_id: Some(request_id),
+                contract: Some(proto::Contract {
+                    con_id: Some(con_id),
+                    symbol: Some(symbol.to_owned()),
+                    sec_type: Some("STK".into()),
+                    exchange: Some("SMART".into()),
+                    primary_exch: Some(primary_exchange.to_owned()),
+                    currency: Some("USD".into()),
+                    ..Default::default()
+                }),
+                contract_details: None,
+            },
+        )
+        .await?;
+        self.inject(IncomingMessages::ContractDataEnd, proto::ContractDataEnd { req_id: Some(request_id) })
+            .await
     }
 
     /// Inject a request-scoped actual market type callback in its generated Protobuf representation.
@@ -127,6 +160,39 @@ impl MarketReplay {
         let signals = self.stream.dispatcher.as_ref().expect("requires background dispatcher");
         self.stream.frames.lock().unwrap().inbound.push_back(Err(Error::ConnectionReset));
         signals.inbound_ready.notify_one();
+    }
+
+    /// Trigger a socket loss with a complete synthetic handshake queued for a replacement connection.
+    pub fn disconnect_and_answer_reconnect(&self, accounts: &str) {
+        let signals = self.stream.dispatcher.as_ref().expect("requires background dispatcher");
+        let mut frames = self.stream.frames.lock().unwrap();
+        frames.inbound.push_back(Err(Error::ConnectionReset));
+        frames.inbound.push_back(Ok(format!(
+            "{}\0{}\0",
+            server_versions::PROTOBUF_REST_MESSAGES_3,
+            "20000101 00:00:00 UTC"
+        )
+        .into_bytes()));
+        frames.inbound.push_back(Ok(encode_protobuf_message(
+            IncomingMessages::NextValidId as i32,
+            &proto::NextValidId { order_id: Some(1) }.encode_to_vec(),
+        )));
+        frames.inbound.push_back(Ok(encode_protobuf_message(
+            IncomingMessages::ManagedAccounts as i32,
+            &proto::ManagedAccounts {
+                accounts_list: Some(accounts.to_owned()),
+            }
+            .encode_to_vec(),
+        )));
+        frames.reconnect_answered = true;
+        signals.inbound_ready.notify_one();
+    }
+
+    /// Return the account list parsed by the new handshake after dispatch resumed.
+    pub async fn reconnected_accounts(&self) -> String {
+        let signals = self.stream.dispatcher.as_ref().expect("requires background dispatcher");
+        signals.reconnect_ready.notified().await;
+        self.bus.connection.connection_metadata().await.managed_accounts
     }
 
     /// Wait for the reconnect handshake response read to become pending.
@@ -185,11 +251,13 @@ fn decode_write(frame: &[u8]) -> MarketWrite {
     assert_eq!(length, frame.len() - 4);
     let kind = i32::from_be_bytes(frame[4..8].try_into().unwrap()) - PROTOBUF_MSG_ID;
     let body = &frame[8..];
+    const START_API: i32 = OutgoingMessages::StartApi as i32;
     const SELECT_TYPE: i32 = OutgoingMessages::RequestMarketDataType as i32;
     const CONFIRM: i32 = OutgoingMessages::RequestContractData as i32;
     const SUBSCRIBE: i32 = OutgoingMessages::RequestMarketData as i32;
     const CANCEL: i32 = OutgoingMessages::CancelMarketData as i32;
     match kind {
+        START_API => MarketWrite::StartApi(proto::StartApiRequest::decode(body).unwrap().client_id),
         SELECT_TYPE => MarketWrite::SelectType(proto::MarketDataTypeRequest::decode(body).unwrap().market_data_type),
         CONFIRM => MarketWrite::Confirm(proto::ContractDataRequest::decode(body).unwrap().req_id),
         SUBSCRIBE => {
@@ -214,6 +282,7 @@ struct ReplayFrames {
     fail_next_write: bool,
     reconnect_attempts: usize,
     handshake_written: bool,
+    reconnect_answered: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -228,6 +297,7 @@ struct DispatcherSignals {
     outbound_ready: Notify,
     handshake_started: Notify,
     handshake_pending: AtomicBool,
+    reconnect_ready: Notify,
 }
 
 struct HandshakeRead<'a>(&'a DispatcherSignals);
@@ -242,9 +312,9 @@ impl Drop for HandshakeRead<'_> {
 impl AsyncIo for ReplayStream {
     async fn read_message(&self) -> Result<Vec<u8>, Error> {
         loop {
-            let (frame, handshake_written) = {
+            let (frame, handshake_written, reconnect_answered) = {
                 let mut frames = self.frames.lock().unwrap();
-                (frames.inbound.pop_front(), frames.handshake_written)
+                (frames.inbound.pop_front(), frames.handshake_written, frames.reconnect_answered)
             };
             if let Some(frame) = frame {
                 return frame;
@@ -253,11 +323,15 @@ impl AsyncIo for ReplayStream {
                 return Err(Error::EndOfStream);
             };
             if handshake_written {
-                // Entered only after the SDK wrote its real reconnect handshake.
-                let _read = HandshakeRead(signals);
-                signals.handshake_pending.store(true, Ordering::Release);
-                signals.handshake_started.notify_one();
-                return pending().await;
+                if reconnect_answered {
+                    signals.reconnect_ready.notify_one();
+                } else {
+                    // Entered only after the SDK wrote its real reconnect handshake.
+                    let _read = HandshakeRead(signals);
+                    signals.handshake_pending.store(true, Ordering::Release);
+                    signals.handshake_started.notify_one();
+                    return pending().await;
+                }
             }
             signals.inbound_ready.notified().await;
         }

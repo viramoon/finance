@@ -1,7 +1,6 @@
 //! Asynchronous client implementation
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use log::debug;
 use time::OffsetDateTime;
@@ -104,6 +103,7 @@ impl Client {
         address: &str,
         client_id: i32,
         tcp_no_delay: bool,
+        auto_reconnect: bool,
         startup_callback: Option<Arc<dyn Fn(StartupMessage) + Send + Sync>>,
         notice_sender: broadcast::Sender<Notice>,
     ) -> Result<Client, Error> {
@@ -113,9 +113,7 @@ impl Client {
         let message_bus = Arc::new(AsyncTcpMessageBus::new(connection)?);
 
         // Start background task to read messages from TWS
-        message_bus
-            .clone()
-            .process_messages(connection_metadata.server_version, Duration::from_secs(1))?;
+        message_bus.clone().process_messages(auto_reconnect)?;
 
         Client::new(connection_metadata, message_bus)
     }

@@ -249,13 +249,14 @@ pub mod async_impl {
     /// Builder for an async [`Client`]. Acquire via
     /// [`Client::builder`](crate::Client::builder).
     ///
-    /// Configurators (`address`, `client_id`, `tcp_no_delay`, `startup_callback`)
+    /// Configurators (`address`, `client_id`, `tcp_no_delay`, `auto_reconnect`, `startup_callback`)
     /// chain on `self`. Terminate with [`connect`](Self::connect) or
     /// [`connect_with_notice_stream`](Self::connect_with_notice_stream).
     #[derive(Default)]
     #[must_use = "ClientBuilder does nothing until you call connect() or connect_with_notice_stream()"]
     pub struct ClientBuilder {
         state: BuilderState,
+        disable_auto_reconnect: bool,
     }
 
     impl ClientBuilder {
@@ -384,9 +385,29 @@ pub mod async_impl {
             Ok((client, stream))
         }
 
+        /// Enable SDK replacement of a lost connection. Enabled by default.
+        /// Disable this to let the caller validate each newly opened connection.
+        pub fn auto_reconnect(mut self, enabled: bool) -> Self {
+            self.disable_auto_reconnect = !enabled;
+            self
+        }
+
+        pub(crate) fn auto_reconnect_enabled(&self) -> bool {
+            !self.disable_auto_reconnect
+        }
+
         async fn connect_with_sender(self, sender: broadcast::Sender<Notice>) -> Result<Client, Error> {
+            let auto_reconnect = self.auto_reconnect_enabled();
             let pieces = self.state.validate()?;
-            Client::connect_with_pieces(&pieces.address, pieces.client_id, pieces.tcp_no_delay, pieces.startup_callback, sender).await
+            Client::connect_with_pieces(
+                &pieces.address,
+                pieces.client_id,
+                pieces.tcp_no_delay,
+                auto_reconnect,
+                pieces.startup_callback,
+                sender,
+            )
+            .await
         }
     }
 }
