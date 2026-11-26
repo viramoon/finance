@@ -29,10 +29,14 @@ pub struct MinuteDecimalPolicy {
 
 pub const MINUTE_DECIMAL_POLICY: MinuteDecimalPolicy = MinuteDecimalPolicy {
     input: "ibapi-3.2.0-binary64",
-    price_increment: Decimal::from_parts(1, 0, 0, false, 4),
-    volume_increment: Decimal::from_parts(1, 0, 0, false, 8),
+    price_increment: decimal_increment(4),
+    volume_increment: decimal_increment(8),
     rounding: "nearest_ties_even",
 };
+
+const fn decimal_increment(scale: u32) -> Decimal {
+    Decimal::from_parts(1, 0, 0, false, scale)
+}
 
 pub struct MinuteRequest {
     symbol: String,

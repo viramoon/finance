@@ -39,9 +39,9 @@ from fertile_finance.historical_pull import CryptoHistory, main, pull_bars
 MINUTE = CRYPTO_INTERVAL_MS["1m"]
 DAY = CRYPTO_INTERVAL_MS["1d"]
 EXPECTED_COINS = ("BTC", "ETH", "SOL")
-OLD_DAY = date(2024, 12, 31)
-NEW_DAY = date(2025, 1, 1)
-NEXT_DAY = date(2025, 1, 2)
+OLD_DAY = date.fromisoformat("2024-12-31")
+NEW_DAY = date.fromisoformat("2025-01-01")
+NEXT_DAY = date.fromisoformat("2025-01-02")
 START = (OLD_DAY - EPOCH).days * DAY
 OHLCV = ["41.1234567890123456", "42.000", "40.0100", "41.500", "0.0000012500"]
 

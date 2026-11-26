@@ -247,13 +247,13 @@ def _archive_bool(value: str) -> bool:
 
 
 def _trade_row(fields: list[str], start_ns: int, ns_per_unit: int) -> dict:
-    trade_id, price, size, quote, timestamp, buyer_maker, best_match = fields
+    trade_id, price_text, size_text, quote_text, timestamp, buyer_maker, best_match = fields
     ts_ns = unix_nanos(U64Text(timestamp).integer * ns_per_unit)
     if not start_ns <= ts_ns < start_ns + _NS_PER_DAY:
         raise ValueError("trade outside archive day")
-    price = DecimalText(price)
-    size = DecimalText(size)
-    quote = DecimalText(quote)
+    price = DecimalText(price_text)
+    size = DecimalText(size_text)
+    quote = DecimalText(quote_text)
     if price.decimal <= 0 or size.decimal <= 0 or quote.decimal < 0:
         raise ValueError("invalid trade price or quantity")
     return {

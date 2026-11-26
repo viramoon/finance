@@ -20,10 +20,10 @@ from fertile_finance.historical_pull import EquityDaily, pull_bars
 SYMBOLS = ("QQQ", "SPY", "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA")
 EXACT_CLOSE = "101.1234567890123456"
 NEW_YORK = ZoneInfo("America/New_York")
-JULY_2 = date(2024, 7, 2)
-JULY_3 = date(2024, 7, 3)
-JULY_4 = date(2024, 7, 4)
-JULY_5 = date(2024, 7, 5)
+JULY_2 = date.fromisoformat("2024-07-02")
+JULY_3 = date.fromisoformat("2024-07-03")
+JULY_4 = date.fromisoformat("2024-07-04")
+JULY_5 = date.fromisoformat("2024-07-05")
 
 
 def ns(value):

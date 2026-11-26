@@ -157,8 +157,8 @@ class HistoricalPullTests(unittest.TestCase):
 
     def test_nine_equities_schedule_and_ibkr_minute_cli_bounds(self):
         # Explicit market-calendar examples; OHLCV and CLI return values are synthetic.
-        early = date(2024, 11, 29)
-        holiday = date(2024, 11, 28)
+        early = date.fromisoformat("2024-11-29")
+        holiday = date.fromisoformat("2024-11-28")
         start, end = utc_ns(holiday), utc_ns(early, 23, 59)
         early_close = utc_ns(early, 18)
         self.assertEqual(equity_daily_closes(start, end), {early: early_close})
