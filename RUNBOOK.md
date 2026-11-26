@@ -98,7 +98,7 @@ FINANCE_F3_TEST_PYTHON="$FINANCE_PYTHON" \
 
 ### Binance 公共行情
 
-`finance-binance` 在内置 profile 下输出 `disabled_by_profile` 并退出。只在经审核的部署中使用 [Binance profile](docs/integrations/binance.md) 显式开启。启用前确认产品许可、数据根与 Nautilus 源码构建环境，进程的 `PYTHONPATH` 指向 finance 的 `python/`。该任务无需本地监听。使用独立日志区分 `synchronizing`、`live`、`recovering` 和 `region_restricted`。看到 403/451 时保留状态码并停止自动重启。盘口出现缺口时，通过 F3 的 `quality` 核对 `source_gap`、恢复快照和历史缺口范围。
+`finance-binance` 在内置 profile 下输出 `disabled_by_profile` 并退出。只在经审核的部署中使用 [Binance profile](docs/integrations/binance.md) 显式开启。启用前确认产品许可、数据根与 Nautilus 源码构建环境，进程的 `PYTHONPATH` 指向 finance 的 `python/`。该任务无需本地监听。使用独立日志区分 `synchronizing`、`live`、`recovering` 和 `region_restricted`。看到 403/451 时保留状态码并停止自动重启。盘口出现缺口时，通过 F3 的 `quality` 核对 `source_gap`、恢复快照和历史缺口范围。资金费率的 `next_funding_ts: null` 表示交易所尚未给出下次结算时间，已收到的费率仍可使用。
 
 ```sh
 cargo test --workspace --locked --offline

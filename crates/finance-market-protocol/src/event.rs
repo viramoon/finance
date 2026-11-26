@@ -110,7 +110,9 @@ wire_object! {
 wire_object! {
     pub struct FundingRate {
         pub rate: DecimalText,
-        pub next_funding_ts: U64Text,
+        #[serde(deserialize_with = "required_nullable")]
+        #[schema(required = true, inline)]
+        pub next_funding_ts: Option<U64Text>,
     }
 }
 
@@ -337,7 +339,7 @@ impl Event {
                     ValidationError::new("exchange_ts", "required for funding rates")
                 })?;
                 require(
-                    ts <= rate.next_funding_ts,
+                    rate.next_funding_ts.is_none_or(|next| ts <= next),
                     "payload.next_funding_ts",
                     "must be at or after exchange_ts",
                 )?;

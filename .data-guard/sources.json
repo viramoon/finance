@@ -7,6 +7,18 @@
       "seed": "fixed",
       "source": "手工设计的三根闭合 bar，覆盖十进制精度和循环回放。"
     },
+    "crates/finance-collector/fixtures/binance/depth.json": {
+      "sha256": "0f2cc82aa600351f68b1a7853b11225913c98bdd9ded8bfd3dba6eb2b6ec8921",
+      "generator": "scripts/generate_synthetic_fixtures.py",
+      "seed": "fixed",
+      "source": "运行 python3 -B scripts/generate_synthetic_fixtures.py OUTPUT_DIRECTORY。固定价格、数量和更新 ID 生成现货及永续快照和增量；覆盖删档、断序与超安全整数 ID。"
+    },
+    "crates/finance-collector/fixtures/binance/observations.json": {
+      "sha256": "e67a017e55648cd3743f31532befdade74e6a2c4df1ab0b49194e800943dfdcb",
+      "generator": "scripts/generate_synthetic_fixtures.py",
+      "seed": "fixed",
+      "source": "运行 python3 -B scripts/generate_synthetic_fixtures.py OUTPUT_DIRECTORY。固定成交、资金费率及 OI 响应；覆盖成交方向、费率符号和十进制精度。"
+    },
     "crates/finance-market-protocol/fixtures/examples.input.json": {
       "sha256": "b5abfc5b2ce37543e46c5a093b608aebb4873ac4714a6e616276dae37a2558a5",
       "generator": "crates/finance-market-protocol/src/bin/export-market-protocol.rs",

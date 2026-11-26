@@ -175,19 +175,32 @@ async fn region_rejection_stops_all_retries_and_rate_limit_honors_delay() {
 
 #[tokio::test(start_paused = true)]
 async fn depth_gap_resets_stream_and_new_snapshot_reports_recovery_to_wal() {
+    assert_depth_gap_recovery(None).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn depth_gap_with_invalid_quantity_still_resets_and_recovers() {
+    assert_depth_gap_recovery(Some("-1.000")).await;
+}
+
+async fn assert_depth_gap_recovery(invalid_quantity: Option<&str>) {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = config(true, false);
     let depth: Value =
         serde_json::from_str(include_str!("../../fixtures/binance/depth.json")).unwrap();
     let (_shutdown, stop) = watch::channel(false);
     let mut observer = Capture::default();
+    let mut first_gap = depth["spot_gap"].clone();
+    if let Some(quantity) = invalid_quantity {
+        first_gap["b"][0][1] = json!(quantity);
+    }
     let mut sessions = VecDeque::from([
         Replay::from(vec![
             metadata("spot"),
             frame("stream", "spot", depth["spot_bridge"].clone()),
             frame("snapshot", "spot", depth["spot_snapshot"].clone()),
             frame("stream", "spot", depth["spot_next"].clone()),
-            frame("stream", "spot", depth["spot_gap"].clone()),
+            frame("stream", "spot", first_gap),
         ]),
         Replay::from(vec![
             metadata("spot"),
@@ -345,7 +358,7 @@ async fn spot_and_perpetual_are_distinct_and_context_uses_its_own_policy() {
         context
             .iter()
             .any(|event| matches!(&event.message, Message::FundingRate(value)
-        if value.rate.as_str() == "-0.00000001" && value.next_funding_ts.get() == 2_000_000_000))
+        if value.rate.as_str() == "-0.00000001" && value.next_funding_ts == Some(2_000_000_000.into())))
     );
     assert!(context.iter().any(
         |event| matches!(&event.message, Message::OpenInterest(value)
@@ -394,5 +407,64 @@ async fn context_records_exact_values_in_f3_and_wal_restarts_advance_epoch() {
             .collect();
         assert_eq!(observations, [expected; 2]);
         assert!(stream[4].epoch > stream[3].epoch);
+    }
+}
+
+#[tokio::test]
+async fn missing_next_funding_time_publishes_rate_and_keeps_perpetual_feed_running() {
+    let cfg = config(false, true);
+    let data: Value =
+        serde_json::from_str(include_str!("../../fixtures/binance/observations.json")).unwrap();
+    for missing_time in [Some(0), Some(-1), None] {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut funding = data["funding"].clone();
+        match missing_time {
+            Some(time) => funding["T"] = json!(time),
+            None => {
+                funding.as_object_mut().unwrap().remove("T");
+            }
+        }
+        let (_shutdown, stop) = watch::channel(false);
+        let mut observer = Capture::default();
+        let end = run_with(&cfg, tmp.path(), stop, &mut observer, |_| {
+            Ok(Replay::from(vec![
+                metadata("perpetual"),
+                frame("stream", "perpetual", funding.clone()),
+                frame("stream", "perpetual", data["perp_trade"].clone()),
+                frame("interest", "perpetual", data["interest"].clone()),
+                frame("stream", "perpetual", data["funding"].clone()),
+                failure(451, None),
+            ]))
+        })
+        .await
+        .unwrap();
+        assert_eq!(end, Status::RegionRestricted { http_status: 451 });
+        assert!(!observer.statuses.contains(&Status::Recovering));
+
+        let context = events(tmp.path(), CONTEXT_PRODUCT);
+        let funding: Vec<_> = context
+            .iter()
+            .filter_map(|event| match &event.message {
+                Message::FundingRate(rate) => Some(serde_json::to_value(rate).unwrap()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            funding,
+            [
+                json!({"rate": "-0.00000001", "next_funding_ts": null}),
+                json!({"rate": "-0.00000001", "next_funding_ts": "2000000000"}),
+            ]
+        );
+        assert!(
+            context
+                .iter()
+                .any(|event| matches!(event.message, Message::OpenInterest(_)))
+        );
+        assert!(
+            events(tmp.path(), PERP_PRODUCT)
+                .iter()
+                .any(|event| matches!(event.message, Message::Trade(_)))
+        );
     }
 }

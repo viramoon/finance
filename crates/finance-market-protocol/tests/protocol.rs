@@ -376,11 +376,10 @@ fn diagnostic_decoder_handles_extreme_numbers_and_invalid_constants() {
     let quantity = format!(r#""quantity":{}"#, event["payload"]["quantity"]);
     let event = event.to_string();
     let long_integer = "9".repeat(4301);
-    for number in [
-        "1e1000000000000000000",
-        "1e-1000000000000000000",
-        &long_integer,
-    ] {
+    let exponent = "1000000000000000000";
+    let positive_exponent = format!("1e{exponent}");
+    let negative_exponent = format!("1e-{exponent}");
+    for number in [&positive_exponent, &negative_exponent, &long_integer] {
         let text = event.replacen(&quantity, &format!(r#""quantity":{number}"#), 1);
         assert_rejected_json::<Event>(&text, "/payload/quantity", "invalid_type", None);
     }
@@ -780,5 +779,50 @@ fn context_v2_exports_are_deterministic_and_version_scoped() {
             "heartbeat",
             "status"
         ])
+    );
+}
+
+#[test]
+fn funding_rate_next_time_is_required_nullable_in_event_and_export() {
+    let mut event = examples()["events"][0].clone();
+    event["schema_version"] = json!("2.0");
+    event["asset_kind"] = json!("perpetual");
+    event["instrument_id"] = json!("BTC-USDT-PERP.BINANCE");
+    event["venue"] = json!("BINANCE");
+    event["kind"] = json!("funding_rate");
+    event["payload"] = json!({"rate": "-0.00000001", "next_funding_ts": null});
+    assert_roundtrip::<Event>(&json!([event.clone()]));
+    event["payload"]["next_funding_ts"] = json!("0");
+    assert_rejected::<Event>(
+        &event,
+        "/payload/next_funding_ts",
+        "constraint_violation",
+        "at or after exchange_ts",
+    );
+    event["payload"]
+        .as_object_mut()
+        .unwrap()
+        .remove("next_funding_ts");
+    assert_rejected::<Event>(
+        &event,
+        "/payload/next_funding_ts",
+        "missing_field",
+        "next_funding_ts",
+    );
+
+    let schema: Value =
+        serde_json::from_str(include_str!("../../../protocol/v2/event.schema.json")).unwrap();
+    let funding = &schema["$defs"]["FundingRate"];
+    assert!(
+        funding["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("next_funding_ts"))
+    );
+    assert!(
+        funding["properties"]["next_funding_ts"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .contains(&json!({"type": "null"}))
     );
 }

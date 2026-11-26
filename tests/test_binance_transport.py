@@ -146,3 +146,21 @@ class PerpetualContextProtocolTests(unittest.TestCase):
         self.assertEqual(Capability.from_dict(capability).to_dict(), capability)
         with self.assertRaises(ProtocolError):
             Capability.from_dict(capability | {"schema_version": "1.0"})
+
+
+    def test_funding_requires_nullable_next_time_and_still_rejects_an_earlier_time(self):
+        event = {
+            "schema_version": "2.0", "source": "binance", "product": "usdt-perp-context",
+            "channel": "funding_rate", "instrument_id": "BTC-USDT-PERP.BINANCE",
+            "asset_kind": "perpetual", "venue": "BINANCE", "exchange_ts": "1000000000",
+            "receive_ts": "1000000001", "first_available_ts": "1000000001",
+            "epoch": "1", "seq": "1", "revision": "0", "cursor": "1:1", "license": "fixture.synthetic",
+            "kind": "funding_rate", "payload": {"rate": "-0.00000001", "next_funding_ts": None},
+        }
+        parsed = Event.from_dict(event)
+        self.assertIsNone(parsed.payload.next_funding_ts)
+        self.assertEqual(Event.from_json(parsed.to_json()).to_dict(), event)
+        for payload in ({"rate": "-0.00000001"}, {"rate": "-0.00000001", "next_funding_ts": "999999999"}):
+            with self.subTest(payload=payload), self.assertRaises(ProtocolError) as error:
+                Event.from_dict(event | {"payload": payload})
+            self.assertEqual(error.exception.path, "/payload/next_funding_ts")

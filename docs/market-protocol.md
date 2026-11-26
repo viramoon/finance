@@ -95,7 +95,7 @@ PYTHONPATH=python python -m unittest discover -s tests -p test_market_protocol.p
 
 | `kind` | `payload` |
 | --- | --- |
-| `funding_rate` | 有符号的十进制比率 `rate`，以及不早于 `exchange_ts` 的 UTC 纳秒 `next_funding_ts`。 |
+| `funding_rate` | 有符号的十进制比率 `rate`，以及必填的 `next_funding_ts`。已知时为不早于 `exchange_ts` 的 UTC 纳秒字符串，未知时为 `null`。 |
 | `open_interest` | 非负十进制字符串 `quantity`，保留供应商的基础资产数量和有效位。 |
 
 使用与 v1.0 相同的导出器生成 [能力 schema](../protocol/v2/capability.schema.json) 和 [事件 schema](../protocol/v2/event.schema.json)：

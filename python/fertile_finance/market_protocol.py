@@ -532,7 +532,7 @@ class Status:
 @dataclass(frozen=True, slots=True)
 class FundingRate:
     rate: DecimalText
-    next_funding_ts: U64Text
+    next_funding_ts: U64Text | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -654,8 +654,10 @@ def _payload(kind: Kind | ContextKind, value: object, exchange_ts: U64Text | Non
         _require(exchange_ts is not None, "/exchange_ts", "required for perpetual context")
         if kind == ContextKind.FUNDING_RATE:
             data = _object(value, path, ("rate", "next_funding_ts"))
-            next_ts = U64Text(data["next_funding_ts"], field=f"{path}/next_funding_ts")
-            _require(next_ts.integer >= exchange_ts.integer, f"{path}/next_funding_ts", "must be at or after exchange_ts")
+            next_ts = None
+            if data["next_funding_ts"] is not None:
+                next_ts = U64Text(data["next_funding_ts"], field=f"{path}/next_funding_ts")
+                _require(next_ts.integer >= exchange_ts.integer, f"{path}/next_funding_ts", "must be at or after exchange_ts")
             return FundingRate(DecimalText(data["rate"], field=f"{path}/rate"), next_ts)
         data = _object(value, path, ("quantity",))
         return OpenInterest(_quantity(data["quantity"], f"{path}/quantity"))

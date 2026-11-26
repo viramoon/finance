@@ -550,7 +550,11 @@ impl<'a, O: Observer> Feed<'a, O> {
                         Observation::event(
                             Message::FundingRate(FundingRate {
                                 rate,
-                                next_funding_ts: ns(next_funding_ms)?.into(),
+                                next_funding_ts: next_funding_ms
+                                    .filter(|&millis| millis > 0)
+                                    .map(|millis| ns(millis as u64))
+                                    .transpose()?
+                                    .map(Into::into),
                             }),
                             None,
                             ns(event_ms)?,

@@ -291,7 +291,7 @@ pub enum StreamMessage {
         #[serde(rename = "r")]
         rate: DecimalText,
         #[serde(rename = "T")]
-        next_funding_ms: u64,
+        next_funding_ms: Option<i64>,
     },
 }
 

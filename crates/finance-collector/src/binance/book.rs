@@ -90,36 +90,46 @@ impl Book {
 
     pub fn update(&mut self, diff: Diff, receive: u64, market: Market) -> Result<Depth> {
         if !diff.sequence_valid(market) {
-            *self = Self::default();
-            return Ok(Depth::Gap);
+            return Ok(self.invalidate());
         }
-        let delta = diff.payload()?;
+        if let Some(current) = &self.current {
+            if diff.last <= current.last {
+                return Ok(Depth::Pending);
+            }
+            if !follows(market, diff.first, diff.previous, current.last) {
+                return Ok(self.invalidate());
+            }
+        }
+        // An unusable update cannot advance a book. Discard the baseline so
+        // the consumer receives a reset even when the native IDs are valid.
+        let (Ok(delta), Ok(exchange)) = (diff.payload(), ns(diff.event_ms)) else {
+            return Ok(self.invalidate());
+        };
         let update = Update {
             first: diff.first,
             last: diff.last,
             previous: diff.previous,
-            exchange: ns(diff.event_ms)?,
+            exchange,
             delta,
             receive,
         };
         if let Some(current) = &mut self.current {
-            if update.last <= current.last {
-                return Ok(Depth::Pending);
-            }
-            if !follows(market, &update, current.last) || !current.apply(&update.delta, update.last)
-            {
-                *self = Self::default();
-                return Ok(Depth::Gap);
+            if !current.apply(&update.delta, update.last) {
+                return Ok(self.invalidate());
             }
             return Ok(Depth::Updated(update.frame()));
         }
         self.pending_levels += update.delta.updates.len();
         if self.pending.len() == BUFFER_LIMIT || self.pending_levels > BUFFER_LEVEL_LIMIT {
-            *self = Self::default();
-            return Ok(Depth::Gap);
+            return Ok(self.invalidate());
         }
         self.pending.push_back(update);
         self.bridge(market)
+    }
+
+    fn invalidate(&mut self) -> Depth {
+        *self = Self::default();
+        Depth::Gap
     }
 
     fn bridge(&mut self, market: Market) -> Result<Depth> {
@@ -150,8 +160,7 @@ impl Book {
             return Ok(Depth::Pending);
         };
         if first.first > target {
-            *self = Self::default();
-            return Ok(Depth::Gap);
+            return Ok(self.invalidate());
         }
         // Spot REST does not timestamp the snapshot. The bridge provides the
         // exchange-time upper bound of its sequence-aligned baseline.
@@ -178,7 +187,7 @@ impl Book {
                 if update.last <= current.last {
                     continue;
                 }
-                if !follows(market, &update, current.last) {
+                if !follows(market, update.first, update.previous, current.last) {
                     self.snapshot = None;
                     return Ok(Depth::Gap);
                 }
@@ -207,10 +216,10 @@ impl Update {
     }
 }
 
-fn follows(market: Market, diff: &Update, last: u64) -> bool {
+fn follows(market: Market, first: u64, previous: Option<u64>, last: u64) -> bool {
     match market {
-        Market::Spot => diff.first <= last.saturating_add(1),
-        Market::Perpetual => diff.previous == Some(last),
+        Market::Spot => first <= last.saturating_add(1),
+        Market::Perpetual => previous == Some(last),
     }
 }
 

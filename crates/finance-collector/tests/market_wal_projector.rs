@@ -327,14 +327,21 @@ fn perpetual_context_wal_projects_and_indexes_exact_decimal_strings() {
     let mut ingress = MarketIngress::open(root.path(), access.clone()).unwrap();
     let data: Value =
         serde_json::from_str(include_str!("../fixtures/binance/observations.json")).unwrap();
-    for (kind, payload) in [
+    for (kind, seq, payload) in [
         (
             "funding_rate",
+            "1",
             json!({"rate": data["funding"]["r"], "next_funding_ts": "2000000000"}),
         ),
         (
             "open_interest",
+            "1",
             json!({"quantity": data["interest"]["openInterest"]}),
+        ),
+        (
+            "funding_rate",
+            "2",
+            json!({"rate": data["funding"]["r"], "next_funding_ts": null}),
         ),
     ] {
         let event = fixture::<Event>(&json!({
@@ -342,11 +349,11 @@ fn perpetual_context_wal_projects_and_indexes_exact_decimal_strings() {
             "source": access.source, "product": access.product, "license": access.license,
             "instrument_id": instrument.instrument_id, "asset_kind": "perpetual", "venue": "BINANCE",
             "exchange_ts": "1000000000", "receive_ts": "1000000001", "first_available_ts": "1000000001",
-            "epoch": "1", "seq": "1", "revision": "0", "cursor": "1:1"
+            "epoch": "1", "seq": seq, "revision": "0", "cursor": format!("1:{seq}")
         }));
         ingress.publish(event, &instrument, &capability).unwrap();
     }
-    assert_eq!(ingress.flush().unwrap(), Some(2));
+    assert_eq!(ingress.flush().unwrap(), Some(3));
 
     let python = env::var_os("FINANCE_F3_TEST_PYTHON").unwrap();
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -360,11 +367,14 @@ sys.argv[1:2] = ["--data-root", str(root), "--wal-bin"]
 assert main() == 0
 source, product = "binance", "usdt-perp-context"
 [part] = projected_partitions(root, source, product)
-assert part.row_count == 2
-def get(channel):
-    return read_latest_event(root, source, product, channel, "BTC-USDT-PERP.BINANCE", "1", "1")
+assert part.row_count == 3
+def get(channel, seq="1"):
+    return read_latest_event(root, source, product, channel, "BTC-USDT-PERP.BINANCE", "1", seq)
 assert get("funding_rate").to_dict()["payload"]["rate"] == "-0.00000001"
 assert get("open_interest").to_dict()["payload"]["quantity"] == "123.456789123456"
+assert get("funding_rate", "2").to_dict()["payload"] == {
+    "rate": "-0.00000001", "next_funding_ts": None,
+}
 "#;
     checked_output(
         Command::new(&python)
