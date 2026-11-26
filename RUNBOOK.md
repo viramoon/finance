@@ -46,6 +46,17 @@ FERTILE_PROFILE=cloudbox cargo run --locked -p finance-api
 
 API 接受 SIGTERM 和 Ctrl-C 优雅停止；部署守护、日志收集和滚动重启以 fertile deploy/ 为准，本 PR 不部署。默认 loopback / 8081，无账户配置和 Gateway 依赖；不能把当前 ready 当成交易 ready。
 
+## 离线因子研究验收
+
+在仓库根目录用含研究依赖的现有 Python 环境执行。定向测试在内存生成截面和收盘价，月频登记读取仓库内原报告并核对证据哈希。
+
+```sh
+PYTHONPATH=python /path/to/research/venv/bin/python -m unittest discover -s tests -p 'test_factor_*.py' -v
+PYTHONPATH=python /path/to/research/venv/bin/python -m unittest discover -s tests -p 'test_historical_research.py' -v
+```
+
+报告复算时固定因子版、数据版、交易会话、各段区间、分位数和成本档。用逐期参考权重及目标权重复算换手、费用及费前费后收益，再核对复利汇总。遇到未来披露诊断时核对数据源的真实发布时间和该版修订的可见区间。停止新回测选择时将相应因子版本退回 `observe_only`，记录理由并保留原报告引用。入参、状态和历史证据见 [因子研究接口](docs/factor-research.md)。
+
 ## 行情与作业
 
 从 finance 仓库根运行。先按源码构建文档准备虚拟环境，设置各进程共用的 FERTILE_DATA_ROOT，然后构建三个 Rust 程序。
@@ -61,6 +72,29 @@ scripts/finance-backtest-worker
 ```
 
 Replay 可单独运行。paper 模式下 probe 用 client ID 91，collector 用 92，93 预留给 trader，凭据由盒子上的 Gateway 读取。连接、补数、权限与 pacing 故障定位见 [IB 接入](docs/integrations/ib.md)，水位、精度和杀进程恢复见 [catalog](catalog/README.md)，worker 的资源限制、队列恢复及幂等请求见 [作业说明](docs/backtest-jobs.md)。部署守护从 fertile 的 runbook 进入。
+
+### F1 行情 WAL 与投影
+
+生产者通过 [本地行情接口](docs/market-wal.md) 绑定产品许可，并在确认采集前提交 WAL。在独立数据根可使用已有源码构建的 Python 环境追平投影并检查水位。下列命令把 `$DATA_ROOT`、`$SOURCE` 和 `$PRODUCT` 设为目标数据根与已登记产品，`$WAL_BIN` 设为构建的 `finance-market-wal` 路径。
+
+```sh
+cargo build --locked -p finance-collector
+PYTHONPATH=python "$FINANCE_PYTHON" -m fertile_finance.market_projector \
+  --data-root "$DATA_ROOT" --wal-bin "$WAL_BIN" --once
+"$WAL_BIN" --data-root "$DATA_ROOT" watermarks --source "$SOURCE" --product "$PRODUCT"
+"$WAL_BIN" --data-root "$DATA_ROOT" quality --source "$SOURCE" --product "$PRODUCT"
+```
+
+需要持续投影时去掉 `--once`，进程接受 SIGTERM/SIGINT，完成正在处理的批次后退出。写者异常退出后用同一数据根与许可重新打开，接着从已确认位置恢复。投影报错时保留 WAL 和游标，检查磁盘、校验错误或 F1 身份冲突，使用隔离数据根验证恢复。磁盘空间不足时先停可重建投影和低优先任务，记录未采区间。
+
+经授权备份的产品可在写者运行时通过生产者封段，或在停写时使用 `finance-market-wal seal`。按 [封段清单 v1](docs/market-wal.md#t2b-封段清单-v1) 枚举并校验封段，再交给 fertile 的备份协调方。旧 collector 仍由上面的运行方式管理。
+
+Nautilus 源码 CI 使用构建后的 Python 环境运行 Rust WAL 到 Parquet 的端到端测试。本地可用同一命令核对四条水位、同秒逐笔保留、去重和修订索引。
+
+```sh
+FINANCE_F3_TEST_PYTHON="$FINANCE_PYTHON" \
+  cargo test --locked -p finance-collector --test market_wal_projector -- --include-ignored
+```
 
 ### 在盒子上验证 paper 行情恢复
 

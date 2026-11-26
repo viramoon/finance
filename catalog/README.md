@@ -2,6 +2,8 @@
 
 finance-collector 在数据根的 catalog 下写入 Nautilus v1.231.0 可直接读取的 Bar，finance-api 读取同一数据根的 collector 状态。配置和启动命令见 [运行手册](../RUNBOOK.md)。测试数据源用 config/collector/replay.csv 的十进制 OHLCV 形成合成行情，用于持续演练。replay 状态不可用作真实市场行情。
 
+获准持久化的 F1 多事件流使用独立的 [WAL 与市场事件 Parquet](../docs/market-wal.md)，投影目录位于 `catalog/market-events`。
+
 数据根与研究根应位于 Git 工作树之外。回放 CSV 属于 [已登记的合成 fixture](../.data-guard/sources.json)。实际行情、数据库和导出文件的目录约定见 [数据入仓防护](../docs/data-guard.md)。
 
 ## 输入与恢复
