@@ -1,4 +1,5 @@
 pub mod config;
+pub mod depth;
 pub mod entitlements;
 pub mod historical;
 pub mod market;

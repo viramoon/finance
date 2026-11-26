@@ -6,6 +6,8 @@ fertile 的主项目与 submodule，基于 NautilusTrader 的交易与数据系�
 
 `finance-ib` 提供 paper 只读的美股及 OPRA 顶档订阅接口，以及需显式启用的私有权限探针。真实账户各产品权限仍待验收。操作见 [IBKR 接入](docs/integrations/ib.md#美股-l1-和-opra-权限验收)。
 
+Nasdaq TotalView 提供八只自选标的的场所深度，最多同时钉住两只，另有一个名额跟随当前页面。SPY 保留综合顶档。场所簿仅供授权的会话在内存中展示。接口和权限见 [Nasdaq TotalView 场所深度](docs/integrations/ib.md#nasdaq-totalview-场所深度)。
+
 本地行情链路支持 F1 事件追加、恢复和独立 Parquet 投影，Hyperliquid 公共永续行情已接入。[本地行情 WAL、投影与封段接口](docs/market-wal.md)
 
 ## 系统中的位置

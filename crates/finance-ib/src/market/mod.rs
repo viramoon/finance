@@ -7,7 +7,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use finance_market_protocol::DecimalText;
 use serde::Serialize;
 
-pub use ib::PaperMarket;
+pub use ib::{PaperDepthSubscription, PaperMarket};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
