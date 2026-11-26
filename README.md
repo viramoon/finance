@@ -2,7 +2,7 @@
 
 fertile 的主项目与 submodule，基于 NautilusTrader 的交易与数据系统。负责策略、做市商数据 adapter、配置、trader / collector / projector / backtest / api 入口、运维和研究；以源码 submodule 引入上游，不自研交易核心。
 
-本仓库按 [issue #1 方案 v2](https://github.com/viramoon/finance/issues/1#issuecomment-6834604073) 初始化。当前已实现 [Nautilus 源码构建](docs/build.md)、上游离线回测批任务及 [行情与回测 HTTP API](docs/api.md)，交易策略与交易服务仍未实现；TBD 项都需后续 issue 明确后再实施。开发从 [AGENTS.md](AGENTS.md) 开始。
+本仓库按 [issue #1 方案 v2](https://github.com/viramoon/finance/issues/1#issuecomment-6834604073) 初始化。当前提供 [Nautilus 源码构建](docs/build.md)、上游离线回测批任务、[配置策略回测](docs/backtest-jobs.md#配置策略作业) 及 [行情与回测 HTTP API](docs/api.md)。TBD 项由后续 issue 明确。开发从 [AGENTS.md](AGENTS.md) 开始。
 
 本地行情链路支持 F1 事件追加、恢复和独立 Parquet 投影，Hyperliquid 公共永续行情已接入。[本地行情 WAL、投影与封段接口](docs/market-wal.md)
 
@@ -87,3 +87,5 @@ curl http://127.0.0.1:8081/api/v1/backtests/sample
 ```
 
 端口默认 8081，配置优先级、错误状态、精确金额与 OpenAPI 导出见 [API 文档](docs/api.md)。示例接口读取 latest.json。提交的作业由 worker 独立执行，collector 的行情状态可在 /api/v1/market/status 查询。
+
+`StrategyBundle` 作业用同一编译器接受内联 YAML/JSON 或已登记版本，支持入场/出场与目标权重两类配方。作业锁定本地回放快照，可从结果查看各配方的资金、仓位、净额和成本归因。离线复验方法见 [运行手册](RUNBOOK.md#隔离验收配置策略作业)。
