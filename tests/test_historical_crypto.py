@@ -9,6 +9,7 @@ import csv
 from datetime import date
 from decimal import Decimal
 import fcntl
+from functools import partial
 import hashlib
 import io
 import json
@@ -26,17 +27,17 @@ from fertile_finance.epoch import EPOCH
 from fertile_finance.historical_crypto import (
     BinanceDisabled,
     CRYPTO_INTERVAL_MS,
-    CRYPTO_SYMBOLS,
     CryptoBars,
     CryptoHTTPError,
     TradeImportReport,
     import_binance_trades,
 )
-from fertile_finance.historical_pull import CryptoHistory, pull_bars
+from fertile_finance.historical_pull import CryptoHistory, main, pull_bars
 
 
 MINUTE = CRYPTO_INTERVAL_MS["1m"]
 DAY = CRYPTO_INTERVAL_MS["1d"]
+EXPECTED_COINS = ("BTC", "ETH", "SOL")
 OLD_DAY = date(2024, 12, 31)
 NEW_DAY = date(2025, 1, 1)
 NEXT_DAY = date(2025, 1, 2)
@@ -110,7 +111,7 @@ def archive_fixture(symbol, day, *, fault=None):
 
 class CryptoBarsTest(unittest.TestCase):
     def test_hyperliquid_all_perpetuals_exact_sorted_closed_only(self):
-        for symbol in CRYPTO_SYMBOLS:
+        for symbol in EXPECTED_COINS:
             with self.subTest(symbol=symbol):
                 first = candle_hl(symbol, START)
                 second = candle_hl(symbol, START + MINUTE, end_inclusive=False)
@@ -133,7 +134,7 @@ class CryptoBarsTest(unittest.TestCase):
                 })
 
     def test_binance_all_spot_daily_bars_exact_and_utc(self):
-        for symbol in CRYPTO_SYMBOLS:
+        for symbol in EXPECTED_COINS:
             with self.subTest(symbol=symbol):
                 http = HTTPReplay([json_reply([candle_binance(START, "1d")])])
                 source = CryptoBars("binance", binance_enabled=True, http=http)
@@ -232,6 +233,39 @@ class CryptoBarsTest(unittest.TestCase):
                     self.assertEqual([bar.volume.as_decimal() for bar in bars], [Decimal(OHLCV[-1])] * 2)
                     self.assertEqual(len(http.calls), 1)
 
+    def test_cli_defaults_pull_all_three_coins_for_each_crypto_source(self):
+        bar_fixtures = {
+            "hyperliquid": [json_reply([candle_hl(coin, START - DAY, "1d")]) for coin in EXPECTED_COINS],
+            "binance": [json_reply([candle_binance(START - DAY, "1d")]) for _ in EXPECTED_COINS],
+        }
+        for source in ("hyperliquid", "binance", "binance-trades"):
+            with self.subTest(source=source), tempfile.TemporaryDirectory(prefix="f11-crypto-cli-") as root:
+                replies = bar_fixtures.get(source)
+                if source == "binance-trades":
+                    replies = [reply for coin in EXPECTED_COINS for reply in archive_fixture(coin, OLD_DAY)]
+                http = HTTPReplay(replies)
+                args = [source, "--allow-download", "--data-root", root,
+                        "--start", str(OLD_DAY), "--end", str(OLD_DAY)]
+                if source != "binance-trades":
+                    args += ["--interval", "1d"]
+                if source != "hyperliquid":
+                    args += ["--enable-binance"]
+                with (
+                    patch("fertile_finance.historical_pull.CryptoBars", partial(CryptoBars, http=http)),
+                    patch("fertile_finance.historical_pull.import_binance_trades", partial(import_binance_trades, http=http)),
+                    patch("sys.stdout", new_callable=io.StringIO) as output,
+                ):
+                    self.assertEqual(main(args), 0)
+                    report = json.loads(output.getvalue())
+                expected_instruments = {
+                    "hyperliquid": {f"{coin}-USD-PERP.HYPERLIQUID" for coin in EXPECTED_COINS},
+                    "binance": {f"{coin}USDT.BINANCE" for coin in EXPECTED_COINS},
+                    "binance-trades": set(EXPECTED_COINS),
+                }
+                self.assertEqual(report["status"], "complete")
+                self.assertEqual(set(report["instruments"]), expected_instruments[source])
+                self.assertEqual(http.replies, [])
+
 
 class TradeArchiveTest(unittest.TestCase):
     def setUp(self):
@@ -246,7 +280,7 @@ class TradeArchiveTest(unittest.TestCase):
         return import_binance_trades(self.root, symbol, first, last, binance_enabled=True, http=http)
 
     def test_archive_exact_decimal_native_ids_and_ms_us_transition(self):
-        for symbol in CRYPTO_SYMBOLS:
+        for symbol in EXPECTED_COINS:
             with self.subTest(symbol=symbol):
                 http = HTTPReplay([*archive_fixture(symbol, OLD_DAY), *archive_fixture(symbol, NEW_DAY)])
                 with patch("fertile_finance.historical_crypto._TRADE_BATCH_ROWS", 1):
