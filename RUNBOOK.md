@@ -149,6 +149,17 @@ curl -sS http://127.0.0.1:8081/api/v1/market/status
 
 在获准采集并落盘的部署上，使用 [历史价量批任务](docs/historical-pull.md) 拉取九只美股日线和 IBKR paper 只读分钟线、BTC/ETH/SOL 公共 K 线及 Binance Spot 逐笔归档。命令需显式授权，Binance 默认关闭。使用独立于工作树的配置数据根，记录 JSON 的水位和缺口，失败后用同一参数续拉。与 Gateway 的其他历史请求错开。来源口径、命令、退出状态和耗时估算见批任务文档。
 
+### 隔离验收配置策略作业
+
+使用源码构建的 Python 环境从仓库根运行以下测试。测试在临时数据根生成合成日线，通过 Axum 路由提交并在独立 worker 中执行，再查询结果。无需启动常驻服务或绑定端口。
+
+```sh
+FINANCE_STRATEGY_TEST_PYTHON=/path/to/source-built/venv/bin/python \
+  cargo test --locked -p finance-api --test config_strategy_worker -- --ignored
+```
+
+在受控环境提交配置作业时，先将已审核的回放 JSON 发布到现有数据根下的 `finance-state/backtests/strategy-inputs/`，再按 [HTTP 接口](docs/api.md#配置策略提交与结果) 提交。API 与 worker 共享同一个 `jobs.sqlite3`。排查失败时先读 `status` 与 `error`。区间、预热、点时成分或收盘 bar 缺口的检查方法见 [配置策略作业](docs/backtest-jobs.md#配置策略作业)。客户端超时后用同一幂等键确认或重试。已入队作业使用该作业关联的快照，覆盖源文件只影响随后提交的新作业。
+
 ### 隔离验收官方历史作业
 
 从 finance 仓库根运行。先按 [IBM 2024 原始日线](docs/historical-backtest.md#ibm-2024-原始日线) 转换、复核并导入日线快照，再指定与部署分开的数据根、只读研究根和可用的本机端口。
