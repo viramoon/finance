@@ -28,4 +28,4 @@ v2 §D4 于 **2026-11-26** 记录 OPRA 历史按数据量计价，以及 OPRA St
 
 ## 合成复测
 
-从仓库根运行 `cargo test -p finance-collector --test option_history --locked --offline`。IBKR 合成数据由仓库生成器按固定时间和十进制输入生成，覆盖乱序、重复、窗边界与长小数。估算测试使用明示的合成费率和日期，覆盖合约数、天数、schema、来源和错误输入。[生成与登记](data-guard.md#合成-fixture-与例外登记)
+从仓库根运行 `cargo test -p finance-collector --test option_history --locked --offline`。IBKR 合成数据由仓库生成器按固定时间和十进制输入生成，覆盖乱序、重复、窗边界与长小数。到期测试核对已过到期时刻及恰在到期时刻的两份合约都按输入顺序返回 `Expired`，且请求数为零。估算测试使用明示的合成费率和日期，覆盖合约数、天数、schema、来源和错误输入。[生成与登记](data-guard.md#合成-fixture-与例外登记)

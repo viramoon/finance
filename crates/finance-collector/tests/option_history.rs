@@ -90,7 +90,9 @@ async fn expiry_including_the_exact_cutoff_skips_the_paper_request() {
     let results = fetch_ibkr_chain(&source, &contracts, window, || now)
         .await
         .unwrap();
-    for result in results {
+    assert_eq!(results.len(), contracts.len());
+    for (result, contract) in results.into_iter().zip(&contracts) {
+        assert_eq!(result.instrument_id, contract.instrument_id);
         assert_eq!(result.bars.unwrap(), OptionBars::Expired);
     }
     assert!(source.requests.lock().unwrap().is_empty());
