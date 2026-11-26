@@ -182,6 +182,7 @@ fn valid_period(text: &str) -> bool {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+#[schema(as = ChartCoverage)]
 pub struct Coverage {
     /// All closed observations from the publisher's declared calculation origin.
     history_complete: bool,

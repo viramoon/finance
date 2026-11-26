@@ -74,7 +74,7 @@ POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /a
 
 响应携带 `series`、`provenance`、`as_of`、`coverage`、`next_start`、`indicators` 和 `rows`。`provenance` 保留 `license`、`delay_tier`、`calendar_id`、`market_timezone` 和发布方的展示授权标记。每行的 `first_available_ts` 属于这一版源 bar。最新快照的指标可能包含后到的前置 bar 或更正。图表可用源 bar 的时钟显示延迟，由 web 对浏览器执行身份和产品权限检查。三个端点均设置 `Cache-Control: private, no-store`。
 
-`coverage` 包含 `history_complete`、`first_closed_open_ts`、`last_closed_end_ts`、`closed_bars`、`returned_closed_bars` 和 `returned_provisional`。快照首尾为已观测闭合 bar 的边界，两者之间可能有缺口。bars 端点的 `rows[].bar` 含 OHLCV 和时钟，values 端点把 `open_ts`、`end_ts`、`first_available_ts`、`trading_day` 放在每行顶层。
+`coverage` 包含 `history_complete`、`first_closed_open_ts`、`last_closed_end_ts`、`closed_bars`、`returned_closed_bars` 和 `returned_provisional`。快照首尾为已观测闭合 bar 的边界，两者之间可能有缺口。bars 端点的 `rows[].bar` 含 OHLCV 和时钟，values 端点把 `open_ts`、`end_ts`、`first_available_ts`、`trading_day` 放在每行顶层。 OpenAPI 用 `ChartCoverage` 描述两个时间序列端点的覆盖率对象，历史回测窗口的 `coverage` 使用 `Coverage` 字符串枚举（`full`、`insufficient`）。
 
 | HTTP 状态 | `error.code` | 含义 |
 | --- | --- | --- |

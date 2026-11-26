@@ -545,3 +545,53 @@ async fn registry_and_exported_openapi_describe_chart_routes() {
         assert!(operation["responses"]["422"].is_object());
     }
 }
+
+#[test]
+fn chart_and_research_openapi_use_distinct_coverage_schemas() {
+    let api = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let schemas = &api["components"]["schemas"];
+
+    for (path, response) in [(CHART, "ChartBars"), (VALUES, "ChartValues")] {
+        assert_eq!(
+            api["paths"][path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+                ["$ref"],
+            format!("#/components/schemas/{response}")
+        );
+        assert!(
+            schemas[response]["allOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|part| part["$ref"] == "#/components/schemas/ChartContext")
+        );
+    }
+
+    assert_eq!(
+        schemas["ChartContext"]["properties"]["coverage"]["$ref"],
+        "#/components/schemas/ChartCoverage"
+    );
+    let coverage = &schemas["ChartCoverage"];
+    assert_eq!(coverage["type"], "object");
+    let properties = &coverage["properties"];
+    for property in ["history_complete", "returned_provisional"] {
+        assert_eq!(properties[property]["type"], "boolean");
+    }
+    for property in ["closed_bars", "returned_closed_bars"] {
+        assert_eq!(properties[property]["type"], "integer");
+    }
+    for property in ["first_closed_open_ts", "last_closed_end_ts"] {
+        assert_eq!(properties[property]["type"], json!(["string", "null"]));
+        assert_eq!(properties[property]["format"], "date-time");
+    }
+
+    assert_eq!(
+        schemas["ResearchReport"]["properties"]["windows"]["items"]["$ref"],
+        "#/components/schemas/Window"
+    );
+    assert_eq!(
+        schemas["Window"]["properties"]["coverage"]["$ref"],
+        "#/components/schemas/Coverage"
+    );
+    assert_eq!(schemas["Coverage"]["type"], "string");
+    assert_eq!(schemas["Coverage"]["enum"], json!(["full", "insufficient"]));
+}
