@@ -50,6 +50,12 @@ FERTILE_DATA_ROOT="$(mktemp -d)" PYTHONPATH=python \
 
 现有 `fertile_finance.backtest_research.coverage_windows(equity, end)` 入口继续返回三个固定窗口，使用同一套计算。SmaCrossover 成功摘要和新的研究调用使用四行入口。
 
+### 月度研究窗口
+
+`fertile_finance.research_windows.monthly_coverage_windows(observed, end)` 复用四个窗口名，输入唯一的月历月末日期标签和月末截止日。固定窗口从请求的净值基线之后计入 600、120 或 60 条月收益，`longest_sample` 从首个有效收益月计到截止日。`monthly_coverage(observed, name=..., start=..., end=...)` 用同样规则检查显式的起止收益月。
+
+每行分别披露首个请求和实际收益月、各自的前一月末净值基线、实际末月以及应有、实际和缺失的月份数。任何缺月均使窗口标记为 `insufficient`，研究报告的 `metrics` 为 `null`。月度标签可用于 1970 年前的离线研究补充。Nautilus 及日线 catalog 仍使用 [Unix epoch 边界](#unix-epoch-边界)。
+
 ## 历史数据接口
 
 加载器以本地文件为输入，返回精确的 `Decimal` 数值和 `date` 日期。加载器使用同一个 [`filter_pre_epoch`](#unix-epoch-边界) 检查观察或事件日期。`pre_epoch` 默认为 `"reject"`。选用 `"drop"` 时，`dropped_pre_epoch` 的 `count`、`first` 和 `last` 分别记录丢弃条数、最早和最晚日期。Yahoo 的条数同时包含行情记录和公司行为。获取经许可的源文件见 [运行手册](../RUNBOOK.md#手工保存公开历史数据)。
@@ -193,3 +199,7 @@ print(result.sample_start, result.sample_end, result.observations, result.correl
 每笔逻辑成交累加 `quantity`、`notional`（各分笔价格乘数量的和）和 `commission`。展示价格 `average_price` 为成交量加权平均价，使用 Decimal 的 28 位有效数字和四舍六入五成双，保留小于最小价格跳动的部分。组合和基准窗口、分笔明细、归并金额及因子数值转换使用独立的 Decimal 上下文，调用方的精度、舍入方式、异常开关和状态标志保持原值。查看稳定的十进制分笔请使用 `parts`。直接格式化 `raw_fills` 原生对象时沿用 Nautilus 的规则。统计换手金额时使用 `notional`。在成交价与佣金同币种的现金股票模拟中，可用 `cash_delta` 和 `position_delta` 对账。
 
 [原生回归 fixture](../tests/test_fill_audit.py) 用相同的两根日线和一笔 10 股市价买单对比两档成交量。Nautilus 1.231.0 的 L1 日线模拟按标的最小数量生成零量 bar 的合成档位，并按偏移一跳的价格撮合耗尽第一档后的市价单余量。fixture 中零量产生同一时刻的 1 股 @ 100.50 和 9 股 @ 100.51，归并后为 10 股、成交金额 1005.09 USD。成交量 100 时产生一笔 10 股 @ 100.50，成交金额 1005.00 USD。两组各计一笔逻辑成交，并核对引擎的现金和持仓。官方历史作业继续使用 [零量意图不提交及一单一笔足额成交](../docs/historical-backtest.md#信号执行和绩效) 的合同。
+
+## 月频因子研究案例
+
+[时序因子动量](../strategies/2026-11-25-factor-momentum/README.md) 演示签名因子名义、月 RF 抵押和独立账本对账。该研究读取本地公开归档并复用月频覆盖规则，运行入口和数据校验见研究目录。

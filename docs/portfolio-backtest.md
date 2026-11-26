@@ -91,3 +91,7 @@ print(result.total_orders, result.positions)
 print([(row["window"], row["coverage"]) for row in result.windows])
 print(result.risk_free, result.longest_sample["metrics"])
 ```
+
+## 因子收益研究的边界
+
+此入口使用权益标的、整股和长仓现金账户。零成本因子的空头名义、按收益结算和抵押现金无法用这一输入合同表示。[时序因子动量研究](../strategies/2026-11-25-factor-momentum/README.md) 使用独立的月频结算账本，复用研究窗口的命名与日历回推。结果明确区分原始观测数、月收益观测数以及未运行的 catalog 和引擎。

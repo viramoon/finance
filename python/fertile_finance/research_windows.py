@@ -1,8 +1,9 @@
-"""Calendar coverage and performance metrics for daily research equity curves."""
+"""Calendar coverage for daily equity curves and monthly return observations."""
 
-from collections.abc import Mapping
+from calendar import monthrange
+from collections.abc import Collection, Mapping
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from itertools import pairwise
 from statistics import mean, stdev
 
@@ -11,6 +12,7 @@ from exchange_calendars.errors import NoSessionsError
 
 from .epoch import EPOCH
 from .research_catalog import LATEST, nyse
+from .research_decimal import RESEARCH_CONTEXT
 
 
 WINDOW_YEARS = (50, 10, 5)
@@ -42,6 +44,76 @@ def years_before(day, years):
         return day.replace(year=day.year - years)
     except ValueError:
         return day.replace(year=day.year - years, day=28)
+
+
+def month_end(day: date, offset: int = 0) -> date:
+    """Return the calendar month-end offset from the month containing day."""
+    year, month_index = divmod(day.year * 12 + day.month - 1 + offset, 12)
+    month = month_index + 1
+    return date(year, month, monthrange(year, month)[1])
+
+
+def monthly_coverage(
+    observed: Collection[date], *, name: str, start: date | None, end: date,
+) -> dict:
+    """Check every monthly return label from start through end (both inclusive)."""
+    if any(type(day) is not date or day != month_end(day) for day in (*observed, end)):
+        raise ValueError("Monthly observations and the cutoff must use calendar month-end dates")
+    if len(set(observed)) != len(observed):
+        raise ValueError("Monthly observation dates must be unique")
+    if start is not None and (type(start) is not date or start != month_end(start)):
+        raise ValueError("Monthly start must be a calendar month-end")
+
+    actual = sorted(day for day in observed if day <= end and (start is None or day >= start))
+    first = actual[0] if actual else None
+    last = actual[-1] if actual else None
+    first_expected = start or first
+    expected = (max(0, (end.year - first_expected.year) * 12 + end.month - first_expected.month + 1)
+                if first_expected is not None else 0)
+    missing = expected - len(actual)
+    full = bool(actual) and not missing
+    with localcontext(RESEARCH_CONTEXT):
+        missing_pct = percent(Decimal(missing) / expected) if expected else None
+    row = {
+        "window": name,
+        "label": name if full else f"{name} (insufficient)",
+        "requested_start": first_expected.isoformat() if first_expected is not None else None,
+        "requested_end": end.isoformat(),
+        "requested_baseline_date": (month_end(first_expected, -1).isoformat()
+                                    if first_expected is not None else None),
+        "actual_start": first.isoformat() if first is not None else None,
+        "actual_end": last.isoformat() if last is not None else None,
+        "nav_baseline_date": month_end(first, -1).isoformat() if first is not None else None,
+        "observations": len(actual),
+        "expected_months": expected,
+        "missing_months": missing,
+        "missing_pct": missing_pct,
+        "coverage": "full" if full else "insufficient",
+    }
+    if start is not None and start > end:
+        row["coverage_reason"] = "cutoff_before_requested_start"
+    elif not actual:
+        row["coverage_reason"] = "no_monthly_observations"
+    elif missing:
+        row["coverage_reason"] = "missing_monthly_observations"
+    return row
+
+
+def monthly_coverage_windows(observed: Collection[date], end: date) -> list[dict]:
+    """Use the standard four window names with strictly complete monthly coverage.
+
+    Fixed windows include monthly returns after the N-year NAV baseline through
+    end; longest_sample begins with the first observed return and ends at end.
+    Pre-epoch labels are valid for offline monthly analysis only.
+    """
+    rows = []
+    for years in WINDOW_YEARS:
+        start = month_end(years_before(end, years), 1)
+        row = monthly_coverage(observed, name=f"{years}y", start=start, end=end)
+        rows.append({**row, "requested_years": years})
+    longest = monthly_coverage(observed, name="longest_sample", start=None, end=end)
+    rows.append({**longest, "requested_years": None})
+    return rows
 
 
 def _series_values(series, dates, name):
