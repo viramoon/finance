@@ -338,6 +338,7 @@ dependencies = [
  "finance-market-protocol",
  "ibapi",
  "rust_decimal",
+ "rustix",
  "serde",
  "serde_json",
  "serde_yaml",

@@ -68,6 +68,27 @@ fn cli_json(root: &Path, action: &str) -> Value {
     serde_json::from_slice(&checked_output(cli(root, action).output().unwrap())).unwrap()
 }
 
+fn assert_watermarks(root: &Path, event: &Value, durable: &str, projected: &str) -> Value {
+    let marks = cli_json(root, "watermarks");
+    assert_eq!(
+        marks,
+        json!({
+            "source_latest": {
+                "channel": event["channel"],
+                "instrument_id": event["instrument_id"],
+                "epoch": event["epoch"],
+                "seq": event["seq"],
+                "exchange_ts": event["exchange_ts"],
+                "receive_ts": event["receive_ts"],
+            },
+            "local_durable": durable,
+            "projected": projected,
+            "remote_verified": null,
+        }),
+    );
+    marks
+}
+
 fn read(root: &Path, after: &str, limit: &str) -> Vec<Value> {
     let output = cli(root, "read")
         .args(["--after", after, "--limit", limit])
@@ -132,14 +153,7 @@ fn cli_replays_only_confirmed_events_and_checksums_the_sealed_prefix() {
     assert_eq!(segment["bytes"], bytes.len().to_string());
     assert_eq!(segment["sha256"], format!("{:x}", Sha256::digest(&bytes)));
 
-    let marks = cli_json(root.path(), "watermarks");
-    assert_eq!(
-        marks["source_latest"]["receive_ts"],
-        events[3]["receive_ts"]
-    );
-    assert_eq!(marks["local_durable"], "4");
-    assert_eq!(marks["projected"], "0");
-    assert!(marks["remote_verified"].is_null());
+    let marks = assert_watermarks(root.path(), &events[3], "4", "0");
 
     let isolated = tempfile::tempdir().unwrap();
     let copied_file = isolated
@@ -175,6 +189,29 @@ fn cli_replays_only_confirmed_events_and_checksums_the_sealed_prefix() {
 }
 
 #[test]
+fn cli_reports_all_four_watermarks_with_nonzero_projection() {
+    let root = tempfile::tempdir().unwrap();
+    let mut ingress = MarketIngress::open(root.path(), policy(true)).unwrap();
+    let events = stage_deliveries(&mut ingress);
+    assert_eq!(ingress.flush().unwrap(), Some(4));
+    let projection = root
+        .path()
+        .join("finance-state/market-projection")
+        .join(SOURCE)
+        .join(PRODUCT);
+    fs::create_dir_all(&projection).unwrap();
+    let marker = projection.join("watermark.json");
+    fs::write(&marker, r#"{"projected_through":"3"}"#).unwrap();
+    assert_watermarks(root.path(), &events[3], "4", "3");
+
+    fs::write(&marker, r#"{"projected_through":"5"}"#).unwrap();
+    let output = cli(root.path(), "watermarks").output().unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("projection watermark is ahead"));
+}
+
+#[test]
 fn cli_refuses_remote_manifest_for_locally_recordable_product() {
     let root = tempfile::tempdir().unwrap();
     let mut ingress = MarketIngress::open(root.path(), policy(false)).unwrap();
@@ -192,7 +229,7 @@ fn cli_refuses_remote_manifest_for_locally_recordable_product() {
 fn committed_wal_projects_through_python_cli() {
     let root = tempfile::tempdir().unwrap();
     let mut ingress = MarketIngress::open(root.path(), policy(true)).unwrap();
-    stage_deliveries(&mut ingress);
+    let events = stage_deliveries(&mut ingress);
     ingress.flush().unwrap();
 
     let examples: Value = serde_json::from_str(EXAMPLES).unwrap();
@@ -224,17 +261,15 @@ fn committed_wal_projects_through_python_cli() {
                 .unwrap(),
         );
     };
+    assert_watermarks(root.path(), &events[3], "4", "0");
     projector();
-    assert_eq!(cli_json(root.path(), "watermarks")["projected"], "4");
+    assert_watermarks(root.path(), &events[3], "4", "4");
     projector();
-    assert_eq!(cli_json(root.path(), "watermarks")["projected"], "4");
+    assert_watermarks(root.path(), &events[3], "4", "4");
 
     ingress.seal().unwrap();
     projector();
-    let marks = cli_json(root.path(), "watermarks");
-    assert_eq!(marks["local_durable"], "5");
-    assert_eq!(marks["projected"], "5");
-    assert!(marks["remote_verified"].is_null());
+    assert_watermarks(root.path(), &examples["events"][3], "5", "5");
 
     let verify = r#"
 import json

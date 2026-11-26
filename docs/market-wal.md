@@ -8,7 +8,7 @@
 - `publish(event, instrument, capability)` 校验 F1 结构、标的、产品和精度，并核对许可标签。生产者负责 F1 协议序号的分配、上游连续性判断和缺口报告。重投沿用同一流分区、epoch、seq、cursor 和内容，接收时钟可以更新。本地 WAL 记录每次合规投递，接收顺序与 F1 流位置独立。
 - `record_local=true` 时，`publish` 返回 `Staged(position)`。调用方按时间或批大小调用 `flush()`，用其返回的持久位置确认投递。文件达到滚动上限时写入端也会提交并封闭前一段，确认仍以成功的 `flush` 或 `seal` 返回值为准。`seal()` 提交当前批、封闭非空活动段并返回本地清单。`seal_for_backup()` 额外检查云备份授权。退出前调用方负责主动提交或封段。
 - 仅展示的产品只在进程内提供 `display_events()`，窗口最多 5 秒、256 条并受 16 MiB 的编码大小约束。调用方可在空闲时调用 `expire_display()` 释放内存。此路径不创建任何行情文件或持久状态。缺少展示与落盘权限时返回 `Denied`。投影只把已获准落盘的事件转换为归档与查询索引，F6 等非展示计算由调用方另行检查 `derive_non_display`。
-- `report_quality(QualityReport)` 记录流的 `channel`、`instrument_id`、含端点的 UTC 纳秒区间、原因、恢复类别与计数，重复报告同一区间和相同内容时幂等。原因包括 `license_skip`、`rotation`、`source_rate_limit`、`disconnected`、`source_gap` 和 `storage_unavailable`。恢复类别为 `tick_backfilled`（已逐笔补齐）、`bar_backfilled`（仅 bar 补齐）、`book_restored_from_snapshot`（从新快照恢复当前簿）、`history_unrecoverable`（历史缺口不可补）。`outcome: null` 表示待恢复，`count: null` 表示数量未知。计数为恢复的条目数，或不可恢复区间内已知缺失的条目数。有落盘权限的产品把这类质量记录保存在本机，其余产品短期保存在内存，可用 `MarketIngress::quality()` 查询。
+- `report_quality(QualityReport)` 记录流的 `channel`、`instrument_id`、含端点的 UTC 纳秒区间、原因、恢复类别与计数，重复报告同一区间和相同内容时幂等。原因包括 `license_skip`、`rotation`、`source_rate_limit`、`disconnected`、`source_gap` 和 `storage_unavailable`。恢复类别为 `tick_backfilled`（已逐笔补齐）、`bar_backfilled`（仅 bar 补齐）、`book_restored_from_snapshot`（从新快照恢复当前簿）、`history_unrecoverable`（历史缺口不可补）。`outcome: null` 表示待恢复，`count: null` 表示数量未知。计数为恢复的条目数，或不可恢复区间内已知缺失的条目数。有落盘权限的产品将报告保存在本机。其余产品仅在内存中保存最多 256 条，`MarketIngress::quality()` 只返回收到后 5 秒内的记录，期间的重复报告沿用首次到期时间。写入时清理过期质量记录，空闲适配器可调用 `expire_display()` 释放这些记录的内存。
 
 ## WAL 格式与恢复边界
 
@@ -56,7 +56,7 @@ WAL 根为 `<data-root>/finance-state/market-wal`。产品目录为 `<source>/<p
 
 封段发布后文件保持不变。T2b 按同一源/产品的父清单和截点枚举新增段，并用长度、摘要及覆盖范围完成核验。仅复制当前清单列出的文件，活动文件、内部 checkpoint、锁和可重建投影不进入此 WAL 备份接口。质量记录是独立的本地状态。跨库清单、客户端加密、云端发布与远端已验证水位由 T2b 负责。封段 id 可以在独立的恢复分支复用，比较时同时核对摘要和恢复点父链。
 
-恢复时把可信备份清单列出的全部封段放在隔离数据根的对应位置，再执行 `restore --manifest PATH`。恢复验证版本、产品、段范围、长度、SHA-256、逐帧数据和许可标签，然后发布策略绑定和截止于 `sealed_through` 的 checkpoint。相同封段清单可重试。目标产品已有其他活动或已提交内容时命令报错。随后运行投影重建 catalog 并核对水位。原数据根保留给恢复核验。
+先创建隔离数据根，将可信备份清单列出的封段复制成对应位置的独立普通文件，再执行 `restore --manifest PATH`。恢复以这个目录为边界逐级打开 WAL 目录，拒绝符号链接目录和文件，以及带多个硬链接的段文件或既有恢复元数据。恢复验证版本、产品、段范围、长度、SHA-256、逐帧数据和许可标签，然后发布策略绑定和截止于 `sealed_through` 的 checkpoint。相同封段清单可重试。目标产品已有其他活动或已提交内容时命令报错。随后运行投影重建 catalog 并核对水位。原数据根保留给恢复核验。
 
 ## Parquet 与投影游标
 

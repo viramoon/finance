@@ -13,6 +13,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
+mod restore;
+use restore::RestoreDirectory;
+
+pub(crate) const WAL_SUBDIRECTORIES: [&str; 2] = ["finance-state", "market-wal"];
 const VERSION: u32 = 1;
 const CHECKPOINT: &str = "checkpoint.json";
 const MAGIC: &[u8; 8] = b"FINWAL1\n";
@@ -123,6 +127,10 @@ impl Checkpoint {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error).context("opening WAL checkpoint"),
         };
+        Self::decode(file, source, product).map(Some)
+    }
+
+    fn decode(file: File, source: &Token, product: &Token) -> Result<Self> {
         let state: Self =
             serde_json::from_reader(BufReader::new(file)).context("decoding WAL checkpoint")?;
         state.manifest.validate(source, product)?;
@@ -135,7 +143,7 @@ impl Checkpoint {
                     || (sealed < durable && valid_segment_size(active))),
             "invalid WAL checkpoint range"
         );
-        Ok(Some(state))
+        Ok(state)
     }
 
     fn publish(&self, dir: &Path) -> Result<()> {
@@ -164,31 +172,44 @@ impl Checkpoint {
             .chain(self.active())
     }
 
-    fn verify_files(&self, dir: &Path, expected_license: Option<&Token>) -> Result<u64> {
+    fn verify_files(&self, dir: &Path) -> Result<u64> {
         let mut generation = 0;
         for range in self.ranges() {
-            let path = dir.join(segment_filename(range.first));
-            if let Some(expected) = range.sha256 {
+            let file = File::open(dir.join(segment_filename(range.first)))
+                .context("opening committed WAL segment")?;
+            generation = self.verify_segment(&file, range, generation, None)?;
+        }
+        Ok(generation)
+    }
+
+    fn verify_segment(
+        &self,
+        mut file: &File,
+        range: SegmentRange<'_>,
+        mut generation: u64,
+        expected_license: Option<&Token>,
+    ) -> Result<u64> {
+        if let Some(expected) = range.sha256 {
+            ensure!(
+                file_digest(file, range.bytes)? == expected,
+                "sealed WAL digest mismatch"
+            );
+            file.rewind()?;
+        }
+        let mut reader = SegmentReader::new(file, range)?;
+        while let Some((record, _)) = reader.next_record()? {
+            ensure!(
+                record.generation.get() >= generation,
+                "WAL writer generation regressed"
+            );
+            self.check_product(&record.event)?;
+            if let Some(license) = expected_license {
                 ensure!(
-                    file_digest(&path, range.bytes)? == expected,
-                    "sealed WAL digest mismatch"
+                    &record.event.license == license,
+                    "WAL event license differs from restore policy"
                 );
             }
-            let mut reader = SegmentReader::open(&path, range)?;
-            while let Some((record, _)) = reader.next_record()? {
-                ensure!(
-                    record.generation.get() >= generation,
-                    "WAL writer generation regressed"
-                );
-                self.check_product(&record.event)?;
-                if let Some(license) = expected_license {
-                    ensure!(
-                        &record.event.license == license,
-                        "WAL event license differs from restore policy"
-                    );
-                }
-                generation = record.generation.get();
-            }
+            generation = record.generation.get();
         }
         Ok(generation)
     }
@@ -241,14 +262,13 @@ fn ensure_dir(path: &Path) -> io::Result<()> {
     }
 }
 
-fn file_digest(path: &Path, bytes: u64) -> Result<String> {
-    let mut file = File::open(path)?;
+fn file_digest(file: &File, bytes: u64) -> Result<String> {
     ensure!(
         file.metadata()?.len() == bytes,
         "sealed WAL file length mismatch"
     );
     let mut digest = Sha256::new();
-    let read = io::copy(&mut file, &mut digest)?;
+    let read = io::copy(&mut file.take(bytes + 1), &mut digest)?;
     ensure!(
         read == bytes,
         "sealed WAL file length changed during verification"
@@ -316,7 +336,7 @@ impl WalWriter {
                 Checkpoint::empty(source, product)
             }
         };
-        let observed_generation = state.verify_files(&dir, None)?;
+        let observed_generation = state.verify_files(&dir)?;
         ensure!(
             state.generation.get() >= observed_generation,
             "WAL checkpoint predates a committed writer generation"
@@ -456,7 +476,8 @@ impl WalWriter {
             let first = range.first;
             let last = range.last;
             let bytes = range.bytes;
-            let digest = file_digest(&self.dir.join(segment_filename(first)), bytes)?;
+            let file = File::open(self.dir.join(segment_filename(first)))?;
+            let digest = file_digest(&file, bytes)?;
             let mut next = self.state.clone();
             next.manifest.segments.push(WalSegment {
                 id: segment_id(first),
@@ -479,26 +500,35 @@ impl WalWriter {
 
     /// Bootstraps an isolated root from copied, verified sealed files.
     pub(crate) fn restore_sealed(
-        root: &Path,
+        data_root: &Path,
         manifest: &WalManifest,
         expected_license: &Token,
-        before_checkpoint: impl FnOnce(&Path) -> Result<()>,
+        before_checkpoint: impl FnOnce(&RestoreDirectory) -> Result<()>,
     ) -> Result<()> {
-        let dir = root
-            .join(manifest.source.as_str())
-            .join(manifest.product.as_str());
         manifest.validate(&manifest.source, &manifest.product)?;
-        let _lock = lock_product(&dir)?;
-        let prior = Checkpoint::load(&dir, &manifest.source, &manifest.product)?;
+        let [state, wal] = WAL_SUBDIRECTORIES;
+        let dir = RestoreDirectory::open(
+            data_root,
+            &[
+                state,
+                wal,
+                manifest.source.as_str(),
+                manifest.product.as_str(),
+            ],
+        )?;
+        let _lock = dir.lock()?;
+        let prior = dir
+            .open_optional(CHECKPOINT)?
+            .map(|file| Checkpoint::decode(file, &manifest.source, &manifest.product))
+            .transpose()?;
         if let Some(prior) = &prior {
             ensure!(
                 prior.active_bytes.get() == 0 && &prior.manifest == manifest,
                 "WAL restore would overwrite an existing checkpoint"
             );
         }
-        let files = segment_files(&dir)?;
         ensure!(
-            files.len() == manifest.segments.len(),
+            dir.segment_count()? == manifest.segments.len(),
             "WAL restore directory contains an unexpected segment set"
         );
         let mut restored = Checkpoint {
@@ -508,11 +538,15 @@ impl WalWriter {
             manifest: manifest.clone(),
         };
         // A failed verification leaves no checkpoint and can be retried.
-        restored.generation = restored.verify_files(&dir, Some(expected_license))?.into();
-        for segment in &manifest.segments {
-            File::open(root.join(&segment.path))?.sync_all()?;
+        let mut generation = 0;
+        for range in restored.ranges() {
+            let file = dir.open_segment(&segment_filename(range.first))?;
+            generation =
+                restored.verify_segment(&file, range, generation, Some(expected_license))?;
+            file.sync_all()?;
         }
-        sync_dir(&dir)?;
+        restored.generation = generation.into();
+        dir.sync()?;
         if let Some(prior) = prior {
             ensure!(
                 prior.generation >= restored.generation,
@@ -521,7 +555,7 @@ impl WalWriter {
             return before_checkpoint(&dir);
         }
         before_checkpoint(&dir)?;
-        restored.publish(&dir)
+        dir.publish_json(CHECKPOINT, &restored)
     }
 }
 
@@ -544,16 +578,15 @@ impl<'a> From<&'a WalSegment> for SegmentRange<'a> {
     }
 }
 
-struct SegmentReader {
-    reader: BufReader<io::Take<File>>,
+struct SegmentReader<'a> {
+    reader: BufReader<io::Take<&'a File>>,
     remaining: u64,
     next: Option<u64>,
     last: u64,
 }
 
-impl SegmentReader {
-    fn open(path: &Path, range: SegmentRange<'_>) -> Result<Self> {
-        let file = File::open(path).context("opening committed WAL segment")?;
+impl<'a> SegmentReader<'a> {
+    fn new(file: &'a File, range: SegmentRange<'_>) -> Result<Self> {
         let size = file.metadata()?.len();
         ensure!(
             size >= range.bytes && (range.sha256.is_none() || size == range.bytes),
@@ -708,8 +741,9 @@ impl WalReader {
         let mut records = Vec::new();
         let mut bytes = 0;
         for range in self.state.ranges().filter(|range| range.last > after) {
-            let mut reader =
-                SegmentReader::open(&self.dir.join(segment_filename(range.first)), range)?;
+            let file = File::open(self.dir.join(segment_filename(range.first)))
+                .context("opening committed WAL segment")?;
+            let mut reader = SegmentReader::new(&file, range)?;
             while let Some((record, frame_bytes)) = reader.next_record()? {
                 self.state.check_product(&record.event)?;
                 ensure!(
@@ -732,8 +766,10 @@ impl WalReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::market_ingress::{BackupManifest, ProductPolicy, restore_backup, wal_root};
     use serde_json::Value;
     use std::{
+        os::unix::fs::symlink,
         process::{Command, Stdio},
         thread,
         time::{Duration, Instant},
@@ -884,8 +920,9 @@ mod tests {
         writer.flush().unwrap();
 
         let target = tempfile::tempdir().unwrap();
+        let target_wal = wal_root(target.path());
         for segment in &both.segments {
-            let destination = target.path().join(&segment.path);
+            let destination = target_wal.join(&segment.path);
             fs::create_dir_all(destination.parent().unwrap()).unwrap();
             fs::copy(source.path().join(&segment.path), destination).unwrap();
         }
@@ -903,15 +940,15 @@ mod tests {
         assert!(
             WalWriter::restore_sealed(target.path(), &both, &wrong_license, |_| Ok(())).is_err()
         );
-        assert_eq!(reader(target.path()).durable_position(), 0);
-        assert!(WalWriter::open(target.path(), SOURCE, PRODUCT).is_err());
+        assert_eq!(reader(&target_wal).durable_position(), 0);
+        assert!(WalWriter::open(&target_wal, SOURCE, PRODUCT).is_err());
         WalWriter::restore_sealed(target.path(), &both, &license, |directory| {
-            assert!(!directory.join(CHECKPOINT).exists());
+            assert!(directory.open_optional(CHECKPOINT)?.is_none());
             Ok(())
         })
         .unwrap();
         WalWriter::restore_sealed(target.path(), &both, &license, |_| Ok(())).unwrap();
-        let restored = reader(target.path());
+        let restored = reader(&target_wal);
         assert_eq!(restored.manifest(), both);
         let events: Vec<_> = restored
             .read_after(0, 10)
@@ -921,10 +958,133 @@ mod tests {
             .collect();
         assert_eq!(events, vec![event(0), event(1)]);
 
-        let mut new_writer = self::writer(target.path());
+        let mut new_writer = self::writer(&target_wal);
         assert_eq!(new_writer.generation(), 2);
         assert_eq!(new_writer.append(&event(2)).unwrap(), 3);
         assert_eq!(new_writer.flush().unwrap(), 3);
+    }
+
+    #[test]
+    fn restore_rejects_valid_segment_linked_from_outside_the_data_root() {
+        let outside = tempfile::tempdir().unwrap();
+        let mut writer = writer(outside.path());
+        let event = event(0);
+        writer.append(&event).unwrap();
+        let manifest = writer.seal().unwrap();
+        let relative = &manifest.segments[0].path;
+        let outside_segment = outside.path().join(relative);
+        let target = tempfile::tempdir().unwrap();
+        let inside = wal_root(target.path()).join(relative);
+        fs::create_dir_all(inside.parent().unwrap()).unwrap();
+
+        let assert_link_rejected = || {
+            let error = WalWriter::restore_sealed(target.path(), &manifest, &event.license, |_| {
+                panic!("the policy callback must not run for a linked object")
+            })
+            .unwrap_err();
+            assert_eq!(error.to_string(), "opening WAL restore segment");
+            assert!(!inside.parent().unwrap().join(CHECKPOINT).exists());
+            fs::remove_file(&inside).unwrap();
+        };
+        symlink(&outside_segment, &inside).unwrap();
+        assert_link_rejected();
+        fs::hard_link(&outside_segment, &inside).unwrap();
+        assert_link_rejected();
+
+        // The same exact bytes succeed when the object is actually copied in.
+        fs::copy(&outside_segment, &inside).unwrap();
+        WalWriter::restore_sealed(target.path(), &manifest, &event.license, |_| Ok(())).unwrap();
+        assert_eq!(
+            reader(&wal_root(target.path())).read_after(0, 1).unwrap()[0].event,
+            event
+        );
+    }
+
+    #[test]
+    fn restore_rejects_links_in_the_data_root_and_its_wal_directory_chain() {
+        let outside = tempfile::tempdir().unwrap();
+        let mut writer = writer(&wal_root(outside.path()));
+        let event = event(0);
+        writer.append(&event).unwrap();
+        let manifest = writer.seal().unwrap();
+        drop(writer);
+        let target = tempfile::tempdir().unwrap();
+        let linked_root = target.path().join("linked-root");
+        symlink(outside.path(), &linked_root).unwrap();
+        let error =
+            WalWriter::restore_sealed(&linked_root.join(""), &manifest, &event.license, |_| {
+                panic!("the linked data root must be rejected")
+            })
+            .unwrap_err();
+        assert_eq!(error.to_string(), "opening WAL restore data root");
+
+        let [state, wal] = WAL_SUBDIRECTORIES;
+        let restore_root = target.path().join("restore");
+        fs::create_dir(&restore_root).unwrap();
+        let mut destination = restore_root.clone();
+        let mut origin = outside.path().to_owned();
+        for component in [state, wal, SOURCE, PRODUCT] {
+            destination.push(component);
+            origin.push(component);
+            symlink(&origin, &destination).unwrap();
+            let error = WalWriter::restore_sealed(&restore_root, &manifest, &event.license, |_| {
+                panic!("the linked directory component must be rejected")
+            })
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("opening WAL restore directory {component}")
+            );
+            fs::remove_file(&destination).unwrap();
+            fs::create_dir(&destination).unwrap();
+        }
+        assert!(!destination.join(CHECKPOINT).exists());
+    }
+
+    #[test]
+    fn restore_does_not_follow_links_for_its_lock_checkpoint_or_access_policy() {
+        let outside = tempfile::tempdir().unwrap();
+        let mut writer = writer(&wal_root(outside.path()));
+        let event = event(0);
+        writer.append(&event).unwrap();
+        let manifest = BackupManifest {
+            wal: writer.seal().unwrap(),
+            access: ProductPolicy {
+                source: event.source,
+                product: event.product,
+                license: event.license,
+                display_live: false,
+                record_local: true,
+                derive_non_display: false,
+                backup_personal_drive: true,
+            },
+        };
+        let outside_product = writer.product_dir().to_owned();
+        drop(writer);
+        fs::write(
+            outside_product.join("access.json"),
+            serde_json::to_vec(&manifest.access).unwrap(),
+        )
+        .unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let relative = &manifest.wal.segments[0].path;
+        let inside = wal_root(target.path()).join(relative);
+        let destination = inside.parent().unwrap();
+        fs::create_dir_all(destination).unwrap();
+        fs::copy(wal_root(outside.path()).join(relative), &inside).unwrap();
+        for name in ["writer.lock", CHECKPOINT, "access.json"] {
+            let local = destination.join(name);
+            symlink(outside_product.join(name), &local).unwrap();
+            let error = restore_backup(target.path(), &manifest).unwrap_err();
+            assert!(
+                error.to_string().starts_with("opening WAL restore"),
+                "{error:#}"
+            );
+            fs::remove_file(local).unwrap();
+            assert!(!destination.join(CHECKPOINT).exists());
+        }
+        restore_backup(target.path(), &manifest).unwrap();
+        assert!(destination.join("access.json").is_file());
     }
 
     #[test]

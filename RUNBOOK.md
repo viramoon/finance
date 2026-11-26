@@ -74,6 +74,13 @@ PYTHONPATH=python "$FINANCE_PYTHON" -m fertile_finance.market_projector \
 
 经授权备份的产品可在写者运行时通过生产者封段，或在停写时使用 `finance-market-wal seal`。按 [封段清单 v1](docs/market-wal.md#t2b-封段清单-v1) 枚举并校验封段，再交给 fertile 的备份协调方。旧 collector 仍由上面的运行方式管理。
 
+Nautilus 源码 CI 使用构建后的 Python 环境运行 Rust WAL 到 Parquet 的端到端测试。本地可用同一命令核对四条水位、同秒逐笔保留、去重和修订索引。
+
+```sh
+FINANCE_F3_TEST_PYTHON="$FINANCE_PYTHON" \
+  cargo test --locked -p finance-collector --test market_wal_projector -- --include-ignored
+```
+
 ### 在盒子上验证 paper 行情恢复
 
 先用已登录的 Gateway 运行上方 probe。给 paper collector 配置独立的已挂载数据根目录，例如 /home/box/fertile/data-paper；finance-api 用同一数据根，回放继续使用自己的目录。使用实时市场数据订阅时将 FINANCE_COLLECTOR_CONFIG 指向 config/collector/ib-cloudbox.yaml；选择延迟数据时使用 config/collector/ib-delayed.yaml。确认 SPY 对应交易时段有行情，按 [IB 接入](docs/integrations/ib.md) 检查订阅权限与 pacing 日志。

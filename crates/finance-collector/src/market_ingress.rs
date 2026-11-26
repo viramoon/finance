@@ -11,14 +11,17 @@ use finance_market_protocol::{Capability, Event, Instrument, InstrumentId, Token
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tempfile::NamedTempFile;
 
-use crate::market_wal::{WalManifest, WalReader, WalWriter};
+use crate::market_wal::{WAL_SUBDIRECTORIES, WalManifest, WalReader, WalWriter};
 
 const DISPLAY_TTL: Duration = Duration::from_secs(5);
 const DISPLAY_EVENTS: usize = 256;
 const DISPLAY_BYTES: usize = 16 * 1024 * 1024;
+const LIVE_QUALITY_TTL: Duration = Duration::from_secs(5);
+const LIVE_QUALITY_REPORTS: usize = 256;
 
 pub fn wal_root(data_root: &Path) -> PathBuf {
-    data_root.join("finance-state/market-wal")
+    let [state, wal] = WAL_SUBDIRECTORIES;
+    data_root.join(state).join(wal)
 }
 
 fn product_dir(data_root: &Path, source: &Token, product: &Token) -> PathBuf {
@@ -135,6 +138,11 @@ struct DisplayEvent {
     event: Event,
 }
 
+struct LiveQualityReport {
+    expires: Instant,
+    report: QualityReport,
+}
+
 /// Ingress for a configured source/product. Use one instance per product.
 pub struct MarketIngress {
     data_root: PathBuf,
@@ -143,7 +151,7 @@ pub struct MarketIngress {
     source_latest: Option<SourceObservation>,
     display: VecDeque<DisplayEvent>,
     display_bytes: usize,
-    live_quality: VecDeque<QualityReport>,
+    live_quality: VecDeque<LiveQualityReport>,
 }
 
 impl MarketIngress {
@@ -258,11 +266,18 @@ impl MarketIngress {
                 reports.push(report);
                 atomic_json(&path, &reports)?;
             }
-        } else if !self.live_quality.contains(&report) {
-            if self.live_quality.len() == DISPLAY_EVENTS {
-                self.live_quality.pop_front();
+        } else {
+            let now = Instant::now();
+            self.expire_live_quality(now);
+            if !self.live_quality.iter().any(|item| item.report == report) {
+                if self.live_quality.len() == LIVE_QUALITY_REPORTS {
+                    self.live_quality.pop_front();
+                }
+                self.live_quality.push_back(LiveQualityReport {
+                    expires: now + LIVE_QUALITY_TTL,
+                    report,
+                });
             }
-            self.live_quality.push_back(report);
         }
         Ok(())
     }
@@ -271,7 +286,13 @@ impl MarketIngress {
         if self.writer.is_some() {
             read_quality(&self.data_root, &self.policy.source, &self.policy.product)
         } else {
-            Ok(self.live_quality.iter().cloned().collect())
+            let now = Instant::now();
+            Ok(self
+                .live_quality
+                .iter()
+                .filter(|item| item.expires > now)
+                .map(|item| item.report.clone())
+                .collect())
         }
     }
 
@@ -280,11 +301,22 @@ impl MarketIngress {
         self.display.iter().map(|item| &item.event)
     }
 
-    /// An adapter's idle timer can also call this to release expired memory.
+    /// Release expired display events and transient quality reports during idle periods.
     pub fn expire_display(&mut self) {
         let now = Instant::now();
         while self.display.front().is_some_and(|item| item.expires <= now) {
             self.remove_display_front();
+        }
+        self.expire_live_quality(now);
+    }
+
+    fn expire_live_quality(&mut self, now: Instant) {
+        while self
+            .live_quality
+            .front()
+            .is_some_and(|item| item.expires <= now)
+        {
+            self.live_quality.pop_front();
         }
     }
 
@@ -418,12 +450,17 @@ pub fn restore_backup(data_root: &Path, manifest: &BackupManifest) -> Result<()>
         access.source == manifest.wal.source && access.product == manifest.wal.product,
         "backup policy does not match its WAL manifest"
     );
-    WalWriter::restore_sealed(
-        &wal_root(data_root),
-        &manifest.wal,
-        &access.license,
-        |dir| bind_policy(dir, access, true),
-    )
+    WalWriter::restore_sealed(data_root, &manifest.wal, &access.license, |dir| {
+        if let Some(file) = dir.open_optional("access.json")? {
+            let existing: ProductPolicy = serde_json::from_reader(BufReader::new(file))?;
+            ensure!(
+                existing == *access,
+                "WAL policy binding changed; use a separate data root"
+            );
+            return Ok(());
+        }
+        dir.publish_json("access.json", access)
+    })
 }
 
 fn ensure_backup(policy: &ProductPolicy) -> Result<()> {
@@ -560,6 +597,46 @@ mod tests {
                 .source_latest
                 .is_none()
         );
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn transient_quality_reports_expire_and_remain_bounded() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("absent");
+        let (_, _, event, policy) = fixture();
+        let mut ingress = MarketIngress::open(&root, policy).unwrap();
+        let mut report = QualityReport {
+            channel: event.channel,
+            instrument_id: event.instrument_id,
+            from_ts: 0.into(),
+            to_ts: (LIVE_QUALITY_REPORTS as u64).into(),
+            cause: GapCause::LicenseSkip,
+            outcome: None,
+            count: None,
+        };
+        let before = Instant::now();
+        ingress.report_quality(report.clone()).unwrap();
+        let expires = ingress.live_quality[0].expires;
+        assert!(expires >= before + LIVE_QUALITY_TTL);
+        assert!(expires <= Instant::now() + LIVE_QUALITY_TTL);
+        ingress.report_quality(report.clone()).unwrap();
+        assert_eq!(ingress.quality().unwrap(), vec![report.clone()]);
+        assert_eq!(ingress.live_quality[0].expires, expires);
+
+        ingress.live_quality[0].expires = Instant::now();
+        assert!(ingress.quality().unwrap().is_empty());
+        ingress.expire_display();
+        assert!(ingress.live_quality.is_empty());
+
+        for start in 0..=LIVE_QUALITY_REPORTS as u64 {
+            report.from_ts = start.into();
+            ingress.report_quality(report.clone()).unwrap();
+        }
+        let reports = ingress.quality().unwrap();
+        assert_eq!(reports.len(), LIVE_QUALITY_REPORTS);
+        assert_eq!(reports[0].from_ts.get(), 1);
+        assert_eq!(reports.last(), Some(&report));
         assert!(!root.exists());
     }
 
