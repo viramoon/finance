@@ -81,6 +81,36 @@ class FixtureGenerationTest(unittest.TestCase):
     def test_committed_synthetic_fixtures_are_reproducible_and_registered(self):
         self.verify_fixtures(REPO)
 
+    def test_ib_review_export_needs_only_the_checked_out_commit(self):
+        script = "scripts/export-ib-review-sources.sh"
+        _, tree = data_guard.staged_trees(cwd=REPO)
+        sources = data_guard.load_sources(tree, required=True, cwd=REPO)
+        digests = {path: row["sha256"] for path, row in sources.items() if row["generator"] == script}
+        self.assertEqual(len(digests), 3)
+
+        with tempfile.TemporaryDirectory() as directory:
+            # An independent root commit has no other refs, parents or shared objects.
+            repo = Path(directory) / "checkout"
+            data_guard.git("init", "-q", "--template=", repo)
+            for path in (script, SOURCES, *digests):
+                target = repo / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data_guard.blob(tree[path], cwd=REPO))
+            data_guard.git("add", "--", script, SOURCES, *digests, cwd=repo)
+            data_guard.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                           "commit", "-qm", "Isolated review tree", cwd=repo)
+            for path in digests:
+                (repo / path).write_bytes(b"uncommitted edit\n")
+
+            output = subprocess.check_output(["sh", repo / script], cwd=directory, env=data_guard.GIT_ENV)
+            with tarfile.open(fileobj=io.BytesIO(output), mode="r:") as archive:
+                files = [member for member in archive if not member.isdir()]
+                self.assertCountEqual([member.name for member in files], digests)
+                for member in files:
+                    self.assertTrue(member.isfile())
+                    digest = hashlib.sha256(archive.extractfile(member).read()).hexdigest()
+                    self.assertEqual(digest, digests[member.name])
+
     def fixture_file(self, root, name):
         candidate = root / name
         self.assertTrue(candidate.is_relative_to(root), "fixture path escapes its root")
