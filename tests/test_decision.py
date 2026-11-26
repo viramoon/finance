@@ -228,6 +228,35 @@ class DecisionTests(unittest.TestCase):
                 self.assertEqual(self.read("SELECT replay_offset FROM decision_checkpoint"), [(len(first),)])
                 self.assertEqual(self.read("SELECT target_shares FROM decisions"), [])
 
+    def test_replay_diagnostics_redact_untrusted_field_names(self):
+        prefix = encode(frame(0, 1_000_000, 100))
+        next_bar = frame(1, 1_000_001, 130)
+        key = "synthetic-field-marker/~\nsecond-line-marker"
+        quoted = json.dumps(key)
+        duplicate = f"{quoted}:null,{quoted}:null"
+        parent = json.dumps("synthetic-parent-marker\nthird-line-marker")
+        cases = (
+            ("unknown at root", json.dumps(next_bar | {key: None}), "unknown_field", "/<field>"),
+            ("unknown in bar", json.dumps(next_bar | {"payload": next_bar["payload"] | {key: None}}),
+             "unknown_field", "/payload/<field>"),
+            ("duplicate at root", f"{{{duplicate}}}", "duplicate_field", "/<field>"),
+            ("duplicate in payload", f'{{"payload":{{{duplicate}}}}}', "duplicate_field", "/payload/<field>"),
+            ("duplicate in unknown parent", f"{{{parent}:{{{duplicate}}}}}", "duplicate_field", "/<field>"),
+            ("invalid kind", json.dumps(next_bar | {"kind": key}), "invalid_value", "/kind"),
+            ("invalid fixed nested field", json.dumps(next_bar | {"payload": next_bar["payload"] | {"close": key}}),
+             "invalid_decimal", "/payload/close"),
+        )
+        for name, broken, kind, path in cases:
+            with self.subTest(name=name):
+                self.replay_path.write_bytes(prefix + (broken + "\n").encode("utf-8"))
+                failed = self.launch()
+                self.assertEqual(failed.returncode, 1)
+                self.assertEqual(
+                    failed.stderr, f"finance-decision: invalid replay frame at byte {len(prefix)} ({kind}, {path})\n",
+                )
+                self.assertEqual(self.read("SELECT replay_offset FROM decision_checkpoint"), [(len(prefix),)])
+                self.assertEqual(self.read("SELECT target_shares FROM decisions"), [])
+
     def test_refuses_changed_plan_for_existing_store(self):
         sample = b"".join(encode(frame(i, 1_000_000 + i, px)) for i, px in enumerate((100, 110, 120)))
         self.replay_path.write_bytes(sample)

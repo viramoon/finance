@@ -102,14 +102,27 @@ def _commit(
             )
 
 
+def _replay_error_path(error: ProtocolError) -> str:
+    if error.kind == "unknown_field":
+        # Schema validation appends one escaped input key to a fixed object location.
+        return f"{error.path.rpartition('/')[0]}/<field>"
+    if error.kind == "duplicate_field":
+        # Duplicate detection precedes schema validation, so any ancestor can be an input key.
+        for prefix in ("/payload/replacement/payload", "/payload/replacement", "/payload"):
+            if error.path.startswith(prefix + "/"):
+                return f"{prefix}/<field>"
+        return "/<field>"
+    return error.path or "/"
+
+
 def _decode(raw: bytes, offset: int, previous: Event | None, plan: SmaCrossoverPlan) -> Event:
     try:
         event = Event.from_json(raw)
         event.validate_successor(previous)
     except ProtocolError as error:
         raise DecisionError(
-            f"invalid replay frame at byte {offset} ({error.kind}, {error.path or '/'})"
-        ) from error
+            f"invalid replay frame at byte {offset} ({error.kind}, {_replay_error_path(error)})"
+        ) from None
     if event.instrument_id != plan.instrument_id:
         raise DecisionError(f"instrument differs from the strategy plan at byte {offset}")
     if event.asset_kind not in (AssetKind.STOCK, AssetKind.ETF):
