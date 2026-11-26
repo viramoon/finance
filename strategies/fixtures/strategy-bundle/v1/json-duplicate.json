@@ -1,0 +1,8 @@
+{
+  "apiVersion": "fertile.finance/strategy/v1",
+  "kind": "StrategyBundle",
+  "metadata": {
+    "id": "example.first",
+    "\u0069d": "example.second"
+  }
+}

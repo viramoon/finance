@@ -2,6 +2,7 @@ pub mod config;
 pub mod jobs;
 pub mod market;
 pub mod research;
+pub mod strategy_bundle;
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
