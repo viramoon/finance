@@ -60,6 +60,12 @@
       "generator": "scripts/generate_synthetic_fixtures.py",
       "seed": "fixed",
       "source": "按 Yahoo chart 响应结构手工设计，覆盖高精度日线、拆股和分红。"
+    },
+    "tests/fixtures/option-history/ibkr-trade-bars.json": {
+      "sha256": "8a1c3d1e5ad31edcd7bb3c3075e4d5a74a6709e3e5d7109647471127b1b16e34",
+      "generator": "scripts/generate_synthetic_fixtures.py",
+      "seed": "fixed",
+      "source": "用固定 UTC 分钟偏移和手写十进制行情生成窄接口的回放输入，覆盖乱序、相同重复、查询范围之外的 bar 与长小数和大成交量。"
     }
   }
 }

@@ -113,6 +113,12 @@ curl -sS http://127.0.0.1:8081/api/v1/market/status
 
 历史回测导入、信号和审计见 [研究回测手册](docs/historical-backtest.md)。部署时向 API 和 worker 配置同一只读研究 catalog；请求状态和结果仍由持久作业队列管理。
 
+### 离线验证历史期权链
+
+在已准备好锁定的 Rust 工具链和依赖缓存后运行 `cargo test -p finance-collector --test option_history --locked --offline`。IBKR 使用合成回放，已到期合约直接判为不可得，权限或连接错误保留为错误。接入后只允许已验证的只读 paper 会话。
+
+Databento 缺省禁用，即使配置估算常量也只进行离线估算。取得注明日期和来源的按量费率后才能用于预算。启用任何真实 Databento 请求之前须由 vira 确认费用、预算和数据用途授权。[历史期权链](docs/option-history.md)
+
 ### 隔离验收官方历史作业
 
 从 finance 仓库根运行。先按 [IBM 2024 原始日线](docs/historical-backtest.md#ibm-2024-原始日线) 转换、复核并导入日线快照，再指定与部署分开的数据根、只读研究根和可用的本机端口。

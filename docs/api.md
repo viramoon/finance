@@ -63,6 +63,8 @@ utoipa 从 handler 注解和实际响应类型导出，不需要数据目录、�
 
 离线因子评价和历史研究登记使用 Python 接口。F10 接入对外读契约时可引用报告的十进制字符串和研究状态。[离线接口](factor-research.md)
 
+历史期权读取与 OPRA 费用估算通过 collector 的 Rust 库调用。`Expired`、`NoBars` 和请求错误由库分别返回，HTTP 与行情流的对外接口留待后续接入。[历史期权链](option-history.md)
+
 ## 历史回测与提交确认
 
 GET /api/v1/backtests/datasets 返回具名日线 catalog 的可选标的、来源和日期范围。POST /api/v1/backtests 接受 `SmaCrossover`、一个已导入的 `instrument`、UTC 午夜的 `start` / `end`，以及整数 `fast_period`、`slow_period`、`shares`。要求 `2 ≤ fast_period < slow_period ≤ 250` 与 `1 ≤ shares ≤ 1000`。研究结果的 `research` 字段含数据血缘、执行模型、覆盖与成交审计。无匹配 catalog 的新请求返回 422。缺失会话或 warmup 不够的作业进入失败终态，错误码为 `missing_sessions` 或 `insufficient_history`。不替换为示例数据。

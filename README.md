@@ -6,6 +6,8 @@ fertile 的主项目与 submodule，基于 NautilusTrader 的交易与数据系�
 
 本地行情链路支持 F1 事件追加、恢复和独立 Parquet 投影，数据源适配器按后续 issue 接入。[本地行情 WAL、投影与封段接口](docs/market-wal.md)
 
+历史期权库支持通过只读 paper 请求接口取得已确认的未到期 IBKR 合约闭合 bar，当前使用合成回放验证，真实请求由 F9a 接入。Databento OPRA 提供默认禁用的离线费用估算。[历史期权链](docs/option-history.md)
+
 ## 系统中的位置
 
 | 仓库 | 在 fertile 系统中的职责 |
