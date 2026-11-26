@@ -7,6 +7,18 @@
       "seed": "fixed",
       "source": "手工设计的三根闭合 bar，覆盖十进制精度和循环回放。"
     },
+    "crates/finance-ib/src/market/replay_tests.rs": {
+      "sha256": "247dea98dc62e76c1a1513dbd71c74aafee52a0f0e9113337aa1857161045e74",
+      "generator": "scripts/export-ib-review-sources.sh",
+      "seed": "fixed",
+      "source": "手写的内存回放测试用固定合成合约和回调验证 SDK 路由。相邻的 request 调用含数字参数，触发表格检测。用 sh scripts/export-ib-review-sources.sh 从当前检出提交导出原始 Rust 源文件。"
+    },
+    "crates/finance-ib/tests/entitlements.rs": {
+      "sha256": "f21c35b818768c74d31dd2c8f18cdc30896df8b78676cb9d5de4c3288f957cb2",
+      "generator": "scripts/export-ib-review-sources.sh",
+      "seed": "fixed",
+      "source": "手写的权限探针测试以固定构造的合约、日期、报价和错误驱动替身，日期参数和预期值触发表格检测。用 sh scripts/export-ib-review-sources.sh 从当前检出提交导出原始 Rust 源文件。"
+    },
     "crates/finance-market-protocol/fixtures/examples-v2.input.json": {
       "sha256": "fdc6b95863efa58d9cc1f8360bd39e3fd813ff35cd33e31bb39078ace987e2d1",
       "generator": "crates/finance-market-protocol/src/bin/export-market-protocol.rs",
@@ -90,6 +102,12 @@
       "generator": "scripts/generate_synthetic_fixtures.py",
       "seed": "fixed",
       "source": "固定模拟断线后的早到旧簿、新簿、成交 ID 重叠及缺省方向。运行 generate_synthetic_fixtures.py OUTPUT 重建。"
+    },
+    "third_party/ibapi/src/messages.rs": {
+      "sha256": "19fde85e7334259832948e61b5ba2c2e07770b605328a7364d1f751e6fceedc6",
+      "generator": "scripts/export-ib-review-sources.sh",
+      "seed": "fixed",
+      "source": "ibapi 3.2.0 消息定义及 F9a 请求 ID 路由补丁，ConnectivityStatus 文档中的数据场状态码表触发检测。上游归档摘要见 ADR-0038。用 sh scripts/export-ib-review-sources.sh 从当前检出提交导出补丁后的源码。"
     }
   }
 }
