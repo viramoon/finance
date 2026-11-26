@@ -5,7 +5,8 @@ use crate::{
     jobs::{db, invalid, storage_error},
     strategy_bundle::{
         Bars, Catalog, CompiledPlan, Diagnostic, InputFormat, MAX_BYTES, MemoryBindings,
-        ResolvedInputs, Universe, compile, example_catalog, valid_strategy_version,
+        ResolvedInputs, Universe, compile, diagnose_version_conflict, example_catalog,
+        valid_strategy_version,
     },
 };
 use axum::{
@@ -210,11 +211,12 @@ impl PreparedBundle {
             )
             .map_err(storage_error)?;
         if binding.0 != *content_sha256 {
-            return Err(error(
-                StatusCode::CONFLICT,
-                "VERSION_CONFLICT",
-                "Different content is already bound to this strategy ID and version",
-            ));
+            let diagnostic = diagnose_version_conflict(
+                self.document.content.as_bytes(),
+                self.document.format.compiler_format(),
+            )
+            .map_err(storage_error)?;
+            return Err(diagnostic_error(StatusCode::CONFLICT, diagnostic));
         }
         if binding.1 != self.inputs {
             return Err(error(
@@ -281,7 +283,7 @@ impl PreparedBundle {
             catalog,
             &mut MemoryBindings::default(),
         )
-        .map_err(compile_error)?;
+        .map_err(|diagnostic| diagnostic_error(StatusCode::UNPROCESSABLE_ENTITY, diagnostic))?;
         Self::new(plan, document)
     }
 }
@@ -300,12 +302,8 @@ fn unique_ids<'a>(mut ids: impl Iterator<Item = &'a str>) -> bool {
     ids.all(|id| seen.insert(id))
 }
 
-fn compile_error(diagnostic: Diagnostic) -> ApiError {
-    let mut response = error(
-        StatusCode::UNPROCESSABLE_ENTITY,
-        diagnostic.code,
-        &diagnostic.message,
-    );
+fn diagnostic_error(status: StatusCode, diagnostic: Diagnostic) -> ApiError {
+    let mut response = error(status, diagnostic.code, &diagnostic.message);
     response.1.error.path = Some(diagnostic.path);
     response.1.error.location = Some(diagnostic.location);
     response

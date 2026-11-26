@@ -9,6 +9,7 @@ mod schema;
 
 pub use bindings::{Binding, BindingError, MemoryBindings, SqliteBindings, VersionBindings};
 pub use catalog::{Availability, Bars, Catalog, Universe, example_catalog};
+pub(crate) use compile::diagnose_version_conflict;
 pub use compile::{
     CompiledComponent, CompiledPlan, CompiledSleeve, ConflictRules, ResolvedInputs, compile,
 };

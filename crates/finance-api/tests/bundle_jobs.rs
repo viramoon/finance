@@ -2,7 +2,10 @@ use axum::{
     body::{Body, to_bytes},
     http::Request,
 };
-use finance_api::{ApiDoc, AppState, router};
+use finance_api::{
+    ApiDoc, AppState, router,
+    strategy_bundle::{InputFormat, MemoryBindings, compile, example_catalog},
+};
 use serde_json::{Value, json};
 use std::{fs, path::Path};
 use utoipa::OpenApi;
@@ -215,6 +218,100 @@ async fn configured_retry_is_atomic_across_inline_and_registered_sources() {
     let next_request = persisted_request(&db, next.1["id"].as_i64().unwrap());
     assert_eq!(queued["plan"], next_request["plan"]);
     assert_ne!(queued["snapshot_sha256"], next_request["snapshot_sha256"]);
+}
+
+#[tokio::test]
+async fn version_conflict_locates_yaml_and_json_source_in_registration_and_inline_jobs() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let registration = json!({"format": "yaml", "content": ENTRY_EXIT});
+    let (status, original) =
+        request(root, "POST", "/api/v1/strategies", "", registration.clone()).await;
+    assert_eq!(status, 200);
+
+    let catalog = example_catalog();
+    let mut bindings = MemoryBindings::default();
+    let first = compile(
+        ENTRY_EXIT.as_bytes(),
+        InputFormat::Yaml,
+        &catalog,
+        &mut bindings,
+    )
+    .unwrap();
+    let marker = "synthetic-private-title";
+    let yaml = format!(
+        "# Synthetic conflict fixture\n\n{}",
+        ENTRY_EXIT.replacen("日线动量入场与持有期退出", marker, 1)
+    );
+    let changed = compile(
+        yaml.as_bytes(),
+        InputFormat::Yaml,
+        &catalog,
+        &mut MemoryBindings::default(),
+    )
+    .unwrap();
+    assert_ne!(first.content_sha256, changed.content_sha256);
+    let json = serde_json::to_string_pretty(&changed.bundle).unwrap();
+
+    for (format, input_format, content, version_prefix) in [
+        ("yaml", InputFormat::Yaml, yaml.as_str(), "version: "),
+        ("json", InputFormat::Json, json.as_str(), "\"version\": "),
+    ] {
+        let diagnostic =
+            compile(content.as_bytes(), input_format, &catalog, &mut bindings).unwrap_err();
+        let value_offset = content.find(version_prefix).unwrap() + version_prefix.len();
+        let before_value = &content[..value_offset];
+        assert!(content[value_offset..].starts_with("\"1.0.0\""));
+        let line = before_value.lines().count();
+        let column = before_value.rsplit('\n').next().unwrap().chars().count() + 1;
+
+        for (path, key, body) in [
+            (
+                "/api/v1/strategies",
+                "",
+                json!({"format": format, "content": content}),
+            ),
+            (
+                BACKTESTS,
+                format,
+                submission(json!({"kind": "inline", "format": format, "content": content})),
+            ),
+        ] {
+            let (status, body) = request(root, "POST", path, key, body).await;
+            assert_eq!(status, 409);
+            assert_eq!(body["error"]["code"], "VERSION_CONFLICT");
+            assert_eq!(body["error"]["path"], "/metadata/version");
+            assert_eq!(
+                body["error"]["location"],
+                json!({"line": line, "column": column})
+            );
+            assert_eq!(body["error"], serde_json::to_value(&diagnostic).unwrap());
+            let message = body.to_string();
+            for private in [
+                marker,
+                ID,
+                VERSION,
+                &first.content_sha256,
+                &first.source_sha256,
+                &changed.content_sha256,
+                &changed.source_sha256,
+            ] {
+                assert!(
+                    !message.contains(private),
+                    "version conflict leaked private input"
+                );
+            }
+        }
+    }
+
+    assert_eq!(
+        request(root, "POST", "/api/v1/strategies", "", registration).await,
+        (200, original)
+    );
+    let staged_jobs: i64 = queue(root)
+        .query_row("SELECT COUNT(*) FROM jobs", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(staged_jobs, 0);
 }
 
 #[tokio::test]

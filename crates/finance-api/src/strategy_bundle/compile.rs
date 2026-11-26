@@ -145,12 +145,7 @@ pub fn compile<'a>(
             )
         })?;
     if matches!(binding, Binding::Conflict { .. }) {
-        return Err(diagnostic(
-            &parsed,
-            "/metadata/version",
-            "VERSION_CONFLICT",
-            "Different content is already bound to this strategy ID and version. Choose a new version to change the content.",
-        ));
+        return Err(version_conflict(&parsed));
     }
 
     Ok(CompiledPlan {
@@ -165,6 +160,24 @@ pub fn compile<'a>(
         execution,
         conflict_rules,
     })
+}
+
+/// Locate a version conflict discovered by a caller's transaction after compilation.
+pub(crate) fn diagnose_version_conflict(
+    bytes: &[u8],
+    format: InputFormat,
+) -> Result<Diagnostic, Diagnostic> {
+    let parsed = parse(bytes, format)?;
+    Ok(version_conflict(&parsed))
+}
+
+fn version_conflict(parsed: &Parsed) -> Diagnostic {
+    diagnostic(
+        parsed,
+        "/metadata/version",
+        "VERSION_CONFLICT",
+        "Different content is already bound to this strategy ID and version. Choose a new version to change the content.",
+    )
 }
 
 fn sha256(bytes: &[u8]) -> String {

@@ -39,7 +39,7 @@ POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /a
 
 ## 配置策略提交与结果
 
-`POST /api/v1/strategies` 接受 `{"format":"yaml","content":"<配置文件内容>"}`，也接受带 `format: "json"` 的 JSON 配置文档。通过校验时返回 200 和 `{id, version, content_sha256}`。同一版本的等价文档可重复登记。版本已有其他内容时返回 409 `VERSION_CONFLICT`。配置校验错误返回 422，`error` 包含编译器错误码、消息、字段 `path` 和行列 `location`。原始配置上限为 256 KiB。
+`POST /api/v1/strategies` 接受 `{"format":"yaml","content":"<配置文件内容>"}`，也接受带 `format: "json"` 的 JSON 配置文档。通过校验时返回 200 和 `{id, version, content_sha256}`。同一版本的等价文档可重复登记。登记或内联入队遇到已绑定不同内容的版本时返回 409 `VERSION_CONFLICT`，`error.path` 为 `/metadata/version`，`error.location` 指向本次提交的 YAML 或 JSON 配置中的版本值，行列从 1 起算。配置校验错误返回 422，`error` 包含编译器错误码、消息、字段 `path` 和行列 `location`。原始配置上限为 256 KiB。
 
 `POST /api/v1/backtests` 支持如下请求，继续使用 `Idempotency-Key`。配置作业使用 UTC 午夜端点和半开区间 `[start, end)`，可覆盖 1970-01-01 至 2100-12-31，最晚结束端点为 2101-01-01。决策及成交按 XNYS 当地会话时钟执行。
 
