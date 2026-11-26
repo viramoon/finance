@@ -178,4 +178,6 @@ initial_cash = Decimal(plan["bundle"]["spec"]["portfolio"]["initial_cash"]["amou
 
 `plan_version` 当前为 `fertile.finance/strategy-plan/v1`。计划包含规范化的 `bundle`、两个哈希、已解析的 `inputs`、按依赖拓扑排序的 `factors`、按局部 ID 排序的 `modules`、执行模型 `execution`、按优先级与配方 ID 排序的 `sleeves` 和生效的 `conflict_rules`。成功计划保留规范化配置的字段值和局部 ID，供 worker 复现完整配置。
 
-F1 对接标的主数据、稳定 `instrument_id` 与交易日历。当前 `XNYS` 和 `example.*@1.0.0` 作为不透明的已登记示例引用。F7 接入持久版本绑定、数据与成分的快照哈希、引擎提交、成本和运行区间，并将编译计划归入不可变 `run_manifest`。指标计算由 C4/F6 接入，因子评价由 F8 接入。
+`spec.clock.calendar` 与标的主数据的 `calendar_id` 共用日历代码。跨契约接入时采用 1–32 位 ASCII 大写字母或数字，首位之后也允许下划线和连字符。当前示例目录只登记 `XNYS`，编译器要求股票池和日线目录的日历与决策日历一致。`metadata.id` 中的 `example.*` 是策略 ID，`spec.universe.ref` 和 `spec.data.bars` 中的 `example.*@1.0.0` 是各自目录的引用。后续解析股票池成分和日线记录时，实际标的使用 `<LOCAL>.<VENUE>`，例如 `SPY.ARCA`。标的和日历的完整规则见 [行情标的、事件与流协议](market-protocol.md)。
+
+F7 接入持久版本绑定、数据与成分的快照哈希、引擎提交、成本和运行区间，并将编译计划归入不可变 `run_manifest`。指标计算由 C4/F6 接入，因子评价由 F8 接入。

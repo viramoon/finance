@@ -1,0 +1,146 @@
+{
+  "$defs": {
+    "AssetKind": {
+      "enum": [
+        "stock",
+        "etf",
+        "index",
+        "spot",
+        "perpetual",
+        "option",
+        "future"
+      ],
+      "type": "string"
+    },
+    "CalendarId": {
+      "pattern": "^[A-Z0-9][A-Z0-9_-]{0,31}(?![\\s\\S])",
+      "type": "string"
+    },
+    "Currency": {
+      "pattern": "^[A-Z0-9]{1,16}(?![\\s\\S])",
+      "type": "string"
+    },
+    "DecimalText": {
+      "pattern": "^(?=-?(?:[0-9][.]?){1,28}(?![\\s\\S]))-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?![\\s\\S])",
+      "type": "string"
+    },
+    "InstrumentId": {
+      "pattern": "^(?=[A-Z0-9_.-]{1,96}\\.[A-Z0-9][A-Z0-9_-]{0,31}(?![\\s\\S]))[A-Z0-9][A-Z0-9_-]*(?:\\.[A-Z0-9][A-Z0-9_-]*)*\\.[A-Z0-9][A-Z0-9_-]{0,31}(?![\\s\\S])",
+      "type": "string"
+    },
+    "NonEmptyText": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "SchemaVersion": {
+      "enum": [
+        "1.0"
+      ],
+      "type": "string"
+    },
+    "SettlementKind": {
+      "enum": [
+        "cash",
+        "physical",
+        "none"
+      ],
+      "type": "string"
+    },
+    "SupplierSymbol": {
+      "additionalProperties": false,
+      "properties": {
+        "product": {
+          "$ref": "#/$defs/Token"
+        },
+        "source": {
+          "$ref": "#/$defs/Token"
+        },
+        "symbol": {
+          "$ref": "#/$defs/NonEmptyText"
+        }
+      },
+      "required": [
+        "source",
+        "product",
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "Token": {
+      "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}(?![\\s\\S])",
+      "type": "string"
+    },
+    "Venue": {
+      "pattern": "^[A-Z0-9][A-Z0-9_-]{0,31}(?![\\s\\S])",
+      "type": "string"
+    }
+  },
+  "$id": "urn:viramoon:finance:market-protocol:1.0:instrument",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The stable identity and fixed-point increments for one instrument.",
+  "properties": {
+    "asset_kind": {
+      "$ref": "#/$defs/AssetKind"
+    },
+    "calendar_id": {
+      "$ref": "#/$defs/CalendarId"
+    },
+    "contract_multiplier": {
+      "$ref": "#/$defs/DecimalText"
+    },
+    "instrument_id": {
+      "$ref": "#/$defs/InstrumentId"
+    },
+    "lot_size": {
+      "$ref": "#/$defs/DecimalText"
+    },
+    "quote_currency": {
+      "$ref": "#/$defs/Currency"
+    },
+    "schema_version": {
+      "$ref": "#/$defs/SchemaVersion"
+    },
+    "settlement_currency": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "pattern": "^[A-Z0-9]{1,16}(?![\\s\\S])",
+          "type": "string"
+        }
+      ]
+    },
+    "settlement_kind": {
+      "$ref": "#/$defs/SettlementKind"
+    },
+    "supplier_symbols": {
+      "items": {
+        "$ref": "#/$defs/SupplierSymbol"
+      },
+      "type": "array"
+    },
+    "tick_size": {
+      "$ref": "#/$defs/DecimalText"
+    },
+    "venue": {
+      "$ref": "#/$defs/Venue"
+    }
+  },
+  "required": [
+    "schema_version",
+    "instrument_id",
+    "asset_kind",
+    "venue",
+    "quote_currency",
+    "tick_size",
+    "lot_size",
+    "contract_multiplier",
+    "settlement_kind",
+    "settlement_currency",
+    "calendar_id",
+    "supplier_symbols"
+  ],
+  "type": "object"
+}

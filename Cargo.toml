@@ -1,3 +1,8 @@
 [workspace]
-members = ["crates/finance-api", "crates/finance-ib", "crates/finance-collector"]
+members = [
+    "crates/finance-api",
+    "crates/finance-ib",
+    "crates/finance-collector",
+    "crates/finance-market-protocol",
+]
 resolver = "2"
