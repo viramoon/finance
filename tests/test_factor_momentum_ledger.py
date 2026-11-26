@@ -4,7 +4,7 @@ import importlib
 import tempfile
 import unittest
 from datetime import date, datetime, timezone
-from decimal import Decimal, ROUND_DOWN, localcontext
+from decimal import Decimal, Inexact, ROUND_DOWN, localcontext
 from pathlib import Path
 
 
@@ -102,9 +102,12 @@ class FactorMomentumLedgerTests(unittest.TestCase):
         with localcontext() as context:
             context.prec = 3
             context.rounding = ROUND_DOWN
+            context.flags[Inexact] = True
+            caller_flags = dict(context.flags)
             run = ledger.simulate(plans, returns, cost_bps=25, initial_nav=D(100))
             self.assertEqual(run.months[-1].nav_close, D("106.233125"))
-            self.assertFalse(any(context.flags.values()))
+            self.assertEqual(dict(context.flags), caller_flags)
+            self.assertEqual((context.prec, context.rounding), (3, ROUND_DOWN))
 
     def test_inventory_reconciliation_detects_missing_fill_when_nav_is_unchanged(self):
         plans, _ = fixture()

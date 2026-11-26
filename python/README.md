@@ -202,4 +202,4 @@ print(result.sample_start, result.sample_end, result.observations, result.correl
 
 ## 月频因子研究案例
 
-[时序因子动量](../strategies/2026-11-25-factor-momentum/README.md) 演示签名因子名义、月 RF 抵押和独立账本对账。该研究读取本地公开归档并复用月频覆盖规则，运行入口和数据校验见研究目录。
+[时序因子动量](../strategies/2026-11-25-factor-momentum/README.md) 演示有符号的因子名义、月 RF 抵押和独立账本对账。该研究读取本地公开归档并复用月频覆盖规则，运行入口和数据校验见研究目录。

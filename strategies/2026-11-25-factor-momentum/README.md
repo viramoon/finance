@@ -14,3 +14,44 @@
 ## 数据与复现
 
 原始 ZIP 由协调者在沙箱外下载。仓库约定原始数据不进入 Git，需按 [数据清单](data/raw/MANIFEST.txt) 提供相同 ZIP；派生的三条对照策略月收益和来源哈希放在 data/comparisons/。执行时验证源 ZIP 的 SHA-256 和字节数。
+
+在仓库根目录用安装了 research 依赖的源码构建环境运行下列命令。通过 --raw 可指定包含十个 ZIP 和清单的目录。代码提交的内容会与已执行的源文件逐字节核对。
+
+```sh
+PYTHONPATH=python FERTILE_DATA_ROOT=/tmp/lc14-data /path/to/research/python \
+  strategies/2026-11-25-factor-momentum/run.py \
+  --code-commit 5537ce087d8705dca97d852cb64afc4fd26448f2 \
+  --raw strategies/2026-11-25-factor-momentum/data/raw \
+  --output /tmp/lc14-reproduced
+```
+
+## 结果与判定
+
+**不通过。** 25 bp 下，最长样本主规格 Sharpe 0.4024，静态等权 0.7680，差 -0.3656。主发表后窗口为 0.3320 对 0.1944，差 +0.1377；辅助窗口为 0.1210 对 0.0683，差 +0.0527。两个发表后差值均为正，最长样本未达到门槛。[判定原始精度与全部指标](results/summary.json)
+
+| 窗口 | 首个收益月 | 月收益数 | 源日观测数 | 主规格 CAGR | 年化波动 | 最大回撤 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 50 年 | 1976-10 | 600 | 12,602 | 6.43% | 6.26% | 18.37% |
+| 10 年 | 2016-10 | 120 | 2,512 | 3.49% | 6.55% | 10.86% |
+| 5 年 | 2021-10 | 60 | 1,254 | 6.41% | 6.92% | 8.85% |
+| 最长 | 1970-01 | 681 | 14,308 | 6.83% | 6.28% | 18.37% |
+| 主发表后 | 2020-01 | 81 | 1,695 | 5.02% | 7.19% | 10.86% |
+| 辅助发表后 | 2016-01 | 129 | 2,701 | 2.80% | 6.46% | 10.86% |
+
+上表的收益指标为 25 bp。各窗末月均为 2026-09，覆盖均为 full。50 年窗用 1976-09 月末净值作基线，从 1976-10 的首个收益月计数。源日观测是 FF5、Mom 和 FF3 RF 同日都有值的行数。catalog 和原生引擎未运行，入库观测和原生 bar 均为 0。
+
+月收益年化按 12 个月，波动用月收益样本标准差乘 √12，Sharpe 用逐月策略收益减当月 RF 后的均值除以样本标准差再乘 √12。最大回撤用窗口基线和月末净值计算，恢复日期限于窗口内。平均权重、暴露、方向时间占比和换手对月观测等权。各窗口沿用连续回测的期初仓位和 NAV，切窗不重置仓位或重复建仓。
+
+- [四组策略、六个窗口与四档成本的 Sharpe](results/key_sharpe.csv)
+- [全部窗口指标](results/windows.csv)、[因子权重与持仓方向](results/window_weights.csv)、[逐月收益和 NAV（gzip）](results/monthly.csv.gz)
+- [1970 年前补充](results/pre1970_windows.csv)、[同期相关](results/correlations.csv)、[分段表现](results/segments.csv)、[翻转月明细](results/signal_flips.csv)和[诊断](DIAGNOSTICS.md)
+- [订单](results/audit/orders.csv.gz)、[持仓](results/audit/positions.csv.gz)、[现金](results/audit/cash.csv.gz)三个 gzip CSV，以策略、成本与收益月关联。订单含名义数量、方向及信号和执行戳；持仓记变化后的有符号名义；现金记种子付款、分因子合并净结算、利息、融资和手续费。订单和持仓分别用同一份来源收益重建结算与现金，现金账本直接累计现金流。共核对 72 个情景、122,826 笔订单、121,548 条持仓及 26,700 条现金记录。逐月各路 NAV 最大相对差为 2.358×10⁻³²，分母为当月公式 NAV，容许值为 10⁻²⁵。订单累加的名义数量与持仓完全一致。[逐情景对账与时间戳样例](results/summary.json)
+
+## 离线验证
+
+```sh
+PYTHONPATH=python FERTILE_DATA_ROOT=/tmp/lc14-data /path/to/research/python \
+  -m unittest discover -s tests -v
+```
+
+测试用隔离小样本检查复利符号、可用因子等权、信号无前视、跨月执行、双边换手成本、RF 和融资、三账本独立对账及篡改检测、缺窗输出 null、哈希和缺值处理。
