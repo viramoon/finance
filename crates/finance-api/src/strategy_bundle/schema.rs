@@ -294,7 +294,7 @@ impl Rule {
                             parsed,
                             &child_path(path, name),
                             "UNKNOWN_FIELD",
-                            format!("field {name:?} is not allowed here"),
+                            "Unexpected field. Use a field declared for this object.",
                         ));
                     }
                 }

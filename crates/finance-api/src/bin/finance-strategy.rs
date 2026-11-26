@@ -3,7 +3,6 @@ use finance_api::strategy_bundle::{
     compile, component_registry, example_catalog,
 };
 use serde::Serialize;
-use std::error::Error;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -22,7 +21,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(args: Vec<OsString>) -> Result<ExitCode, Box<dyn Error>> {
+fn run(args: Vec<OsString>) -> Result<ExitCode, &'static str> {
     match args.as_slice() {
         [command] if command == "schema" => json_line(io::stdout().lock(), &bundle_schema())?,
         [command] if command == "registry" => {
@@ -30,12 +29,12 @@ fn run(args: Vec<OsString>) -> Result<ExitCode, Box<dyn Error>> {
         }
         [command] if command == "--help" || command == "-h" => println!("{USAGE}"),
         [command, args @ ..] if command == "compile" => return compile_file(args),
-        _ => return Err(USAGE.into()),
+        _ => return Err(USAGE),
     }
     Ok(ExitCode::SUCCESS)
 }
 
-fn compile_file(args: &[OsString]) -> Result<ExitCode, Box<dyn Error>> {
+fn compile_file(args: &[OsString]) -> Result<ExitCode, &'static str> {
     let mut args = args.iter();
     let mut input = None;
     let mut format = None;
@@ -46,15 +45,15 @@ fn compile_file(args: &[OsString]) -> Result<ExitCode, Box<dyn Error>> {
                 format = Some(match args.next().and_then(|value| value.to_str()) {
                     Some("json") => InputFormat::Json,
                     Some("yaml") => InputFormat::Yaml,
-                    _ => return Err(USAGE.into()),
+                    _ => return Err(USAGE),
                 });
             }
             Some("--bindings") if bindings.is_none() => {
                 bindings = Some(PathBuf::from(args.next().ok_or(USAGE)?));
             }
-            Some(arg) if arg.starts_with('-') && arg != "-" => return Err(USAGE.into()),
+            Some(arg) if arg.starts_with('-') && arg != "-" => return Err(USAGE),
             _ if input.is_none() => input = Some(PathBuf::from(arg)),
-            _ => return Err(USAGE.into()),
+            _ => return Err(USAGE),
         }
     }
     let input = input.ok_or(USAGE)?;
@@ -64,13 +63,19 @@ fn compile_file(args: &[OsString]) -> Result<ExitCode, Box<dyn Error>> {
     });
     let mut bytes = Vec::new();
     let limit = MAX_BYTES as u64 + 1;
-    if input.as_os_str() == "-" {
-        io::stdin().lock().take(limit).read_to_end(&mut bytes)?;
+    let read = if input.as_os_str() == "-" {
+        io::stdin().lock().take(limit).read_to_end(&mut bytes)
     } else {
-        File::open(input)?.take(limit).read_to_end(&mut bytes)?;
-    }
+        File::open(input)
+            .map_err(|_| "Could not open the strategy input file.")?
+            .take(limit)
+            .read_to_end(&mut bytes)
+    };
+    read.map_err(|_| "Could not read the strategy input.")?;
     let mut bindings: Box<dyn VersionBindings> = match bindings {
-        Some(path) => Box::new(SqliteBindings::open(&path)?),
+        Some(path) => Box::new(
+            SqliteBindings::open(&path).map_err(|_| "Could not open the version binding store.")?,
+        ),
         None => Box::<MemoryBindings>::default(),
     };
     match compile(&bytes, format, &example_catalog(), bindings.as_mut()) {
@@ -85,8 +90,8 @@ fn compile_file(args: &[OsString]) -> Result<ExitCode, Box<dyn Error>> {
     }
 }
 
-fn json_line(mut output: impl Write, value: &impl Serialize) -> Result<(), Box<dyn Error>> {
-    serde_json::to_writer_pretty(&mut output, value)?;
-    writeln!(output)?;
-    Ok(())
+fn json_line(mut output: impl Write, value: &impl Serialize) -> Result<(), &'static str> {
+    const WRITE_FAILED: &str = "Could not write JSON output.";
+    serde_json::to_writer_pretty(&mut output, value).map_err(|_| WRITE_FAILED)?;
+    writeln!(output).map_err(|_| WRITE_FAILED)
 }

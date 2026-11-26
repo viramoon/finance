@@ -19,6 +19,7 @@ pub use schema::bundle_schema;
 use parse::Parsed;
 use serde::Serialize;
 use serde_json::Value;
+use std::sync::LazyLock;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct Location {
@@ -28,7 +29,8 @@ pub struct Location {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Diagnostic {
-    /// RFC 6901 JSON Pointer. The empty string identifies the document root.
+    /// JSON Pointer-shaped path. `<key>` stands for a redacted mapping key.
+    /// The empty string identifies the document root.
     pub path: String,
     pub code: &'static str,
     pub message: String,
@@ -53,16 +55,62 @@ fn diagnostic(
     code: &'static str,
     message: impl Into<String>,
 ) -> Diagnostic {
+    let (path, location) = parsed.diagnostic_location(path);
     Diagnostic {
-        path: path.to_owned(),
+        path,
         code,
         message: message.into(),
-        location: parsed.location(path),
+        location,
     }
 }
 
 fn child_path(parent: &str, key: &str) -> String {
     format!("{parent}/{}", key.replace('~', "~0").replace('/', "~1"))
+}
+
+enum PathSegment {
+    Key(String),
+    Index(usize),
+}
+
+fn redacted_path<'a>(segments: impl IntoIterator<Item = &'a PathSegment>) -> String {
+    static SCHEMA: LazyLock<Value> = LazyLock::new(bundle_schema);
+    let mut scopes = vec![&*SCHEMA];
+    let mut path = String::new();
+    for segment in segments {
+        let mut known_field = false;
+        let mut next = Vec::new();
+        for scope in scopes {
+            // Follow all declared branches. Syntax errors can precede reading a discriminator.
+            let alternatives = scope["oneOf"]
+                .as_array()
+                .map_or(std::slice::from_ref(scope), Vec::as_slice);
+            for rule in alternatives {
+                match segment {
+                    PathSegment::Key(key) => {
+                        if let Some(field) = rule["properties"].get(key) {
+                            known_field = true;
+                            next.push(field);
+                        } else if rule["additionalProperties"].is_object() {
+                            next.push(&rule["additionalProperties"]);
+                        }
+                    }
+                    PathSegment::Index(_) => {
+                        if let Some(items) = rule.get("items") {
+                            next.push(items);
+                        }
+                    }
+                }
+            }
+        }
+        path = match segment {
+            PathSegment::Key(key) if known_field => child_path(&path, key),
+            PathSegment::Key(_) => child_path(&path, "<key>"),
+            PathSegment::Index(index) => child_path(&path, &index.to_string()),
+        };
+        scopes = next;
+    }
+    path
 }
 
 /// Export the same read-only descriptors used by the structural and semantic passes.

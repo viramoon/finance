@@ -143,13 +143,15 @@ spec:
 
 第二遍解析已登记引用并检查槽位、依赖图、币种、交易日历、预热和时间可见性。交易用数据和因子必须在决策时刻或之前可见。样例中延迟日线在收盘决策后才发布，因此 [future-data.yaml](../strategies/fixtures/strategy-bundle/v1/future-data.yaml) 无法编译。现金引擎禁止借贷和空头，预算为非负且总和最多为 1。实际区间的样本覆盖、成分和数据快照留给配置回测运行时再检查。
 
-编译在首个错误处停止，错误 JSON 提供 `path`、`code`、`message` 和 `location`。路径采用 RFC 6901 JSON Pointer，`""` 指根节点。行列从 1 起算，对缺失字段指向最近的已有位置。例如 [duplicate-key.txt](../strategies/fixtures/strategy-bundle/v1/duplicate-key.txt) 会在 `/metadata/id` 报 `DUPLICATE_KEY`。其他错误码包括 `FUTURE_DATA`、`UNKNOWN_COMPONENT`、`SLOT_MISMATCH`、`DEPENDENCY_CYCLE`、`BUDGET_EXCEEDED`、`VERSION_CONFLICT`。用于验证严格解析的纯文本文件含预期被拒绝的 YAML。
+编译在首个错误处停止，错误 JSON 提供 `path`、`code`、`message` 和 `location`。`path` 沿用 JSON Pointer 的路径形状，`""` 指根节点。公开 schema 中的固定字段名和实际数组索引会保留。其余映射键（包括局部 ID 和未知字段名）用 `<key>` 占位，例如 `/spec/factors/<key>/use`。出现占位符时按 `location` 定位原文，行列从 1 起算，缺失字段指向最近的已有位置。公开诊断用固定文本解释原因，省略输入原值、原文片段、配置哈希和底层存储错误文本。
+
+[duplicate-key.txt](../strategies/fixtures/strategy-bundle/v1/duplicate-key.txt) 在 `/metadata/id` 报 `DUPLICATE_KEY`。其他错误码包括 `FUTURE_DATA`、`UNKNOWN_COMPONENT`、`SLOT_MISMATCH`、`DEPENDENCY_CYCLE`、`BUDGET_EXCEEDED`、`VERSION_CONFLICT`。用于验证严格解析的纯文本文件含预期被拒绝的 YAML。
 
 规范化保留数组顺序，按键稳定排序 JSON 对象，去除十进制字符串多余的尾零，并将零值统一为 `"0"`。`content_sha256` 是规范化 JSON 的内容哈希，`source_sha256` 是原始输入字节的哈希。空格、注释、对象键顺序与等值小数拼写可以改变原文哈希而保持内容哈希。每对 `(metadata.id, metadata.version)` 在通过全部校验后可绑定一个内容哈希。已绑定同一哈希时允许重试，绑定另一哈希时以 `VERSION_CONFLICT` 拒绝。
 
 ## 命令行与 Python worker
 
-在仓库根目录执行以下命令。编译成功时标准输出是单个计划 JSON。输入校验失败时标准错误输出诊断 JSON，退出码为 2。
+在仓库根目录执行以下命令。编译成功时标准输出是单个计划 JSON。编译失败时标准输出为空，标准错误输出诊断 JSON，退出码为 2。文件打开等命令行准备失败使用固定说明并以状态码 1 退出。
 
 ```sh
 cargo run --locked -p finance-api --bin finance-strategy -- compile strategies/fixtures/strategy-bundle/v1/entry-exit.yaml
@@ -174,6 +176,6 @@ plan = json.loads(subprocess.check_output([
 initial_cash = Decimal(plan["bundle"]["spec"]["portfolio"]["initial_cash"]["amount"])
 ```
 
-`plan_version` 当前为 `fertile.finance/strategy-plan/v1`。计划包含规范化的 `bundle`、两个哈希、已解析的 `inputs`、按依赖拓扑排序的 `factors`、按局部 ID 排序的 `modules`、执行模型 `execution`、按优先级与配方 ID 排序的 `sleeves` 和生效的 `conflict_rules`。
+`plan_version` 当前为 `fertile.finance/strategy-plan/v1`。计划包含规范化的 `bundle`、两个哈希、已解析的 `inputs`、按依赖拓扑排序的 `factors`、按局部 ID 排序的 `modules`、执行模型 `execution`、按优先级与配方 ID 排序的 `sleeves` 和生效的 `conflict_rules`。成功计划保留规范化配置的字段值和局部 ID，供 worker 复现完整配置。
 
 F1 对接标的主数据、稳定 `instrument_id` 与交易日历。当前 `XNYS` 和 `example.*@1.0.0` 作为不透明的已登记示例引用。F7 接入持久版本绑定、数据与成分的快照哈希、引擎提交、成本和运行区间，并将编译计划归入不可变 `run_manifest`。指标计算由 C4/F6 接入，因子评价由 F8 接入。

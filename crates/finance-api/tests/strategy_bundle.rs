@@ -1,9 +1,10 @@
 use finance_api::strategy_bundle::{
-    Availability, Catalog, CompiledPlan, Diagnostic, InputFormat, Location, MAX_BYTES,
-    MemoryBindings, bundle_schema, compile, component_registry, example_catalog,
+    Availability, Binding, BindingError, Catalog, CompiledPlan, Diagnostic, InputFormat, Location,
+    MAX_BYTES, MemoryBindings, VersionBindings, bundle_schema, compile, component_registry,
+    example_catalog,
 };
 use serde_json::Value;
-use std::{fs, path::Path};
+use std::{ffi::OsStr, fs, path::Path, process::Command};
 
 macro_rules! fixture {
     ($name:literal) => {
@@ -16,6 +17,9 @@ macro_rules! fixture {
 
 const ENTRY_EXIT: &str = fixture!("entry-exit.yaml");
 const TARGET_WEIGHTS: &str = fixture!("target-weights.yaml");
+const PRIVATE_MARKER: &str = "synthprivatetoken";
+const PRIVATE_NUMBER: &str = "927561734286153592";
+const PRIVATE_BUDGET_DIGITS: &str = "27561734286153592";
 
 fn compile_yaml(source: &str) -> Result<CompiledPlan<'static>, Diagnostic> {
     compile(
@@ -32,7 +36,7 @@ fn assert_diagnostic(
     code: &str,
     path: &str,
     at: &str,
-) {
+) -> Diagnostic {
     let error = result.expect_err(code);
     assert_eq!(error.code, code, "{error}");
     assert_eq!(error.path, path, "{error}");
@@ -41,6 +45,60 @@ fn assert_diagnostic(
     let line = before.bytes().filter(|byte| *byte == b'\n').count() + 1;
     let column = before.rsplit('\n').next().unwrap().chars().count() + 1;
     assert_eq!(error.location, Location { line, column }, "{error}");
+    error
+}
+
+fn assert_private_text_absent(output: &str, private: &[&str]) {
+    for text in private {
+        assert!(!output.contains(text), "diagnostic exposed synthetic input");
+    }
+}
+
+fn assert_redacted_diagnostic(error: &Diagnostic, private: &[&str]) {
+    for rendering in [
+        serde_json::to_string(error).unwrap(),
+        error.to_string(),
+        format!("{error:?}"),
+    ] {
+        assert_private_text_absent(&rendering, private);
+    }
+}
+
+fn assert_redacted_compile_failure(
+    file: &Path,
+    source: &str,
+    format: InputFormat,
+    expected: (&str, &str, &str),
+    private: &[&str],
+) {
+    let (code, path, at) = expected;
+    let result = compile(
+        source.as_bytes(),
+        format,
+        &example_catalog(),
+        &mut MemoryBindings::default(),
+    );
+    let error = assert_diagnostic(result, source, code, path, at);
+    assert_redacted_diagnostic(&error, private);
+
+    fs::write(file, source).unwrap();
+    let format = match format {
+        InputFormat::Yaml => "yaml",
+        InputFormat::Json => "json",
+    };
+    let output = Command::new(env!("CARGO_BIN_EXE_finance-strategy"))
+        .args(["compile", "--format", format])
+        .arg(file)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let diagnostic = std::str::from_utf8(&output.stderr).unwrap();
+    assert_private_text_absent(diagnostic, private);
+    assert_eq!(
+        serde_json::from_str::<Value>(diagnostic).unwrap(),
+        serde_json::to_value(error).unwrap()
+    );
 }
 
 #[test]
@@ -94,35 +152,35 @@ fn reports_closed_structure_types_and_parameter_bounds_at_yaml_values() {
             "timeframe: 1d",
             "timeframe: 1d\n    unexpected: value",
             "UNKNOWN_FIELD",
-            "/spec/data/unexpected",
+            "/spec/data/<key>",
             "value\n    price_basis",
         ),
         (
             "lookback_sessions: 20",
             "lookback_sessions: 2521",
             "OUT_OF_RANGE",
-            "/spec/factors/mom20/params/lookback_sessions",
+            "/spec/factors/<key>/params/lookback_sessions",
             "2521}",
         ),
         (
             "lookback_sessions: 20",
             "lookback_sessions: 20, expression: ignored",
             "UNKNOWN_FIELD",
-            "/spec/factors/mom20/params/expression",
+            "/spec/factors/<key>/params/<key>",
             "ignored}",
         ),
         (
             "threshold: \"0.02\"",
             "threshold: \"2e-2\"",
             "INVALID_VALUE",
-            "/spec/modules/A1/params/threshold",
+            "/spec/modules/<key>/params/threshold",
             "\"2e-2\"",
         ),
         (
             "threshold: \"0.02\"",
             "threshold: 0.02",
             "TYPE_MISMATCH",
-            "/spec/modules/A1/params/threshold",
+            "/spec/modules/<key>/params/threshold",
             "0.02}",
         ),
         (
@@ -149,7 +207,7 @@ fn recipe_branches_reject_each_others_fields() {
         compile_yaml(&source),
         &source,
         "UNKNOWN_FIELD",
-        "/spec/recipes/A/allocator",
+        "/spec/recipes/<key>/allocator",
         "Extra,",
     );
     for field in ["entry", "exit", "sizing"] {
@@ -162,7 +220,7 @@ fn recipe_branches_reject_each_others_fields() {
             compile_yaml(&source),
             &source,
             "UNKNOWN_FIELD",
-            &format!("/spec/recipes/topFive/{field}"),
+            &format!("/spec/recipes/<key>/{field}"),
             "Extra\n",
         );
     }
@@ -175,35 +233,35 @@ fn reports_bad_references_slots_cycles_budget_warmup_and_cash_constraints() {
             "factor.close_return@1.0.0",
             "factor.close_return@9.0.0",
             "UNKNOWN_COMPONENT",
-            "/spec/factors/mom20/use",
+            "/spec/factors/<key>/use",
             "\"factor.close_return@9.0.0\"",
         ),
         (
             "entry: A1, exit: A2",
             "entry: A2, exit: A2",
             "SLOT_MISMATCH",
-            "/spec/recipes/A/entry",
+            "/spec/recipes/<key>/entry",
             "A2, exit: A2",
         ),
         (
             "entry: A1, exit: A2",
             "entry: Missing, exit: A2",
             "UNKNOWN_MODULE",
-            "/spec/recipes/A/entry",
+            "/spec/recipes/<key>/entry",
             "Missing, exit: A2",
         ),
         (
             "factor: mom20, threshold",
             "factor: absent, threshold",
             "UNKNOWN_FACTOR",
-            "/spec/modules/A1/params/factor",
+            "/spec/modules/<key>/params/factor",
             "absent, threshold",
         ),
         (
             "params: {lookback_sessions: 20}",
             "params: {lookback_sessions: 20}\n      depends_on: [mom20]",
             "DEPENDENCY_CYCLE",
-            "/spec/factors/mom20/depends_on/0",
+            "/spec/factors/<key>/depends_on/0",
             "mom20]\n",
         ),
         (
@@ -231,7 +289,7 @@ fn reports_bad_references_slots_cycles_budget_warmup_and_cash_constraints() {
             "allow_borrow: false",
             "allow_borrow: true",
             "UNSUPPORTED_SHORT",
-            "/spec/modules/R1/params/allow_borrow",
+            "/spec/modules/<key>/params/allow_borrow",
             "true}\n\n  recipes",
         ),
         (
@@ -442,12 +500,22 @@ fn binds_validated_versions_and_accepts_the_same_canonical_content_as_json() {
     assert_ne!(first.source_sha256, json.source_sha256);
 
     let changed = ENTRY_EXIT.replacen("\"0.02\"", "\"0.03\"", 1);
-    assert_diagnostic(
+    let conflict = assert_diagnostic(
         compile_bound(&changed, InputFormat::Yaml),
         &changed,
         "VERSION_CONFLICT",
         "/metadata/version",
         "\"1.0.0\"",
+    );
+    let changed_plan = compile_yaml(&changed).unwrap();
+    assert_redacted_diagnostic(
+        &conflict,
+        &[
+            &first.content_sha256,
+            &first.source_sha256,
+            &changed_plan.content_sha256,
+            &changed_plan.source_sha256,
+        ],
     );
     let new_version = changed.replacen("version: \"1.0.0\"", "version: \"1.0.1\"", 1);
     assert_ne!(
@@ -489,12 +557,209 @@ fn documented_entry_exit_example_is_the_test_fixture() {
 }
 
 #[test]
+fn redacts_input_fields_references_and_numbers_in_library_and_cli_failures() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("strategy.yaml");
+    for (before, after, code, path, at) in [
+        (
+            "calendar: XNYS",
+            "calendar: synthprivatetoken.calendar",
+            "UNKNOWN_CATALOG_REF",
+            "/spec/clock/calendar",
+            "synthprivatetoken.calendar",
+        ),
+        (
+            "example.us-cash-equities@1.0.0",
+            "synthprivatetoken.universe@7.3.9",
+            "UNKNOWN_CATALOG_REF",
+            "/spec/universe/ref",
+            "\"synthprivatetoken.universe@7.3.9\"",
+        ),
+        (
+            "example.reviewed-us-daily@1.0.0",
+            "synthprivatetoken.bars@7.3.9",
+            "UNKNOWN_CATALOG_REF",
+            "/spec/data/bars",
+            "\"synthprivatetoken.bars@7.3.9\"",
+        ),
+        (
+            "mom20:\n      use: \"factor.close_return@1.0.0\"",
+            "synthprivatetoken:\n      use: \"factor.synthprivatetoken@7.3.9\"",
+            "UNKNOWN_COMPONENT",
+            "/spec/factors/<key>/use",
+            "\"factor.synthprivatetoken@7.3.9\"",
+        ),
+        (
+            "factor: mom20, threshold",
+            "factor: synthprivatetoken, threshold",
+            "UNKNOWN_FACTOR",
+            "/spec/modules/<key>/params/factor",
+            "synthprivatetoken, threshold",
+        ),
+        (
+            "A:     {type: entry_exit, entry: A1, exit: A2",
+            "synthprivatetoken: {type: entry_exit, entry: synthprivatetoken, exit: A2",
+            "UNKNOWN_MODULE",
+            "/spec/recipes/<key>/entry",
+            "synthprivatetoken, exit: A2",
+        ),
+        (
+            "recipe: A1_B2,",
+            "recipe: synthprivatetoken,",
+            "UNKNOWN_RECIPE",
+            "/spec/portfolio/sleeves/0/recipe",
+            "synthprivatetoken,",
+        ),
+        (
+            "params: {lookback_sessions: 20}",
+            "params: {lookback_sessions: 20, \"synthprivatetoken~/\\u0085\": synthprivatetoken}",
+            "UNKNOWN_FIELD",
+            "/spec/factors/<key>/params/<key>",
+            "synthprivatetoken}",
+        ),
+    ] {
+        let source = ENTRY_EXIT.replacen(before, after, 1);
+        assert_redacted_compile_failure(
+            &file,
+            &source,
+            InputFormat::Yaml,
+            (code, path, at),
+            &[PRIVATE_MARKER, r"\u0085"],
+        );
+    }
+
+    let source = ENTRY_EXIT.replacen(
+        "warmup_sessions: 30",
+        &format!("warmup_sessions: {PRIVATE_NUMBER}"),
+        1,
+    );
+    assert_redacted_compile_failure(
+        &file,
+        &source,
+        InputFormat::Yaml,
+        (
+            "OUT_OF_RANGE",
+            "/spec/clock/warmup_sessions",
+            PRIVATE_NUMBER,
+        ),
+        &[PRIVATE_NUMBER],
+    );
+
+    let source = ENTRY_EXIT.replacen(
+        "budget_weight: \"1.00\", priority: 10}",
+        "budget_weight: \"0.7\", priority: 10}\n      - {recipe: B, budget_weight: \"0.827561734286153592\", priority: 5}",
+        1,
+    );
+    assert_redacted_compile_failure(
+        &file,
+        &source,
+        InputFormat::Yaml,
+        (
+            "BUDGET_EXCEEDED",
+            "/spec/portfolio/sleeves/1/budget_weight",
+            "\"0.827561734286153592\"",
+        ),
+        &[PRIVATE_BUDGET_DIGITS],
+    );
+}
+
+#[test]
+fn redacts_parser_errors_before_schema_validation() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("strategy");
+    for (source, format, code, path, at) in [
+        (
+            "spec:\n  \"synthprivatetoken~/\\u001b\":\n    id: synthprivatetoken-first\n    id: synthprivatetoken-second\n",
+            InputFormat::Yaml,
+            "DUPLICATE_KEY",
+            "/spec/<key>/<key>",
+            "id: synthprivatetoken-second",
+        ),
+        (
+            "spec:\n  portfolio:\n    sleeves:\n      \"927561734286153592\": synthprivatetoken-first\n      \"927561734286153592\": synthprivatetoken-second\n",
+            InputFormat::Yaml,
+            "DUPLICATE_KEY",
+            "/spec/portfolio/sleeves/<key>",
+            "\"927561734286153592\": synthprivatetoken-second",
+        ),
+        (
+            r#"{"spec":{"portfolio":{"sleeves":[{"927561734286153592":"synthprivatetoken","927561734286153592":2}]}}}"#,
+            InputFormat::Json,
+            "DUPLICATE_KEY",
+            "/spec/portfolio/sleeves/0/<key>",
+            r#""927561734286153592":2"#,
+        ),
+        (
+            r#"{"metadata":{"synthprivatetoken~/\u0085":1,"synthprivatetoken~/\u0085": 2}}"#,
+            InputFormat::Json,
+            "DUPLICATE_KEY",
+            "/metadata/<key>",
+            r#""synthprivatetoken~/\u0085": 2"#,
+        ),
+        (
+            "metadata:\n  title: \"synthprivatetoken \\q\"\n",
+            InputFormat::Yaml,
+            "YAML_SYNTAX",
+            "/metadata/title",
+            "\\q\"",
+        ),
+        (
+            r#"{"metadata":{"title": synthprivatetoken}}"#,
+            InputFormat::Json,
+            "JSON_SYNTAX",
+            "/metadata/title",
+            "synthprivatetoken",
+        ),
+        (
+            r#"{"metadata":{"$ref":"https://synthprivatetoken.invalid"}}"#,
+            InputFormat::Json,
+            "EXTERNAL_REFERENCE",
+            "/metadata/<key>",
+            r#""$ref""#,
+        ),
+    ] {
+        assert_redacted_compile_failure(
+            &file,
+            source,
+            format,
+            (code, path, at),
+            &[PRIVATE_MARKER, PRIVATE_NUMBER, r"\u001b", r"\u0085"],
+        );
+    }
+}
+
+#[test]
+fn binding_backend_error_text_stays_out_of_the_public_diagnostic() {
+    struct BackendWithPrivateError;
+
+    impl VersionBindings for BackendWithPrivateError {
+        fn bind(&mut self, _: &str, _: &str, _: &str) -> Result<Binding, BindingError> {
+            Err(std::io::Error::other(PRIVATE_MARKER).into())
+        }
+    }
+
+    let error = assert_diagnostic(
+        compile(
+            ENTRY_EXIT.as_bytes(),
+            InputFormat::Yaml,
+            &example_catalog(),
+            &mut BackendWithPrivateError,
+        ),
+        ENTRY_EXIT,
+        "BINDING_FAILED",
+        "/metadata/version",
+        "\"1.0.0\"",
+    );
+    assert_redacted_diagnostic(&error, &[PRIVATE_MARKER]);
+}
+
+#[test]
 fn cli_outputs_plan_json_and_preserves_bindings_across_invocations() {
     let directory = tempfile::tempdir().unwrap();
     let config = directory.path().join("strategy.yaml");
     let bindings = directory.path().join("versions.sqlite3");
     let run = || {
-        std::process::Command::new(env!("CARGO_BIN_EXE_finance-strategy"))
+        Command::new(env!("CARGO_BIN_EXE_finance-strategy"))
             .args(["compile", "--bindings"])
             .arg(&bindings)
             .arg(&config)
@@ -513,11 +778,49 @@ fn cli_outputs_plan_json_and_preserves_bindings_across_invocations() {
     );
     assert_eq!(run().stdout, first.stdout);
 
-    fs::write(&config, ENTRY_EXIT.replacen("\"0.02\"", "\"0.03\"", 1)).unwrap();
+    let changed = ENTRY_EXIT.replacen("\"0.02\"", "\"0.03\"", 1).replacen(
+        "title: \"日线动量入场与持有期退出\"",
+        &format!("title: \"{PRIVATE_MARKER}\""),
+        1,
+    );
+    fs::write(&config, &changed).unwrap();
     let conflict = run();
     assert_eq!(conflict.status.code(), Some(2));
     assert!(conflict.stdout.is_empty());
-    let diagnostic: Value = serde_json::from_slice(&conflict.stderr).unwrap();
+    let changed_plan = compile_yaml(&changed).unwrap();
+    let private = [
+        PRIVATE_MARKER,
+        expected["content_sha256"].as_str().unwrap(),
+        expected["source_sha256"].as_str().unwrap(),
+        &changed_plan.content_sha256,
+        &changed_plan.source_sha256,
+    ];
+    let stderr = std::str::from_utf8(&conflict.stderr).unwrap();
+    assert_private_text_absent(stderr, &private);
+    let diagnostic: Value = serde_json::from_str(stderr).unwrap();
     assert_eq!(diagnostic["path"], "/metadata/version");
     assert_eq!(diagnostic["code"], "VERSION_CONFLICT");
+}
+
+#[test]
+fn cli_setup_errors_omit_local_file_and_binding_paths() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("strategy.yaml");
+    let missing_parent = directory.path().join(PRIVATE_MARKER);
+    let bindings = missing_parent.join("versions.sqlite3");
+    fs::write(&config, ENTRY_EXIT).unwrap();
+    let binding_path = bindings.as_os_str();
+    let binding_options = [OsStr::new("--bindings"), binding_path, config.as_os_str()];
+    for options in [&[binding_path][..], &binding_options[..]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_finance-strategy"))
+            .arg("compile")
+            .args(options)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        let diagnostic = std::str::from_utf8(&output.stderr).unwrap();
+        assert!(!diagnostic.trim().is_empty());
+        assert_private_text_absent(diagnostic, &[PRIVATE_MARKER]);
+    }
 }

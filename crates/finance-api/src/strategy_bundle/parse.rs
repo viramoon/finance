@@ -1,7 +1,6 @@
-use super::{Diagnostic, Location, child_path};
+use super::{Diagnostic, Location, PathSegment, redacted_path};
 use serde_json::{Map, Number, Value};
 use std::collections::BTreeMap;
-use std::ffi::CStr;
 use std::mem::MaybeUninit;
 use std::{slice, str};
 
@@ -42,22 +41,37 @@ impl Parsed {
         }
     }
 
-    pub(super) fn location(&self, pointer: &str) -> Location {
-        let mut node = &self.positions;
+    pub(super) fn diagnostic_location(&self, pointer: &str) -> (String, Location) {
+        let mut node = Some(&self.positions);
+        let mut location = self.positions.location;
+        let mut path = Vec::new();
         for segment in pointer.split('/').skip(1) {
-            let child = match &node.children {
-                Children::None => None,
-                Children::Object(fields) => {
-                    fields.get(&segment.replace("~1", "/").replace("~0", "~"))
+            let key = segment.replace("~1", "/").replace("~0", "~");
+            let (next, child) = match node.map(|node| &node.children) {
+                Some(Children::Array(items)) => {
+                    let item = key
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|index| index.to_string() == key)
+                        .and_then(|index| items.get(index).map(|item| (index, item)));
+                    match item {
+                        Some((index, item)) => (PathSegment::Index(index), Some(item)),
+                        None => (PathSegment::Key(key), None),
+                    }
                 }
-                Children::Array(items) => segment.parse::<usize>().ok().and_then(|i| items.get(i)),
+                Some(Children::Object(fields)) => {
+                    let child = fields.get(&key);
+                    (PathSegment::Key(key), child)
+                }
+                _ => (PathSegment::Key(key), None),
             };
-            match child {
-                Some(child) => node = child,
-                None => break,
+            path.push(next);
+            node = child;
+            if let Some(child) = child {
+                location = child.location;
             }
         }
-        node.location
+        (redacted_path(&path), location)
     }
 }
 
@@ -92,7 +106,7 @@ pub(super) fn parse(bytes: &[u8], format: InputFormat) -> Result<Parsed, Diagnos
 
 #[derive(Default)]
 struct State {
-    path: Vec<String>,
+    path: Vec<PathSegment>,
     nodes: usize,
 }
 
@@ -103,12 +117,8 @@ impl State {
         message: impl Into<String>,
         location: Location,
     ) -> Diagnostic {
-        let path = self
-            .path
-            .iter()
-            .fold(String::new(), |parent, key| child_path(&parent, key));
         Diagnostic {
-            path,
+            path: redacted_path(&self.path),
             code,
             message: message.into(),
             location,
@@ -276,7 +286,7 @@ impl<'a> JsonParser<'a> {
                 let Value::String(key) = self.scalar()? else {
                     unreachable!("double-quoted JSON scalar is a string")
                 };
-                self.state.path.push(key.clone());
+                self.state.path.push(PathSegment::Key(key.clone()));
                 self.state.check_key(&key, key_location, &values)?;
                 self.need(b':')?;
                 let child = self.node()?;
@@ -302,7 +312,7 @@ impl<'a> JsonParser<'a> {
         self.advance(1);
         if !self.eat(b']') {
             loop {
-                self.state.path.push(values.len().to_string());
+                self.state.path.push(PathSegment::Index(values.len()));
                 let child = self.node()?;
                 self.state.path.pop();
                 values.push(child.value);
@@ -348,10 +358,11 @@ impl<'a> JsonParser<'a> {
                     end -= 1;
                 }
                 position.advance(&self.rest[..end]);
-                let description = error.to_string();
-                let message = description
-                    .rsplit_once(" at line ")
-                    .map_or(description.as_str(), |(message, _)| message);
+                let message = if error.is_eof() {
+                    "Unexpected end of input while decoding a JSON scalar"
+                } else {
+                    "Invalid JSON scalar"
+                };
                 Err(self.state.error("JSON_SYNTAX", message, position.location))
             }
         }
@@ -459,7 +470,7 @@ impl<'a> YamlParser<'a> {
                     key_event.location,
                 ));
             };
-            self.state.path.push(text.clone());
+            self.state.path.push(PathSegment::Key(text.clone()));
             key_event.check_properties(&self.state)?;
             let key = match yaml_scalar(text.clone(), *plain) {
                 Ok(Value::String(value)) => value,
@@ -489,7 +500,7 @@ impl<'a> YamlParser<'a> {
         let mut values = Vec::new();
         let mut positions = Vec::new();
         loop {
-            self.state.path.push(values.len().to_string());
+            self.state.path.push(PathSegment::Index(values.len()));
             let event = self.events.next(&self.state)?;
             if event.kind == YamlKind::SequenceEnd {
                 self.state.path.pop();
@@ -600,14 +611,12 @@ impl<'a> YamlEvents<'a> {
     }
 
     fn error(&self, state: &State) -> Diagnostic {
-        // SAFETY: the parser is live, and a parser problem points to a NUL-terminated string.
+        // SAFETY: the parser is live and initialized.
         let parser = unsafe { self.parser.assume_init_ref() };
-        let message = if parser.problem.is_null() {
-            "Malformed YAML".into()
-        } else {
-            unsafe { CStr::from_ptr(parser.problem) }
-                .to_string_lossy()
-                .into_owned()
+        let message = match parser.error {
+            unsafe_libyaml::YAML_READER_ERROR => "Invalid character in YAML input",
+            unsafe_libyaml::YAML_SCANNER_ERROR => "Invalid YAML token",
+            _ => "Malformed YAML document",
         };
         let location = if parser.error == unsafe_libyaml::YAML_READER_ERROR {
             let mut position = TextPosition::new();
@@ -846,7 +855,7 @@ mod tests {
         assert_eq!(yaml.value, json!({"s": ["yes", "off", "2026-11-26"]}));
         let error = parse(b"s: .inf", InputFormat::Yaml).unwrap_err();
         assert_eq!(error.code, "YAML_SYNTAX");
-        assert_eq!(error.path, "/s");
+        assert_eq!(error.path, "/<key>");
         assert_eq!(error.message, "Non-finite YAML numbers are not supported");
     }
 
@@ -864,7 +873,7 @@ mod tests {
         ] {
             let error = parse(source.as_bytes(), format).unwrap_err();
             assert_eq!(error.code, "DUPLICATE_KEY");
-            assert_eq!(error.path, "/nested/a~0~1b");
+            assert_eq!(error.path, "/<key>/<key>");
             assert_eq!(error.location, Location { line: 3, column: 3 });
         }
     }
@@ -876,31 +885,78 @@ mod tests {
             InputFormat::Yaml,
         )
         .unwrap();
-        assert_eq!(parsed.location("/描述/0"), Location { line: 2, column: 5 });
         assert_eq!(
-            parsed.location("/描述/1/a~1b"),
-            Location {
-                line: 3,
-                column: 13
-            }
+            parsed.diagnostic_location("/描述/0"),
+            ("/<key>/0".to_owned(), Location { line: 2, column: 5 })
         );
         assert_eq!(
-            parsed.location("/描述/1/a~1b/missing"),
-            parsed.location("/描述/1/a~1b")
+            parsed.diagnostic_location("/描述/1/a~1b"),
+            (
+                "/<key>/1/<key>".to_owned(),
+                Location {
+                    line: 3,
+                    column: 13
+                }
+            )
+        );
+        assert_eq!(
+            parsed.diagnostic_location("/描述/1/a~1b/missing"),
+            (
+                "/<key>/1/<key>/<key>".to_owned(),
+                parsed.diagnostic_location("/描述/1/a~1b").1
+            )
         );
         let parsed = parse(br#"{"a":"\uD83D\uDE00"}"#, InputFormat::Json).unwrap();
         assert_eq!(parsed.value, json!({"a": "😀"}));
-        assert_eq!(parsed.location("/a"), Location { line: 1, column: 6 });
+        assert_eq!(
+            parsed.diagnostic_location("/a"),
+            ("/<key>".to_owned(), Location { line: 1, column: 6 })
+        );
+    }
+
+    #[test]
+    fn numeric_object_keys_are_never_rendered_as_array_indices() {
+        let pointer = "/spec/portfolio/sleeves/987654321";
+        let parsed = parse(
+            b"spec:\n  portfolio:\n    sleeves:\n      \"987654321\": hidden\n",
+            InputFormat::Yaml,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.diagnostic_location(pointer),
+            (
+                "/spec/portfolio/sleeves/<key>".to_owned(),
+                Location {
+                    line: 4,
+                    column: 20
+                }
+            )
+        );
+        let parsed = parse(
+            b"spec:\n  portfolio:\n    sleeves: [hidden]\n",
+            InputFormat::Yaml,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.diagnostic_location(pointer),
+            (
+                "/spec/portfolio/sleeves/<key>".to_owned(),
+                Location {
+                    line: 3,
+                    column: 14
+                }
+            )
+        );
     }
 
     #[test]
     fn yaml_rejects_graphs_tags_reference_directives_and_extra_documents() {
         for (input, expected_code, expected_path) in [
-            ("v: *link", "YAML_ALIAS", "/v"),
-            ("v: [&link 1]", "YAML_ANCHOR", "/v/0"),
-            ("v: !loader [1]", "YAML_TAG", "/v"),
-            ("v: !!str 1", "YAML_TAG", "/v"),
-            ("v: ! 1", "YAML_TAG", "/v"),
+            ("v: *link", "YAML_ALIAS", "/<key>"),
+            ("v: [&link 1]", "YAML_ANCHOR", "/<key>/0"),
+            ("v: !loader [1]", "YAML_TAG", "/<key>"),
+            ("v: !!str 1", "YAML_TAG", "/<key>"),
+            ("v: ! 1", "YAML_TAG", "/<key>"),
             (
                 "%TAG !doc! tag:example.org,2026:\n---\nv: 1\n",
                 "YAML_TAG",
@@ -909,17 +965,17 @@ mod tests {
             (
                 "v:\n  $ref: file:///tmp/input\n",
                 "EXTERNAL_REFERENCE",
-                "/v/$ref",
+                "/<key>/<key>",
             ),
             (
                 "v:\n  <<: {external: data}\n",
                 "EXTERNAL_REFERENCE",
-                "/v/<<",
+                "/<key>/<key>",
             ),
             ("v: 1\n---\nv: 2\n", "MULTIPLE_DOCUMENTS", ""),
             ("v: 1\n...\n---\n", "MULTIPLE_DOCUMENTS", ""),
             ("? [abc]\n: false\n", "NON_STRING_KEY", ""),
-            ("v:\n  true: value\n", "NON_STRING_KEY", "/v/true"),
+            ("v:\n  true: value\n", "NON_STRING_KEY", "/<key>/<key>"),
         ] {
             let error = parse(input.as_bytes(), InputFormat::Yaml).unwrap_err();
             assert_eq!(error.code, expected_code, "{input}");
@@ -953,10 +1009,10 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code, "EXTERNAL_REFERENCE");
-        assert_eq!(error.path, "/nested/$dynamicRef");
+        assert_eq!(error.path, "/<key>/<key>");
         let error = parse(b"{\n  \"nested\": [\"\\q\"]\n}", InputFormat::Json).unwrap_err();
         assert_eq!(error.code, "JSON_SYNTAX");
-        assert_eq!(error.path, "/nested/0");
+        assert_eq!(error.path, "/<key>/0");
         assert_eq!(
             error.location,
             Location {
@@ -964,7 +1020,49 @@ mod tests {
                 column: 16
             }
         );
-        assert_eq!(error.message, "invalid escape");
+        assert_eq!(error.message, "Invalid JSON scalar");
+    }
+
+    #[test]
+    fn malformed_input_diagnostics_keep_locations_without_payload() {
+        let marker = "fixture-raw-payload";
+        let yaml = format!(r#""{marker}\q""#);
+        let error = parse(yaml.as_bytes(), InputFormat::Yaml).unwrap_err();
+        assert_eq!(error.code, "YAML_SYNTAX");
+        assert_eq!(error.path, "");
+        assert_eq!(error.message, "Invalid YAML token");
+        assert_eq!(
+            error.location,
+            Location {
+                line: 1,
+                column: marker.len() + 2
+            }
+        );
+        assert!(!serde_json::to_string(&error).unwrap().contains(marker));
+
+        let json = format!("{{\n  \"{marker}\": [\"{marker}\\q\"]\n}}");
+        let error = parse(json.as_bytes(), InputFormat::Json).unwrap_err();
+        assert_eq!(error.code, "JSON_SYNTAX");
+        assert_eq!(error.path, "/<key>/0");
+        assert_eq!(error.message, "Invalid JSON scalar");
+        assert_eq!(
+            error.location,
+            Location {
+                line: 2,
+                column: 2 * marker.len() + 10
+            }
+        );
+        assert!(!serde_json::to_string(&error).unwrap().contains(marker));
+
+        let mut invalid_encoding = format!(r#"{{"{marker}":""#).into_bytes();
+        let column = invalid_encoding.len() + 1;
+        invalid_encoding.push(0xff);
+        let error = parse(&invalid_encoding, InputFormat::Json).unwrap_err();
+        assert_eq!(error.code, "INVALID_UTF8");
+        assert_eq!(error.path, "");
+        assert_eq!(error.message, "Strategy input must be UTF-8");
+        assert_eq!(error.location, Location { line: 1, column });
+        assert!(!serde_json::to_string(&error).unwrap().contains(marker));
     }
 
     #[test]

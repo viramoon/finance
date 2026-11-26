@@ -134,22 +134,20 @@ pub fn compile<'a>(
             string(&metadata["version"]),
             &content_sha256,
         )
-        .map_err(|error| {
+        .map_err(|_| {
             diagnostic(
                 &parsed,
                 "/metadata/version",
                 "BINDING_FAILED",
-                format!("Could not bind the strategy version: {error}"),
+                "Could not store the strategy version binding.",
             )
         })?;
-    if let Binding::Conflict { existing_sha256 } = binding {
+    if matches!(binding, Binding::Conflict { .. }) {
         return Err(diagnostic(
             &parsed,
             "/metadata/version",
             "VERSION_CONFLICT",
-            format!(
-                "This strategy ID and version are bound to {existing_sha256}. This bundle has hash {content_sha256}. Choose a new version to change the content."
-            ),
+            "Different content is already bound to this strategy ID and version. Choose a new version to change the content.",
         ));
     }
 
@@ -202,7 +200,7 @@ fn resolve_inputs<'a>(
             parsed,
             "/spec/clock/calendar",
             "UNKNOWN_CATALOG_REF",
-            format!("Calendar {calendar} is not registered."),
+            "The calendar reference must identify a registered calendar.",
         ));
     }
     let universe_id = string(&spec["universe"]["ref"]);
@@ -216,7 +214,7 @@ fn resolve_inputs<'a>(
                 parsed,
                 "/spec/universe/ref",
                 "UNKNOWN_CATALOG_REF",
-                format!("Universe {universe_id} is not registered."),
+                "The universe reference must identify a registered universe.",
             )
         })?;
     let bars_id = string(&spec["data"]["bars"]);
@@ -230,7 +228,7 @@ fn resolve_inputs<'a>(
                 parsed,
                 "/spec/data/bars",
                 "UNKNOWN_CATALOG_REF",
-                format!("Bar series {bars_id} is not registered."),
+                "The bar reference must identify a registered bar series.",
             )
         })?;
     for (path, actual) in [
@@ -242,7 +240,7 @@ fn resolve_inputs<'a>(
                 parsed,
                 path,
                 "INCOMPATIBLE_CALENDAR",
-                format!("Registered calendar {actual} differs from decision calendar {calendar}."),
+                "The registered input must use the decision calendar.",
             ));
         }
     }
@@ -252,10 +250,7 @@ fn resolve_inputs<'a>(
             parsed,
             "/spec/data/currency",
             "INCOMPATIBLE_CURRENCY",
-            format!(
-                "The cash equity engine requires USD. Registered universe currency is {} and bar currency is {}.",
-                universe.currency, bars.currency
-            ),
+            "The cash equity engine requires USD for the data currency, registered universe, and registered bar series.",
         ));
     }
     if spec["portfolio"]["initial_cash"]["currency"] != currency {
@@ -263,7 +258,7 @@ fn resolve_inputs<'a>(
             parsed,
             "/spec/portfolio/initial_cash/currency",
             "INCOMPATIBLE_CURRENCY",
-            format!("Initial cash must use the bar currency {currency}."),
+            "Initial cash must use the bar currency.",
         ));
     }
     if universe.asset != bars.asset {
@@ -271,10 +266,7 @@ fn resolve_inputs<'a>(
             parsed,
             "/spec/data/bars",
             "INCOMPATIBLE_ASSET",
-            format!(
-                "Bar asset {} differs from the universe asset {}.",
-                bars.asset, universe.asset
-            ),
+            "The bar series and universe must declare the same asset type.",
         ));
     }
     if !universe.point_in_time {
@@ -306,7 +298,7 @@ fn resolve_inputs<'a>(
                 parsed,
                 &child_path("/spec/data", field),
                 "INCOMPATIBLE_DATA",
-                format!("This bar series is registered with {field} {actual}."),
+                "The configured value must match the bar series registration.",
             ));
         }
     }
@@ -324,9 +316,7 @@ fn check_availability(
             parsed,
             path,
             "FUTURE_DATA",
-            format!(
-                "Input is available at {available_at:?}, after the {deadline:?} cutoff for this session."
-            ),
+            "The input becomes available after the required session cutoff.",
         ));
     }
     Ok(())
@@ -344,7 +334,7 @@ fn registered(
             parsed,
             path,
             "UNKNOWN_COMPONENT",
-            format!("Component {id} is not registered at this version."),
+            "The component reference must identify a registered component and version.",
         )
     })?;
     if !definition.engines.contains(&engine) || !definition.assets.contains(&asset) {
@@ -352,7 +342,7 @@ fn registered(
             parsed,
             path,
             "INCOMPATIBLE_COMPONENT",
-            format!("Component {id} does not support {asset} on engine {engine}."),
+            "The selected component must support the configured asset type and engine.",
         ));
     }
     if definition.supports_short {
@@ -360,18 +350,18 @@ fn registered(
             parsed,
             path,
             "UNSUPPORTED_SHORT",
-            format!("Component {id} can introduce short exposure in the long-only cash engine."),
+            "The selected component can introduce short exposure in the long-only cash engine.",
         ));
     }
     Ok(definition)
 }
 
-fn slot_mismatch(parsed: &Parsed, path: &str, actual: &str, expected: &str) -> Diagnostic {
+fn slot_mismatch(parsed: &Parsed, path: &str) -> Diagnostic {
     diagnostic(
         parsed,
         path,
         "SLOT_MISMATCH",
-        format!("Expected {expected}, found component of kind {actual}."),
+        "The referenced component kind does not match this slot.",
     )
 }
 
@@ -390,12 +380,7 @@ fn resolve_factors(
         let use_path = child_path(&path, "use");
         let definition = registered(parsed, &use_path, string(&value["use"]), engine, asset)?;
         if !matches!(definition.kind, "factor" | "indicator") {
-            return Err(slot_mismatch(
-                parsed,
-                &use_path,
-                definition.kind,
-                "factor or indicator",
-            ));
+            return Err(slot_mismatch(parsed, &use_path));
         }
         let mut dependencies = BTreeSet::new();
         for (index, dependency) in value["depends_on"]
@@ -411,7 +396,7 @@ fn resolve_factors(
                     parsed,
                     &dependency_path,
                     "UNKNOWN_FACTOR",
-                    format!("Factor {dependency} is not defined in spec.factors."),
+                    "The factor reference must identify a factor in spec.factors.",
                 ));
             }
             if !dependencies.insert(dependency) {
@@ -419,7 +404,7 @@ fn resolve_factors(
                     parsed,
                     &dependency_path,
                     "DUPLICATE_REFERENCE",
-                    format!("Factor {dependency} is already listed as a dependency."),
+                    "Each factor may appear once in a dependency list.",
                 ));
             }
         }
@@ -462,9 +447,7 @@ fn resolve_factors(
                 parsed,
                 "/spec/clock/warmup_sessions",
                 "INSUFFICIENT_WARMUP",
-                format!(
-                    "Factor {id} needs {warmup_sessions} prior sessions, with {warmup} configured."
-                ),
+                "The configured warmup must cover the prior sessions required by every factor.",
             ));
         }
         resolved.insert(id, (available_at, warmup_sessions));
@@ -511,7 +494,7 @@ fn resolve_factors(
             parsed,
             &format!("{}/depends_on/{index}", child_path("/spec/factors", id)),
             "DEPENDENCY_CYCLE",
-            format!("Factor {id} depends on {dependency} through a cycle."),
+            "The dependency creates a cycle in the factor graph.",
         ));
     }
     Ok(order)
@@ -535,7 +518,7 @@ fn resolve_modules(
         let definition = registered(parsed, &use_path, string(&module["use"]), engine, asset)?;
         let kind = string(&module["kind"]);
         if kind != definition.kind {
-            return Err(slot_mismatch(parsed, &use_path, definition.kind, kind));
+            return Err(slot_mismatch(parsed, &use_path));
         }
         let params = &module["params"];
         let mut available_at = definition.availability;
@@ -548,7 +531,7 @@ fn resolve_modules(
                     parsed,
                     &child_path(&format!("{path}/params"), parameter),
                     "UNKNOWN_FACTOR",
-                    format!("Factor {factor_id} is not defined in spec.factors."),
+                    "The factor reference must identify a factor in spec.factors.",
                 )
             })?;
             available_at = available_at.max(factor.available_at);
@@ -609,12 +592,12 @@ fn validate_recipes(parsed: &Parsed, spec: &Value) -> Result<(), Diagnostic> {
                 parsed,
                 path,
                 "UNKNOWN_MODULE",
-                format!("Module {id} is not defined in spec.modules."),
+                "The module reference must identify a module in spec.modules.",
             )
         })?;
         let kind = string(&module["kind"]);
         if kind != expected {
-            return Err(slot_mismatch(parsed, path, kind, expected));
+            return Err(slot_mismatch(parsed, path));
         }
         Ok(())
     };
@@ -635,7 +618,7 @@ fn validate_recipes(parsed: &Parsed, spec: &Value) -> Result<(), Diagnostic> {
                         parsed,
                         &reference_path,
                         "DUPLICATE_REFERENCE",
-                        format!("Module {} is already listed in {slot}.", string(reference)),
+                        "Each module may appear once in this list.",
                     ));
                 }
             }
@@ -684,7 +667,7 @@ fn validate_portfolio(parsed: &Parsed, spec: &Value) -> Result<(), Diagnostic> {
                 parsed,
                 &format!("{path}/recipe"),
                 "UNKNOWN_RECIPE",
-                format!("Recipe {recipe} is not defined in spec.recipes."),
+                "The recipe reference must identify a recipe in spec.recipes.",
             ));
         }
         if !recipes.insert(recipe) {
@@ -692,7 +675,7 @@ fn validate_portfolio(parsed: &Parsed, spec: &Value) -> Result<(), Diagnostic> {
                 parsed,
                 &format!("{path}/recipe"),
                 "DUPLICATE_REFERENCE",
-                format!("Recipe {recipe} already has a sleeve."),
+                "Each recipe may have one sleeve.",
             ));
         }
         let weight = decimal(&sleeve["budget_weight"]);
@@ -711,7 +694,7 @@ fn validate_portfolio(parsed: &Parsed, spec: &Value) -> Result<(), Diagnostic> {
                 parsed,
                 &weight_path,
                 "BUDGET_EXCEEDED",
-                format!("Sleeve budgets total {allocated}, exceeding 1."),
+                "The total of all sleeve budgets must be at most 1.",
             ));
         }
     }
@@ -734,12 +717,7 @@ fn resolve_execution(
         asset,
     )?;
     if definition.kind != "execution" {
-        return Err(slot_mismatch(
-            parsed,
-            model_path,
-            definition.kind,
-            "execution",
-        ));
+        return Err(slot_mismatch(parsed, model_path));
     }
     if definition.availability != Availability::NextSessionClose {
         return Err(diagnostic(
