@@ -141,3 +141,38 @@ class StrategyBacktestTests(unittest.TestCase):
         rsi = evaluate_indicator(bars, "indicator.rsi_wilder@1.0.0", {"period": 2, "field": "close"})
         self.assertEqual(rsi.quantize(Decimal("0.01")), Decimal("88.89"))
         self.assertIsNone(evaluate_indicator(bars[:2], "indicator.rsi_wilder@1.0.0", {"period": 2, "field": "close"}))
+
+    def test_transitive_factor_dependency_blocks_entry_until_available(self):
+        dates, assets, universe = _input(["10.00"] * 3 + ["11.00"] * 3, [10] * 6)
+        plan = _plan(("Sleeve",))
+        spec = plan["bundle"]["spec"]
+        spec["clock"]["warmup_sessions"] = 2
+        spec["modules"]["Sleeve"]["params"]["threshold"] = "-0.01"
+        close_return = "factor.close_return@1.0.0"
+        rsi = "indicator.rsi_wilder@1.0.0"
+        spec["factors"]["Sleeve"]["depends_on"] = ["intermediate"]
+        spec["factors"]["intermediate"] = {
+            "use": close_return, "params": {"lookback_sessions": 2}, "depends_on": ["rsi"],
+        }
+        spec["factors"]["rsi"] = {"use": rsi, "params": {"period": 2, "field": "close"}}
+        calls = []
+
+        def indicator(bars, reference, params):
+            window = params.get("period", params.get("lookback_sessions"))
+            calls.append((len(bars), reference, window))
+            return evaluate_indicator(bars, reference, params)
+
+        result = run_config_strategy_backtest(
+            plan=plan, assets=assets, universe=universe,
+            start=dates[2], end=dates[-1], indicator_evaluator=indicator,
+        )
+        self.assertEqual([(row["side"], row["signal_date"], row["fill_date"]) for row in result.fills], [
+            ("buy", dates[3], dates[4]),
+        ])
+        self.assertEqual([call for call in calls if call[0] <= 4], [
+            (3, rsi, 2), (4, rsi, 2), (4, close_return, 2), (4, close_return, 1),
+        ])
+        missing_factors = {(gap.date, gap.instrument_id) for gap in result.gaps if gap.kind == "missing_factor"}
+        self.assertIn((dates[2], SYMBOL), missing_factors)
+        self.assertNotIn((dates[3], SYMBOL), missing_factors)
+        self.assertIn(rsi, result.attribution[0]["components"])

@@ -41,6 +41,7 @@ def allocate(
         shares = {key: Fraction() for key in keys}
         remaining = {key: Fraction(claims[key]) for key in keys}
         available = [limit.available for limit in limits]
+        blocked_by = {}
         active = set(keys)
         while active:
             usage = [
@@ -56,10 +57,11 @@ def allocate(
                 shares[key] += increment
                 remaining[key] -= increment
             available = [capacity - step * cost for capacity, cost in zip(available, usage)]
-            blocked = {
-                key for limit, capacity in zip(limits, available) if capacity == 0 for key in limit.unit_costs
-            }
-            active.difference_update(blocked)
+            for limit, capacity in zip(limits, available):
+                if capacity == 0:
+                    for key in limit.unit_costs.keys() & active:
+                        blocked_by.setdefault(key, limit.reason)
+            active.difference_update(blocked_by)
             active = {key for key in active if remaining[key]}
 
         def consume(key, quantity):
@@ -74,8 +76,5 @@ def allocate(
                 consume(key, 1)
         for key in keys:
             if admitted[key] < claims[key]:
-                reasons[key] = next(
-                    (limit.reason for limit, cost in limits_by_claim[key] if limit.available < cost),
-                    "whole_share_rounding",
-                )
+                reasons[key] = blocked_by.get(key, "whole_share_rounding")
     return admitted, reasons

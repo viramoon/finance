@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP, localcontext
 from fractions import Fraction
-from math import ceil
 
 from .portfolio_backtest import (
     DataGap, FillSignal, OrderSide, PortfolioAsset, PortfolioConfig, Price, Quantity, ResearchError,
@@ -59,6 +58,45 @@ class _Intent:
     reason: str
 
 
+@dataclass(frozen=True)
+class _ExternalOrder:
+    quantity: int
+    price: Price
+    commission: Decimal
+
+
+@dataclass(frozen=True)
+class _ProjectedFill:
+    quantity: int
+    netted: int
+    external: int
+    close: Decimal
+    price: Decimal
+    commission: Decimal
+
+    @property
+    def cash_delta(self):
+        value = self.netted * self.close + self.external * self.price
+        return (-value if self.quantity > 0 else value) - self.commission
+
+    @property
+    def slippage(self):
+        return self.external * abs(self.price - self.close)
+
+
+def _affordable_cents(upper, feasible):
+    """Find a feasible whole-cent headroom below a failed projection."""
+    cent = Fraction(CENT)
+    low, high = 0, int(upper / cent) + 1
+    while high - low > 1:
+        midpoint = (low + high) // 2
+        if feasible(midpoint * cent):
+            low = midpoint
+        else:
+            high = midpoint
+    return low * cent
+
+
 class _CashEquityCosts(FeeModel):
     def __init__(self, execution):
         self.commission_rate = Decimal(execution["commission_bps"]) / 10_000
@@ -105,10 +143,17 @@ class _ConfiguredStrategy(_PortfolioStrategy):
             component_keys = [recipe[key] for key in ("entry", "exit", "sizing", "allocator") if key in recipe]
             component_keys += recipe["filters"] + recipe["risk"]
             components = {self.modules[key]["use"] for key in component_keys}
-            components.update(
-                self.factors[self.modules[key]["params"]["factor"]]["use"]
-                for key in component_keys if "factor" in self.modules[key]["params"]
-            )
+            factor_ids = [self.modules[key]["params"]["factor"] for key in component_keys
+                          if "factor" in self.modules[key]["params"]]
+            audited_factors = set()
+            while factor_ids:
+                factor_id = factor_ids.pop()
+                if factor_id in audited_factors:
+                    continue
+                audited_factors.add(factor_id)
+                component = self.factors[factor_id]
+                components.add(component["use"])
+                factor_ids.extend(component.get("depends_on", ()))
             self.sleeves[name] = _Sleeve(
                 recipe, Fraction(budget), row["priority"], config.initial_cash * budget,
                 min(Fraction(budget), *risk_caps) if risk_caps else Fraction(budget), cap,
@@ -138,15 +183,29 @@ class _ConfiguredStrategy(_PortfolioStrategy):
         self.factor_values.clear()
 
     def _value(self, factor, key):
-        cache_key = (factor, key)
-        if cache_key not in self.factor_values:
-            component = self.factors[factor]
-            history = self.history.get(key)
-            value = self.evaluate(history, component["use"], component["params"]) if history else None
-            if value is not None and (not isinstance(value, Decimal) or not value.is_finite()):
-                raise ResearchError("invalid_factor", "Configured indicator must return a finite Decimal or None")
+        history = self.history.get(key)
+        pending = [factor]
+        # The compiler rejects cycles. Walk the dependency graph without using
+        # the Python call stack and cache each observation for this close.
+        while pending:
+            current = pending.pop()
+            cache_key = (current, key)
+            if cache_key in self.factor_values:
+                continue
+            component = self.factors[current]
+            dependencies = component.get("depends_on", ())
+            unresolved = [dep for dep in dependencies if (dep, key) not in self.factor_values]
+            if history and unresolved:
+                pending.append(current)
+                pending.extend(reversed(unresolved))
+                continue
+            value = None
+            if history and all(self.factor_values[dep, key] is not None for dep in dependencies):
+                value = self.evaluate(history, component["use"], component["params"])
+                if value is not None and (not isinstance(value, Decimal) or not value.is_finite()):
+                    raise ResearchError("invalid_factor", "Configured indicator must return a finite Decimal or None")
             self.factor_values[cache_key] = value
-        return self.factor_values[cache_key]
+        return self.factor_values[factor, key]
 
     def _filter_allows(self, recipe, bar):
         return bar is not None and all(
@@ -314,33 +373,179 @@ class _ConfiguredStrategy(_PortfolioStrategy):
         self.pending = retained
         return executable
 
-    def _choose_executions(self, day, candidates, prices):
+    def _project_fills(self, accepted, closes):
+        by_instrument = defaultdict(list)
+        for key, quantity in accepted.items():
+            if quantity:
+                by_instrument[key[0]].append(key)
+
+        fills, external_orders = {}, {}
+        for instrument, keys in sorted(by_instrument.items()):
+            close = closes[instrument]
+            buys = {key: accepted[key] for key in keys if accepted[key] > 0}
+            sells = {key: -accepted[key] for key in keys if accepted[key] < 0}
+            bought, sold = sum(buys.values()), sum(sells.values())
+            net = bought - sold
+            matched = min(bought, sold)
+            netted = {}
+            if matched:
+                for claims, total in ((buys, bought), (sells, sold)):
+                    if matched == total:
+                        netted.update(claims)
+                    else:
+                        split, _ = allocate(
+                            claims, {instrument: Fraction(close)}, self.priorities, self.budgets,
+                            [Limit("internal_liquidity", Fraction(matched), dict.fromkeys(claims, Fraction(1)))],
+                        )
+                        netted.update(split)
+            external = {key: abs(accepted[key]) - netted.get(key, 0) for key in keys}
+
+            price, commissions = close, {}
+            if net:
+                quote = self.quotes[instrument]
+                execution_price = quote.ask_price if net > 0 else quote.bid_price
+                price = execution_price.as_decimal()
+                commission = self.costs.commission(abs(net), price)
+                external_orders[instrument] = _ExternalOrder(net, execution_price, commission)
+                ext = sorted(key for key in keys if external[key])
+                fee = int(commission / CENT)
+                cents = {key: fee * external[key] // abs(net) for key in ext}
+                remainder = fee - sum(cents.values())
+                commissions = {key: (cents[key] + (index < remainder)) * CENT for index, key in enumerate(ext)}
+            for key in keys:
+                fills[key] = _ProjectedFill(
+                    accepted[key], netted.get(key, 0), external[key], close, price if external[key] else close,
+                    commissions.get(key, Decimal(0)),
+                )
+        return fills, external_orders
+
+    def _execution_risk_breach(self, holdings, prices, equity, fills):
+        after = holdings.copy()
+        cost = Fraction()
+        for key, fill in fills.items():
+            after[key] = after.get(key, 0) + fill.quantity
+            cost += Fraction(fill.commission + fill.slippage)
+        after = {key: qty for key, qty in after.items() if qty}
+        for limit in self._limits(after, prices, {}, equity - cost):
+            used = sum(after[key] * price for key, price in limit.unit_costs.items())
+            if used > limit.available:
+                return limit.reason
+        return None
+
+    def _clip_cash(self, recipe, balance, fills, prices, cash_headroom, claim_caps):
+        buys = {key: fill for key, fill in fills.items() if key[1] == recipe and fill.quantity > 0}
+        external = {key: fill.external for key, fill in buys.items() if fill.external}
+        external_cost = {
+            key: Fraction(buys[key].price) + Fraction(buys[key].commission) / amount
+            for key, amount in external.items()
+        }
+        # Keep affordable midpoint transfers while releasing cash assigned to
+        # unaffordable external legs. A scalar cut over every claim can remove
+        # a cheap internal leg while retaining an expensive outside order.
+        after_internal = balance + sum(external[key] * cost for key, cost in external_cost.items())
+        if after_internal >= 0:
+            admitted, _ = allocate(
+                external, prices, self.priorities, self.budgets,
+                [Limit("sleeve_cash", after_internal, external_cost)],
+            )
+            for key, amount in admitted.items():
+                if amount < external[key]:
+                    claim_caps[key] = buys[key].netted + amount
+        else:
+            internal_cost = sum(fill.netted * Fraction(fill.close) for fill in buys.values())
+            cash_headroom[recipe] = max(Fraction(), internal_cost + after_internal)
+
+    def _choose_executions(self, day, candidates, closes):
         reductions = {key: row.quantity for key, row in candidates.items() if row.quantity < 0}
         buys = {key: row.quantity for key, row in candidates.items() if row.quantity > 0}
         if not buys:
-            return reductions, {}
+            fills, orders = self._project_fills(reductions, closes)
+            return fills, orders, {}
         equity = self._mark(day, self.shares)
         if equity is None:
-            return reductions, dict.fromkeys(buys, "execution_valuation_missing")
+            fills, orders = self._project_fills(reductions, closes)
+            return fills, orders, dict.fromkeys(buys, "execution_valuation_missing")
 
-        holdings = {(instrument, recipe): shares + reductions.get((instrument, recipe), 0)
-                    for recipe, sleeve in self.sleeves.items() for instrument, shares in sleeve.shares.items() if shares}
-        limits = self._limits(buys, prices, holdings, equity)
-        balance = {name: Fraction(sleeve.cash) for name, sleeve in self.sleeves.items()}
-        # Reserve the worst-case cash for external execution. Internal crossing
-        # costs less, and the released cash is available at the next decision.
-        cent = Fraction(CENT)
-        rate = Fraction(self.costs.commission_rate)
+        prices = {key: Fraction(price) for key, price in closes.items()}
+        equity = Fraction(equity)
+        holdings = {(instrument, recipe): shares
+                    for recipe, sleeve in self.sleeves.items() for instrument, shares in sleeve.shares.items()}
+        retained = {key: shares + reductions.get(key, 0) for key, shares in holdings.items()}
+        cash_headroom = {name: Fraction(sleeve.cash) for name, sleeve in self.sleeves.items()}
         for (instrument, recipe), quantity in reductions.items():
-            proceeds = -quantity * Fraction(self.quotes[instrument].bid_price.as_decimal())
-            balance[recipe] += proceeds - ceil(proceeds * rate / cent) * cent
-        for recipe in sorted({key[1] for key in buys}):
-            costs = {key: Fraction(self.quotes[key[0]].ask_price.as_decimal()) * (1 + rate)
-                     for key in buys if key[1] == recipe}
-            rounding_reserve = len(costs) * cent if rate else Fraction()
-            limits.append(Limit("sleeve_cash", max(Fraction(), balance[recipe] - rounding_reserve), costs))
-        additions, reasons = allocate(buys, prices, self.priorities, self.budgets, limits)
-        return reductions | additions, reasons
+            cash_headroom[recipe] -= quantity * prices[instrument]
+        by_sleeve = defaultdict(dict)
+        for key in sorted(buys):
+            by_sleeve[key[1]][key] = prices[key[0]]
+        claim_caps = {}
+
+        def settle(additions, reasons):
+            fills, orders = self._project_fills(reductions | additions, closes)
+            balance = {name: Fraction(sleeve.cash) for name, sleeve in self.sleeves.items()}
+            for key, fill in fills.items():
+                balance[key[1]] += Fraction(fill.cash_delta)
+            return fills, orders, balance, reasons
+
+        def project(risk_headroom):
+            limits = self._limits(buys, prices, retained, risk_headroom)
+            limits.extend(Limit("sleeve_cash", cash_headroom[recipe], uses) for recipe, uses in by_sleeve.items())
+            limits.extend(Limit("sleeve_cash", Fraction(qty), {key: Fraction(1)})
+                          for key, qty in sorted(claim_caps.items()))
+            additions, reasons = allocate(buys, prices, self.priorities, self.budgets, limits)
+            return settle(additions, reasons)
+
+        # Start at the cost-free close, then test real net orders. Only
+        # external residuals affect cash and post-settlement marked equity.
+        risk_headroom = equity
+        projected_causes = {}
+
+        def quantity(fills, key):
+            return fills[key].quantity if key in fills else 0
+
+        def risk_breach(fills):
+            if any(key in fills for key in buys):
+                return self._execution_risk_breach(holdings, prices, equity, fills)
+            return None
+
+        def priority_notional(fills):
+            by_priority = dict.fromkeys(self.priorities.values(), Fraction())
+            for key, fill in fills.items():
+                if fill.quantity > 0:
+                    by_priority[self.priorities[key[1]]] += fill.quantity * prices[key[0]]
+            return [value for _, value in sorted(by_priority.items())]
+
+        current = project(risk_headroom)
+        while True:
+            fills, orders, balance, reasons = current
+            insolvent = next((recipe for recipe, cash in sorted(balance.items()) if cash < 0), None)
+            if insolvent is not None:
+                cause = "sleeve_cash"
+                self._clip_cash(insolvent, balance[insolvent], fills, prices, cash_headroom, claim_caps)
+            else:
+                cause = risk_breach(fills)
+                if cause is None:
+                    return fills, orders, reasons | projected_causes
+                risk_headroom = _affordable_cents(
+                    risk_headroom, lambda limit: risk_breach(project(limit)[0]) is None,
+                )
+
+            current = project(risk_headroom)
+            if insolvent is None:
+                # A smaller shared bound can turn a cost-free cross into a
+                # costly residual sell. Check the matched slice separately.
+                matches = {key: fills[key].netted for key in buys if key in fills and fills[key].netted}
+                if matches and any(quantity(current[0], key) < amount for key, amount in matches.items()):
+                    crossed = settle(matches, reasons)
+                    if (priority_notional(crossed[0]) >= priority_notional(current[0])
+                            and min(crossed[2].values()) >= 0 and risk_breach(crossed[0]) is None):
+                        current = crossed
+            adjusted_fills = current[0]
+            for key in buys:
+                admitted = quantity(adjusted_fills, key)
+                if admitted < quantity(fills, key):
+                    projected_causes[key] = cause
+                elif admitted == buys[key]:
+                    projected_causes.pop(key, None)
 
     def _audit(self, key, intent, day, ts, *, status, reason, **details):
         instrument, recipe = key
@@ -353,25 +558,22 @@ class _ConfiguredStrategy(_PortfolioStrategy):
             **details,
         })
 
-    def _native_fill(self, instrument, quantity, event, intent):
-        quote = self.quotes[instrument]
-        size = abs(quantity)
+    def _native_fill(self, instrument, order, event, intent):
+        size = abs(order.quantity)
         if size > _MAX_SHARES:
             raise ResearchError("invalid_parameters", "Order size exceeds Nautilus Quantity range")
-        side, price = ((OrderSide.BUY, quote.ask_price) if quantity > 0
-                       else (OrderSide.SELL, quote.bid_price))
+        side = OrderSide.BUY if order.quantity > 0 else OrderSide.SELL
         qty = Quantity.from_int(size)
-        commission = self.costs.commission(size, price.as_decimal())
         cash_after = _cash_after_order(
-            self.inputs.assets[instrument], qty, price, side, self.cash, event.date, commission,
+            self.inputs.assets[instrument], qty, order.price, side, self.cash, event.date, order.commission,
         )
         if cash_after < 0:
             raise ResearchError("execution_audit_failed", "Planned external fill would borrow cash")
         plan = _ExpectedFill(
             instrument, intent.day, intent.ts, event.date, event.ts_event, side, size,
-            ((qty, price),), cash_after, commission,
+            ((qty, order.price),), cash_after, order.commission,
         )
-        return str(self._submit_fill(plan, qty)), price.as_decimal(), commission
+        return str(self._submit_fill(plan, qty))
 
     def execute(self, event):
         for sleeve in self.sleeves.values():
@@ -380,55 +582,32 @@ class _ConfiguredStrategy(_PortfolioStrategy):
         candidates = self._execution_candidates(event)
         if not candidates:
             return
-        prices = {key: Fraction(bar.close.as_decimal()) for key, bar in self.inputs.bars[day].items()}
-        accepted, reasons = self._choose_executions(day, candidates, prices)
-        totals = defaultdict(int)
-        by_instrument = defaultdict(list)
-        for key, quantity in sorted(accepted.items()):
-            if quantity:
-                totals[key[0]] += quantity
-                by_instrument[key[0]].append(key)
-
-        external, internal = {}, {}
+        closes = {key: bar.close.as_decimal() for key, bar in self.inputs.bars[day].items()}
+        fills, orders, reasons = self._choose_executions(day, candidates, closes)
+        first_intents = {}
+        for key, fill in sorted(fills.items()):
+            if fill.external:
+                instrument = key[0]
+                previous = first_intents.get(instrument)
+                if previous is None or candidates[key].ts < previous.ts:
+                    first_intents[instrument] = candidates[key]
         native = {}
-        allocated_commissions = {}
-        for instrument in sorted(totals, key=lambda key: (totals[key] > 0, key)):
-            keys = by_instrument[instrument]
-            net = totals[instrument]
-            matched = sum(accepted[key] for key in keys if accepted[key] > 0) - max(0, net)
-            unmatched_buy = unmatched_sell = matched
-            for key in keys:
-                quantity = accepted[key]
-                if quantity > 0:
-                    internal[key] = min(quantity, unmatched_buy)
-                    unmatched_buy -= internal[key]
-                else:
-                    internal[key] = min(-quantity, unmatched_sell)
-                    unmatched_sell -= internal[key]
-                external[key] = abs(quantity) - internal[key]
-            if net:
-                ext = [key for key in keys if external[key]]
-                first = min((candidates[key] for key in ext), key=lambda row: row.ts)
-                native[instrument] = self._native_fill(instrument, net, event, first)
-                fee = int(native[instrument][2] / CENT)
-                cents = {key: fee * external[key] // abs(net) for key in ext}
-                remainder = fee - sum(cents.values())
-                allocated_commissions.update({
-                    key: (cents[key] + (index < remainder)) * CENT for index, key in enumerate(ext)
-                })
+        for instrument in sorted(orders, key=lambda key: (orders[key].quantity > 0, key)):
+            native[instrument] = self._native_fill(instrument, orders[instrument], event, first_intents[instrument])
 
         with localcontext(EXACT_RESEARCH_CONTEXT, prec=80):
-            self._apply_fills(event, candidates, accepted, reasons, internal, external, native, allocated_commissions)
+            self._apply_fills(event, candidates, fills, reasons, native)
 
-    def _apply_fills(self, event, candidates, accepted, reasons, internal, external, native, allocated_commissions):
+    def _apply_fills(self, event, candidates, fills, reasons, native):
         day = event.date
         for key, intent in sorted(candidates.items()):
             instrument, recipe = key
-            quantity = accepted.get(key, 0)
-            if not quantity:
+            fill = fills.get(key)
+            if fill is None:
                 self._audit(key, intent, day, event.ts_event, status="rejected", reason=reasons[key],
                             accepted_quantity=Decimal(0))
                 continue
+            quantity = fill.quantity
             sleeve = self.sleeves[recipe]
             old = sleeve.shares.get(instrument, 0)
             new = old + quantity
@@ -440,20 +619,15 @@ class _ConfiguredStrategy(_PortfolioStrategy):
                 del sleeve.shares[instrument]
                 del sleeve.first_fill[instrument]
                 sleeve.exited.add(instrument)
-            close = self.inputs.bars[day][instrument].close.as_decimal()
-            order_id, fill_price, _ = native[instrument] if external[key] else (None, close, Decimal(0))
-            commission = allocated_commissions.get(key, Decimal(0))
-            value = internal[key] * close + external[key] * fill_price
-            cash_delta = (-value if quantity > 0 else value) - commission
-            sleeve.cash += cash_delta
+            order_id = native[instrument] if fill.external else None
+            sleeve.cash += fill.cash_delta
             status = "clipped" if quantity != intent.quantity else "accepted"
             self._audit(
                 key, intent, day, event.ts_event, status=status,
-                reason=reasons.get(key, "internal_netting" if internal[key] else "native_fill"),
-                accepted_quantity=Decimal(quantity), netted_quantity=Decimal(internal[key]),
-                external_quantity=Decimal(external[key]), cash_delta=cash_delta, commission=commission,
-                slippage_cost=external[key] * abs(fill_price - close), close_price=close,
-                execution_price=fill_price, order_id=order_id,
+                reason=reasons.get(key, "internal_netting" if fill.netted else "native_fill"),
+                accepted_quantity=Decimal(quantity), netted_quantity=Decimal(fill.netted),
+                external_quantity=Decimal(fill.external), cash_delta=fill.cash_delta, commission=fill.commission,
+                slippage_cost=fill.slippage, close_price=fill.close, execution_price=fill.price, order_id=order_id,
             )
 
         holdings = defaultdict(int)
