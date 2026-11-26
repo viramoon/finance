@@ -7,6 +7,12 @@
       "seed": "fixed",
       "source": "手工设计的三根闭合 bar，覆盖十进制精度和循环回放。"
     },
+    "crates/finance-api/tests/market_read.rs": {
+      "sha256": "827b989e1cf15ef120f110a27da07b9b57e42de4605bb248b60313c9538ccf0c",
+      "generator": "crates/finance-api/tests/support/market_read_fixture.rs",
+      "seed": "fixed",
+      "source": "Rust 测试复用已登记的 F1 合成事件并补充固定的十进制、序号和更正常量，在临时目录构造 WAL、质量报告和投影索引。 跨语言投影联测另复用 F5 已登记的 v2 合成永续上下文。"
+    },
     "crates/finance-ib/src/market/replay_tests.rs": {
       "sha256": "aca2a6471cc07a90cff3f3a7b3e581cc382dfdcb4a5494f008e9f38db6b6ee48",
       "generator": "scripts/export-ib-review-sources.sh",
@@ -36,6 +42,12 @@
       "generator": "crates/finance-market-protocol/src/bin/export-market-protocol.rs",
       "seed": "fixed",
       "source": "以 crates/finance-market-protocol/fixtures/examples.input.json 为固定输入，由 export-market-protocol 校验并导出。"
+    },
+    "protocol/v1/read-stream-examples.json": {
+      "sha256": "a215f16bca7d0e70610ff589177dc732c1094fd6c7a8a43e00c2f8951ab04fbb",
+      "generator": "crates/finance-api/src/read_stream.rs",
+      "seed": "fixed",
+      "source": "finance-api export-read-stream 复用已登记的 F1 固定合成事件，并用固定时钟生成 ready 和 missing 状态与 u64 边界事件 ID。"
     },
     "protocol/v2/examples.json": {
       "sha256": "66199a94809e8b6a83274a3be82a91e67bbe652d8ed57cc310e69d6bc3a7b7fc",
