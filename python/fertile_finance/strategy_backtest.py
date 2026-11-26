@@ -17,6 +17,7 @@ from .portfolio_inputs import prepare_cash_equity_inputs
 from .research_catalog import CENT
 from .research_decimal import EXACT_RESEARCH_CONTEXT, RESEARCH_CONTEXT
 from .strategy_allocation import Claim, Limit, allocate
+from .strategy_fee_search import largest_cash_feasible_fee_total
 from .strategy_indicators import IndicatorEvaluator, evaluate_indicator
 
 from nautilus_trader.backtest.models import FeeModel
@@ -106,21 +107,6 @@ def _affordable_cents(upper, feasible):
     """Find a feasible whole-cent headroom below a failed projection."""
     cent = Fraction(CENT)
     return _last_passing_quantity(0, int(upper / cent) + 1, lambda qty: feasible(qty * cent)) * cent
-
-
-def _refill_quantity(current, requested, crossing, fits, fits_affected):
-    if fits(requested):
-        return requested
-    if current < crossing:
-        # Below the crossing, each extra buy adds close-price exposure and
-        # saves at most that amount in sell costs. The affected caps and
-        # buyer's cash tighten, while untouched exposure ratios improve.
-        internal_max = _last_passing_quantity(current, min(crossing + 1, requested), fits_affected)
-        if fits(internal_max):
-            current = internal_max
-        if current < crossing:
-            return current
-    return _last_passing_quantity(current, requested, fits)
 
 
 class _CashEquityCosts(FeeModel):
@@ -523,6 +509,97 @@ class _ConfiguredStrategy(_PortfolioStrategy):
             return self._execution_risk_breach(holdings, prices, equity, projected.fills, affected=affected)
         return None
 
+    def _largest_fixed_match(self, key, low, high, projected):
+        """Check exact cent shares where the internal allocations stay fixed."""
+        instrument, recipe = key
+        priority = self.priorities[recipe]
+        buyer = projected.fills[key]
+        cent = Fraction(CENT)
+        prefix = 0
+        peers = []
+        focal_index = 0
+        changing = {recipe}
+        for other, fill in sorted(projected.fills.items()):
+            if other == key or other[0] != instrument or not fill.external:
+                continue
+            peer = other[1]
+            if self.priorities[peer] < priority:
+                prefix += fill.external
+            else:
+                peer_cents = (projected.balances[peer] + Fraction(fill.commission)) // cent
+                peers.append((fill.external, peer_cents))
+                focal_index += other < key
+                changing.add(peer)
+        if any(balance < 0 for name, balance in projected.balances.items() if name not in changing):
+            return None
+
+        ask = Fraction(buyer.price) / cent
+        available = projected.balances[recipe] + buyer.external * Fraction(buyer.price) + Fraction(buyer.commission)
+        offset = sum(qty for qty, _ in peers) - buyer.netted
+        total = largest_cash_feasible_fee_total(
+            low + offset, high + offset, ask * Fraction(self.costs.commission_rate), prefix,
+            tuple(peers), focal_index, focal=(available // cent, int(ask)),
+        )
+        return None if total is None else total - offset
+
+    def _refill_quantity(self, key, current, requested, crossing, trial, rejection, fits_risk):
+        """Maximize this single buy with all other chosen quantities fixed."""
+        largest = trial(requested)
+        if rejection(largest) is None:
+            return requested
+
+        fill = largest.fills[key]
+        wallet = largest.balances[key[1]] - Fraction(fill.cash_delta)
+        upper = min(requested - 1, wallet // Fraction(fill.close))
+        external_low = max(current + 1, crossing + 1)
+        if upper >= external_low:
+            # In the net-buy region, increasing aggregate cost reduces equity
+            # while marked exposure rises. Cash splits need not be monotone.
+            high = _last_passing_quantity(external_low - 1, upper + 1, lambda qty: fits_risk(trial(qty)))
+            if high >= external_low:
+                projected = trial(high)
+                if rejection(projected) is None:
+                    return high
+                # Above the variable buyer's rounded matched count, its
+                # continuous matching target is uncapped. All matches stay
+                # fixed as more external shares are added in this range.
+                fixed_low = max(external_low, projected.fills[key].netted + 1)
+                if fixed_low <= high:
+                    best = self._largest_fixed_match(key, fixed_low, high, projected)
+                    if best is None:
+                        high = fixed_low - 1
+                    elif rejection(trial(best)) is None:
+                        return best
+                for qty in range(high, external_low - 1, -1):
+                    if rejection(trial(qty)) is None:
+                        return qty
+
+        upper = min(upper, crossing)
+        if upper <= current:
+            return current
+        # Below the crossing, the buyer pays the close. Increased buys add
+        # exposure and save at most the same amount in aggregate sell costs.
+        # Check the affected limits as upper bounds, then settle all sleeves.
+        high = _last_passing_quantity(current, upper + 1, lambda qty: rejection(trial(qty), key) is None)
+        if high == current:
+            return current
+        projected = trial(high)
+        if rejection(projected) is None:
+            return high
+        if not fits_risk(projected):
+            return current
+        sellers = sum(other[0] == key[0] and fill.quantity < 0 for other, fill in projected.fills.items())
+        if sellers > 1:
+            # Multiple sellers can exchange a matched share or a fee cent as
+            # the crossing changes. Test feasible-risk candidates in descending order.
+            for qty in range(high - 1, current, -1):
+                projected = trial(qty)
+                if not fits_risk(projected):
+                    break
+                if rejection(projected) is None:
+                    return qty
+        return current
+
     def _choose_executions(self, day, candidates, closes):
         reductions = {key: row.quantity for key, row in candidates.items() if row.quantity < 0}
         buys = {key: row.quantity for key, row in candidates.items() if row.quantity > 0}
@@ -622,13 +699,16 @@ class _ConfiguredStrategy(_PortfolioStrategy):
             if current_qty == requested:
                 continue
 
-            def fits(qty, affected=None):
-                return rejection(settle(additions | {key: qty}), affected) is None
+            def trial(qty):
+                return settle(additions | {key: qty})
+
+            def fits_risk(projected):
+                return self._execution_risk_breach(holdings, prices, equity, projected.fills) is None
 
             instrument, _ = key
             other_buys = sum(qty for (asset, _), qty in (fixed | additions).items() if asset == instrument and qty > 0)
             cross = supplied[instrument] - (other_buys - current_qty)
-            additions[key] = _refill_quantity(current_qty, requested, cross, fits, lambda qty: fits(qty, key))
+            additions[key] = self._refill_quantity(key, current_qty, requested, cross, trial, rejection, fits_risk)
 
         return {key: qty for key, qty in additions.items() if qty}
 
