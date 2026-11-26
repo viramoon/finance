@@ -35,6 +35,8 @@ FERTILE_PROFILE=cloudbox cargo run --locked -p finance-api
 
 GET /api/v1/market/status 从 collector 持久状态读取各标的水位和新鲜度。没有状态文件时返回明确的缺失状态，collector 停止后会反映过期。可用性和精度验证见 [行情目录](../catalog/README.md)。
 
+IBKR 顶档订阅与权限验收由 `finance-ib` 的 Rust 接口和私有 CLI 提供，运行时独立于 HTTP API 和 collector 持久状态。接口与权限结论见 [IBKR 接入](integrations/ib.md#美股-l1-和-opra-权限验收)。
+
 POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /api/v1/backtests/{id} 查看执行进度与摘要，GET /api/v1/backtests 按 cursor 和 limit 翻页。提交使用同库事务完成幂等检查和容量检查，worker 独立执行。完整输入范围、超时和恢复见 [作业运维](backtest-jobs.md)。公网入口由 web 鉴权并限流。
 
 ## 示例批任务

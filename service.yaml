@@ -73,6 +73,14 @@ processes:
       ready: 数据根目录可读；不代表交易 ready
     restart_policy: 由 fertile deploy/ 的守护配置决定
 batch_jobs:
+  - name: ib-market-entitlements
+    command: bash scripts/check-ib-entitlements.sh
+    working_directory: finance
+    dependencies: [ib_gateway]
+    account: paper
+    opt_in_env: IB_LIVE_TEST
+    client_id_from: ib.probe_client_id
+    output: 脱敏 JSON 到标准输出
   - name: backtest-sample
     command: bash scripts/backtest-sample.sh
     output: "${FERTILE_DATA_ROOT}/finance-state/backtests/sample/latest.json"

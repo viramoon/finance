@@ -58,6 +58,10 @@ scripts/finance-backtest-worker
 
 Replay 可单独运行。paper 模式下 probe 用 client ID 91，collector 用 92，93 预留给 trader，凭据由盒子上的 Gateway 读取。连接、补数、权限与 pacing 故障定位见 [IB 接入](docs/integrations/ib.md)，水位、精度和杀进程恢复见 [catalog](catalog/README.md)，worker 的资源限制、队列恢复及幂等请求见 [作业说明](docs/backtest-jobs.md)。部署守护从 fertile 的 runbook 进入。
 
+### 私有验证美股 L1 与 OPRA
+
+经授权后，在美股常规交易时段使用已登录的本机 paper Gateway，确认 Gateway 的 API 设置为只读。选择一份已知活跃的 SMART USD 美股期权，使用该合约的 `conId`，按 [产品权限验收](docs/integrations/ib.md#美股-l1-和-opra-权限验收) 运行 `scripts/check-ib-entitlements.sh`。权限探针占用现有 probe client ID 91，逐标的开一条流并在进入下一项前取消。`pending` 保留具体原因。发现休市、无回调或报价不完整时，于常规交易时段复测。探针只输出脱敏摘要，原始行情和账户资料留在私有环境。
+
 ### 在盒子上验证 paper 行情恢复
 
 先用已登录的 Gateway 运行上方 probe。给 paper collector 配置独立的已挂载数据根目录，例如 /home/box/fertile/data-paper；finance-api 用同一数据根，回放继续使用自己的目录。使用实时市场数据订阅时将 FINANCE_COLLECTOR_CONFIG 指向 config/collector/ib-cloudbox.yaml；选择延迟数据时使用 config/collector/ib-delayed.yaml。确认 SPY 对应交易时段有行情，按 [IB 接入](docs/integrations/ib.md) 检查订阅权限与 pacing 日志。

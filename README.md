@@ -4,6 +4,8 @@ fertile 的主项目与 submodule，基于 NautilusTrader 的交易与数据系�
 
 本仓库按 [issue #1 方案 v2](https://github.com/viramoon/finance/issues/1#issuecomment-6834604073) 初始化。当前已实现 [Nautilus 源码构建](docs/build.md)、上游离线回测批任务及 [行情与回测 HTTP API](docs/api.md)，交易策略与交易服务仍未实现；TBD 项都需后续 issue 明确后再实施。开发从 [AGENTS.md](AGENTS.md) 开始。
 
+`finance-ib` 提供 paper 只读的美股及 OPRA 顶档订阅接口，以及需显式启用的私有权限探针。真实账户各产品权限仍待验收。操作见 [IBKR 接入](docs/integrations/ib.md#美股-l1-和-opra-权限验收)。
+
 ## 系统中的位置
 
 | 仓库 | 在 fertile 系统中的职责 |

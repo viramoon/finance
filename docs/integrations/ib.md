@@ -23,6 +23,38 @@ IB_LIVE_TEST=1 cargo test --locked -p finance-ib --test paper -- --ignored --noc
 
 无法连接时检查 TCP 端点和 Gateway 日志；认证或双因素未完成时完成 paper 登录后重试。混合/实盘账户立即退出，修复 Gateway 会话后重新启动，不能以更换 profile 替代账户校验。连接超时和 server time 读超时均产生非零退出码。成功 probe 只表示当前连接与身份检查成功；订阅权限、连续采集、补数以及真实交易时段的数据新鲜度须另行验证。
 
+## 美股 L1 和 OPRA 权限验收
+
+探针用现有 paper 配置和 probe client ID。Gateway 须已登录 paper 并启用只读 API。程序拒绝标准 live 端口，确认所有受管账户符合 paper 前缀后才请求合约详情和行情。它逐标的确认 SMART USD 合约并开启一条顶档流，在最多 8 秒的观察窗后取消，然后开始下一项。观察窗之外的连接、合约确认和开始订阅使用现有配置的连接或读超时。IB 请求延迟模式以允许回退，实际档位只读同一请求的 `marketDataType` 回调。使用支持锁定 ibapi 3.2.0 Protobuf 回调的 Gateway。
+
+`equity_l1` 覆盖 QQQ、SPY、AAPL、MSFT、NVDA、AMZN、GOOGL、META、TSLA。`opra` 使用操作者选定的、尚未到期且活跃的 SMART USD 美股期权。操作者须在账户产品清单核实 A/B/C 股票网络持续行情或 OPRA 的 API 产品权限及 paper 数据共享，再分别传入相应的 `--confirm-...-permission`。免费美股实时报价和回调 `1` 本身不足以确认综合覆盖。
+
+```sh
+# 在已获授权的 paper 盒子上，设 OPRA_CON_ID 为选定合约的正整数 conId。
+IB_LIVE_TEST=1 scripts/check-ib-entitlements.sh \
+  --opra-con-id "$OPRA_CON_ID" \
+  --confirm-equity-l1-permission --confirm-opra-permission
+```
+
+可省略各项人工确认标志。省略 `--opra-con-id` 时 OPRA 保持 `pending`，原因是 `option_not_selected`。脱敏 JSON 按产品给出结论和各目标原因，附实际档位、双边报价有效性、接收时间、交易时段和期权 OI/Greeks 是否收到。期权用固定目标标签。摘要省略账户、地址、合约 ID、行情值和供应商原始错误文本。双边时间取两个价格接收时间中较早者。可识别的权限、数据共享和限频通知映射为固定原因。退出码 0 表示扫测完成，产品是否通过由 JSON 判断。启动失败或因连接、订阅超时或取消失败中断时返回非零。若已有非空的 `IBAPI_RECORDING_DIR`，探针以 `invalid_configuration` 拒绝连接，以免 SDK 写出原始报文。
+
+| 结论 | 判断依据 |
+| --- | --- |
+| `passed`（通过） | 常规交易时段的实际类型 `1`、同请求的有效双边报价、已独立核实的账户产品权限。 |
+| `delayed`（延迟） | 常规交易时段的实际类型 `3` 或 `4`，且有相应的有效报价。`4` 表示延迟冻结。 |
+| `pending`（待验证） | 类型 `2`（冻结）、无回调、未知类型、报价不完整、权限待确认、休市、时段未知或会话故障等，详见 `reason`。 |
+| `not_entitled`（无许可） | 当前请求收到明确的 IB 无权限证据。 |
+
+已知休市和未知交易时段依据合约详情 `liquidHours` 及其时区区分。采样只能说明所选请求的观测结果。OPRA 权限通过与 OI/Greeks 新鲜度、可用性和许可分别核验。真实 paper Gateway 用例 `opt_in_paper_entitlements` 默认 `#[ignore]`，另需 `IB_LIVE_TEST=1`。可为该用例提供 `IB_OPRA_TEST_CON_ID`。当前仅有合成验证，真实产品权限全部待验证。
+
+### 行情请求接口
+
+`finance_ib::market` 提供 `MarketDataSource::confirm` 和 `subscribe`。实时实现通过 `ConnectionManager::open_market` 打开已验证的专用 paper 会话，并固定该会话的请求档位，供实际类型回调判定。订阅只接受本会话内已确认的合约。`MarketRequest::key()` 提供 `(con_id, product, parameters)`，其中参数包含是否请求期权 OI。`MarketSubscription` 提供请求 ID、事件读取和显式取消。取消等待 SDK 发送请求，SDK 不提供 Gateway 取消回执。会话拥有者通过 `PaperMarket::disconnected` 监测会话失效，通过 `close` 结束会话。F9b 接管限速、并发预算、排队、去重、期权链发现和重连后重新确认。
+
+行情流提供实际类型、L1 bid/ask/last 价格与数量、期权 OI、带来源的 Greeks 和脱敏通知。期权 OI 使用 streaming generic tick `101`，SDK 的零值可能来自缺失字段，因此零 OI 保留为未知。Greeks 区分 bid、ask、last 和 model 计算，缺失值显式为空。字段携带本地 UTC 接收时间。锁定 SDK 的顶档、OI 和 Greeks 数值已由 SDK 解码为 binary64，适配器在边界将可往返的十进制表示转换为 F1 `DecimalText`。无法表示或由供应商标记缺失的值留空。SDK 已丢失的精度无法恢复。last 更新是供应商顶档采样。期权实时异动线索、历史逐笔核验和场所深度由后续任务处理。
+
+F9a 的行情和报告驻于会话内存，私有脚本只输出摘要。许可策略及后续投影接入由相应 issue 处理。HTTP OpenAPI 与 `protocol/v1` schema 维持原版本。
+
 ## 采集模式与数据目录
 
 在已加载环境、从源码构建 Nautilus 的盒子上运行。Gateway 由 fertile 托管，只开启 paper 的只读 API。collector 使用独立持久目录；finance-api 读取同一目录。请为 replay、ib、ib-delayed 分别分配目录，否则 writer 会拒绝来源或水位不匹配的启动。
