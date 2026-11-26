@@ -1,17 +1,33 @@
 use finance_ib::{
     ConnectionManager, IbConfig, IbTransport,
     entitlements::{ProbeOptions, USAGE, probe_paper},
+    historical::{MINUTE_DECIMAL_POLICY, MinuteRequest},
 };
-use std::{ffi::OsStr, process::ExitCode, time::Instant};
+use std::{env, ffi::OsStr, path::PathBuf, process::ExitCode, time::Instant};
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let args: Vec<_> = std::env::args_os().skip(1).collect();
-    match args.as_slice() {
-        [command] if command == "probe" => connection_probe().await,
-        [command, rest @ ..] if command == "entitlements" => entitlement_probe(rest).await,
+    let args: Vec<_> = env::args_os().skip(1).collect();
+    if let [command, rest @ ..] = args.as_slice()
+        && command == "entitlements"
+    {
+        // The private probe emits only its allowlisted report. Leave SDK logging disabled.
+        return entitlement_probe(rest).await;
+    }
+    tracing_subscriber::fmt()
+        .json()
+        .with_writer(std::io::stderr)
+        .init();
+    let args: Option<Vec<_>> = args.iter().map(|arg| arg.to_str()).collect();
+    match args.as_deref() {
+        Some(["probe"]) => connection_probe().await,
+        Some(["historical-minute", "--allow-download", symbol, start, end]) => {
+            historical_minute(symbol, start, end).await
+        }
         _ => {
-            eprintln!("usage: finance-ib probe | {USAGE}");
+            eprintln!(
+                "usage: finance-ib probe | historical-minute --allow-download SYMBOL START_UNIX END_UNIX | {USAGE}"
+            );
             ExitCode::FAILURE
         }
     }
@@ -26,11 +42,10 @@ async fn entitlement_probe(args: &[std::ffi::OsString]) -> ExitCode {
         eprintln!("usage: {USAGE}");
         return ExitCode::FAILURE;
     };
-    if std::env::var_os("IB_LIVE_TEST").as_deref() != Some(OsStr::new("1")) {
+    if env::var_os("IB_LIVE_TEST").as_deref() != Some(OsStr::new("1")) {
         eprintln!("the private paper probe requires IB_LIVE_TEST=1");
         return ExitCode::FAILURE;
     }
-    // This command emits only its allowlisted report. Leave SDK logging disabled.
     let report = probe_paper(options).await;
     println!(
         "{}",
@@ -44,10 +59,6 @@ async fn entitlement_probe(args: &[std::ffi::OsString]) -> ExitCode {
 }
 
 async fn connection_probe() -> ExitCode {
-    tracing_subscriber::fmt()
-        .json()
-        .with_writer(std::io::stderr)
-        .init();
     let start = Instant::now();
     let result = async {
         ConnectionManager::new(IbConfig::load()?, IbTransport)?
@@ -68,6 +79,32 @@ async fn connection_probe() -> ExitCode {
                 "IB paper probe failed after {} ms: {e}",
                 start.elapsed().as_millis()
             );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn historical_minute(symbol: &str, start: &str, end: &str) -> ExitCode {
+    let result = async {
+        let request = MinuteRequest::parse(symbol, start, end)?;
+        let root = env::var_os("FERTILE_DATA_ROOT").ok_or_else(|| {
+            finance_ib::Error::Config("historical-minute requires FERTILE_DATA_ROOT".into())
+        })?;
+        ConnectionManager::new(IbConfig::load()?, IbTransport)?
+            .historical_minute(request, &PathBuf::from(root))
+            .await
+    }
+    .await;
+    match result {
+        Ok(bars) => {
+            println!(
+                "{}",
+                serde_json::json!({"precision": MINUTE_DECIMAL_POLICY, "bars": bars})
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("IB paper historical-minute failed: {error}");
             ExitCode::FAILURE
         }
     }

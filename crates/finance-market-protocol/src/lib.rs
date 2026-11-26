@@ -1,4 +1,4 @@
-//! Finance market protocol v1.0 wire types and validation.
+//! Finance market protocol wire types and validation.
 //!
 //! The wire contract is independent of collector runtime and Nautilus types.
 
@@ -88,6 +88,13 @@ fn require(
     } else {
         Err(ValidationError::new(field, reason))
     }
+}
+
+fn require_schema_version(condition: bool, reason: &'static str) -> Result<(), ValidationError> {
+    require(condition, "schema_version", reason).map_err(|mut error| {
+        error.kind = ErrorKind::InvalidValue;
+        error
+    })
 }
 
 fn required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>

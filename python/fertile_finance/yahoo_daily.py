@@ -196,7 +196,17 @@ def load_yahoo_daily(
     adjustment_as_of: date,
     pre_epoch: Literal["reject", "drop"] = "reject",
 ) -> YahooDaily:
-    """Read the saved response as quoted OHLCV, factor and ex-date events.
+    """Read a saved Yahoo chart response using its snapshot date."""
+    return parse_yahoo_daily(Path(path).read_bytes(), adjustment_as_of=adjustment_as_of, pre_epoch=pre_epoch)
+
+
+def parse_yahoo_daily(
+    raw: bytes,
+    *,
+    adjustment_as_of: date,
+    pre_epoch: Literal["reject", "drop"] = "reject",
+) -> YahooDaily:
+    """Read a chart response as quoted OHLCV, factor and ex-date events.
 
     Supply the archive snapshot date as adjustment_as_of. Yahoo quotes themselves
     may already reflect split normalization. The factor is adjusted close divided
@@ -206,7 +216,7 @@ def load_yahoo_daily(
     if type(adjustment_as_of) is not date:
         raise ValueError("Yahoo adjustment_as_of must be an explicit snapshot date")
     document = json.loads(
-        Path(path).read_bytes(), parse_float=Decimal, parse_constant=_invalid_constant, object_pairs_hook=_unique_object,
+        raw, parse_float=Decimal, parse_constant=_invalid_constant, object_pairs_hook=_unique_object,
     )
     chart = _object(_object(document, "response").get("chart"), "chart")
     if chart.get("error") is not None:

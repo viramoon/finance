@@ -6,7 +6,7 @@ fertile 的主项目与 submodule，基于 NautilusTrader 的交易与数据系�
 
 `finance-ib` 提供 paper 只读的美股及 OPRA 顶档订阅接口，以及需显式启用的私有权限探针。真实账户各产品权限仍待验收。操作见 [IBKR 接入](docs/integrations/ib.md#美股-l1-和-opra-权限验收)。
 
-本地行情链路支持 F1 事件追加、恢复和独立 Parquet 投影，数据源适配器按后续 issue 接入。[本地行情 WAL、投影与封段接口](docs/market-wal.md)
+本地行情链路支持 F1 事件追加、恢复和独立 Parquet 投影，Hyperliquid 公共永续行情已接入。[本地行情 WAL、投影与封段接口](docs/market-wal.md)
 
 ## 系统中的位置
 
@@ -46,8 +46,10 @@ finance/
 - [Nautilus 使用与升级](docs/nautilus.md)
 - [连接恢复与熔断](docs/connectivity.md)
 - [IBKR 接入](docs/integrations/ib.md)
+- [Hyperliquid 公共永续行情](docs/integrations/hyperliquid.md)
 - [HTTP 与代码导出](docs/api.md)
 - [行情标的、事件与流协议](docs/market-protocol.md)
+- [历史价量补拉与逐笔归档](docs/historical-pull.md)
 - [本地行情 WAL、投影与封段接口](docs/market-wal.md)
 - [StrategyBundle v1 配置与编译](docs/strategy-bundle.md)
 - [离线因子评价与研究登记](docs/factor-research.md)

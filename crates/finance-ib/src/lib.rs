@@ -1,5 +1,6 @@
 pub mod config;
 pub mod entitlements;
+pub mod historical;
 pub mod market;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

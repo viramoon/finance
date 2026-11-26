@@ -21,6 +21,8 @@ cargo run --locked -p finance-ib -- probe
 IB_LIVE_TEST=1 cargo test --locked -p finance-ib --test paper opt_in_paper_probe -- --ignored --exact --nocapture
 ```
 
+`--test paper` 只运行探针。分钟线的真实 Gateway 验证使用独立测试目标 `paper_historical_minute`，须另行确认数据拉取与本地记录授权。运行参数见 [历史价量拉取](../historical-pull.md)。
+
 无法连接时检查 TCP 端点和 Gateway 日志；认证或双因素未完成时完成 paper 登录后重试。混合/实盘账户立即退出，修复 Gateway 会话后重新启动，不能以更换 profile 替代账户校验。连接超时和 server time 读超时均产生非零退出码。成功 probe 只表示当前连接与身份检查成功；订阅权限、连续采集、补数以及真实交易时段的数据新鲜度须另行验证。
 
 ## 美股 L1 和 OPRA 权限验收
@@ -84,6 +86,8 @@ cargo run --locked -p finance-collector
 在配置中填写一至三个美股或 ETF 的完整标识，如 SPY.ARCA、AAPL.NASDAQ。collector 通过 SMART 路由，标识后缀指定 primary exchange，币种 USD。当前支持 1-MINUTE-LAST。实时模式请求 IB keepUpToDate 的一分钟 TRADES，包括扩展时段，重复的当前分钟更新替换累积值。收到下一分钟的更新后交付前一根完整 bar。持久化时间戳是收盘时刻 UTC 纳秒；休市、无成交或权限不足时不会写入模拟数据。单分钟的最后一根可能在下一笔或重连历史查询时确认。
 
 ibapi 3.2.0 的公开历史 / 流式 OHLCV 字段为 binary64。适配器按可往返的最短十进制表示转换并验证，无法用精确 Decimal 表示时拒绝入库。writer 以后续定点格式校验及写入。上游已丢失的原始精度无法从 SDK 恢复。
+
+[历史价量批任务](../historical-pull.md) 另提供常规交易时段的一分钟 `TRADES`。命令复用 Gateway 端点和受管账户校验，使用 probe client ID。使用同一个已配置的外部数据根维持批任务跨进程和重启的 pacing 状态。
 
 实时权限不足时，先停止 collector，再用单独数据根及 config/collector/ib-delayed.yaml 启动，同时调整读取方的数据根。此模式选择 IB 的 Delayed 数据类型并轮询至少滞后 20 分钟的 HMDS 历史成交，支持该交易所的账户权限仍是前提。状态标记 ib-delayed，每分钟轮询，按实际收盘时刻判断年龄，示例阈值 1500 秒。实时模式标记 ib-realtime，示例阈值 180 秒。354 / 10167 / 162 权限错误需核对订阅、paper 账户数据共享及历史数据许可。
 
