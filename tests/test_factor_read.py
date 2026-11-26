@@ -9,6 +9,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from fertile_finance.factor_evaluation import Distribution
 from fertile_finance.factor_read import (
     SNAPSHOT_PATH,
     FactorReadEvaluation,
@@ -131,6 +132,49 @@ class FactorReadSnapshotTest(unittest.TestCase):
                 self.publish(evaluations=evaluations)
             self.assertEqual(path.read_bytes(), original)
             self.assertEqual(list(path.parent.iterdir()), [path])
+
+    def test_redundancy_requires_the_exact_declared_and_authorized_peer(self):
+        peer = replace(self.definition, factor_id="display.only", data_version="synthetic-peer-data")
+        peer_key = (peer.factor_id, peer.version)
+        statistic_key = "@".join(peer_key)
+        statistic = Distribution(count=1, mean=Decimal("-1.0000"), sample_std=None, ratio=None)
+        last_window = replace(self.report.windows[-1], redundancy={statistic_key: statistic})
+        report = replace(self.report, peer_definitions=(peer,), windows=(*self.report.windows[:-1], last_window))
+        denied = {**self.permissions, peer_key: FactorReadPermission(peer.license, False, False)}
+        allowed = {**self.permissions, peer_key: FactorReadPermission(peer.license, True, True)}
+        other_version = replace(peer, version="2.0.0")
+        other_key = (other_version.factor_id, other_version.version)
+        cases = (
+            ("display only", report, denied, "permission"),
+            ("missing declaration", replace(report, peer_definitions=()), denied, "declared evaluation peer"),
+            ("permission alone", replace(report, peer_definitions=()), allowed, "declared evaluation peer"),
+            ("wrong declared version", replace(report, peer_definitions=(other_version,)),
+             {**allowed, other_key: allowed[peer_key]}, "declared evaluation peer"),
+            ("duplicate declaration", replace(report, peer_definitions=(peer, peer)), allowed, "Duplicate evaluation peer"),
+        )
+        path = self.root / SNAPSHOT_PATH
+        for label, invalid, permissions, error in cases:
+            with self.subTest(label=label, snapshot_present=False):
+                with self.assertRaisesRegex(ValueError, error):
+                    self.publish(permissions=permissions, evaluations=[FactorReadEvaluation("fit-1", invalid)])
+                self.assertEqual(list(self.root.iterdir()), [])
+
+        original = self.publish(permissions=allowed, evaluations=[FactorReadEvaluation("fit-1", report)]).read_bytes()
+        evaluation, = json.loads(original)["evaluations"]
+        published_peer, = evaluation["peer_factors"]
+        self.assertEqual((published_peer["factor_id"], published_peer["version"]), peer_key)
+        self.assertEqual(published_peer["data_version"], peer.data_version)
+        self.assertEqual(published_peer["access"], {
+            "license": peer.license, "record_local": True, "derive_non_display": True, "redistribute": False,
+        })
+        self.assertEqual(evaluation["windows"][-1]["redundancy"][statistic_key]["mean"], "-1.0000")
+
+        for label, invalid, permissions, error in cases:
+            with self.subTest(label=label, snapshot_present=True):
+                with self.assertRaisesRegex(ValueError, error):
+                    self.publish(permissions=permissions, evaluations=[FactorReadEvaluation("fit-1", invalid)])
+                self.assertEqual(path.read_bytes(), original)
+                self.assertEqual(list(path.parent.iterdir()), [path])
 
     def test_snapshot_publishes_historical_verdict_and_reference_without_artifacts(self):
         repo_root = self.root / "fixture-repo"

@@ -77,6 +77,8 @@ publish_factor_read_snapshot(
 
 调用方提供已有绝对路径、带时区的发布时间及其实际审核过的权限。每个因子版本和评价中的关联因子都需匹配许可，允许本地记录和非展示派生，项目禁止再分发。快照只包含因子定义、状态迁移、可见的证据引用与窗口汇总。逐标的研究输入和详细账本留在原研究环境中。使用 `historical_repo_root` 可纳入下方的已验证历史登记，权限表另需列入该登记的 `(id, version)`。
 
+每份评价通过 `peer_definitions` 声明关联因子，各 `(factor_id, version)` 必须唯一。各窗口 `redundancy` 的 `factor_id@version` 键必须精确匹配同一份评价中已授权的声明。发布器在写文件前拒绝缺失声明、版本不匹配、重复声明或许可不符的评价。有此类问题的既有快照在读端返回 `500 / factor_snapshot_invalid`，需从审核通过的报告重新发布。有效的评价响应通过 `peer_factors[].access` 展示对应许可。
+
 ## 月频动量
 
 `fertile_finance.historical_research.load_factor_momentum_registration(repo_root)` 从指定仓库读取 `research.factor-momentum@1.0.0`，校验登记的原报告、来源说明和审计账本哈希，返回 `research_only`。登记不进入因子状态流转。Python 查询的 `selectable_for_backtest` 和 `tradable` 均为 `False`。F2 也保留该策略 ID，拒绝其进入现金权益编译与版本绑定。[历史登记](../strategies/registry/factor-momentum-v1.json)

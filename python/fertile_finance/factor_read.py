@@ -161,37 +161,44 @@ def _evaluation_item(item: FactorReadEvaluation, registered, permissions):
     if key not in registered or registered[key].definition != report.definition:
         raise ValueError("Published evaluation must match a registered factor and data version")
     access = _permission(permissions, key, report.definition.license)
-    peers = [
-        {
+    peers = {}
+    for peer in report.peer_definitions:
+        peer_key = _definition_key(peer)
+        name = "@".join(peer_key)
+        if name in peers:
+            raise ValueError("Duplicate evaluation peer")
+        peers[name] = {
             "factor_id": peer.factor_id,
             "version": peer.version,
             "data_version": peer.data_version,
-            "access": _permission(permissions, _definition_key(peer), peer.license),
+            "access": _permission(permissions, peer_key, peer.license),
         }
-        for peer in report.peer_definitions
-    ]
     # Select aggregate fields before serializing so per-asset evidence never reaches the handoff.
-    windows = [
-        {
+    windows = []
+    for row in report.windows:
+        redundancy = {}
+        for name, result in row.redundancy.items():
+            if name not in peers:
+                raise ValueError("Each redundancy statistic requires a declared evaluation peer with permission")
+            redundancy[name] = _distribution(result)
+        windows.append({
             "window": _window_bounds(row.window),
             "factor_coverage": _decimal_wire(row.factor_coverage),
             "scored_coverage": _decimal_wire(row.scored_coverage),
             "ic": {str(horizon): _distribution(result) for horizon, result in row.ic.items()},
-            "redundancy": {name: _distribution(result) for name, result in row.redundancy.items()},
+            "redundancy": redundancy,
             "quantiles": [_portfolio_summary(result) for result in row.quantiles],
             "benchmark": _portfolio_summary(row.benchmark),
             "gross_information": _distribution(row.gross_information),
             "net_information": _distribution(row.net_information),
-        }
-        for row in report.windows
-    ]
+        })
     return {
         "factor_id": factor_id,
         "version": version,
         "data_version": report.definition.data_version,
         "evaluation_id": evaluation_id,
         "access": access,
-        "peer_factors": peers,
+        "peer_factors": list(peers.values()),
         "cost_bps": _decimal_wire(report.cost_bps),
         "quantile_count": report.quantile_count,
         "windows": windows,

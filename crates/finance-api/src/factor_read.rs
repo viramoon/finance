@@ -286,6 +286,27 @@ struct FactorEvaluationItem {
     windows: Vec<FactorWindowSummary>,
 }
 
+impl FactorEvaluationItem {
+    fn valid_peer_permissions(&self) -> bool {
+        let mut peers = BTreeSet::new();
+        for peer in &self.peer_factors {
+            if !peer.access.allowed()
+                || !valid_key(&peer.factor_id, &peer.version)
+                || !peers.insert((peer.factor_id.as_str(), peer.version.as_str()))
+            {
+                return false;
+            }
+        }
+        self.windows
+            .iter()
+            .flat_map(|window| window.redundancy.keys())
+            .all(|key| {
+                key.split_once('@')
+                    .is_some_and(|peer| peers.contains(&peer))
+            })
+    }
+}
+
 #[derive(Serialize, ToSchema)]
 pub(crate) struct FactorReadPage {
     #[schema(minimum = 1, maximum = 1)]
@@ -339,9 +360,7 @@ impl Snapshot {
                 && report.access == factor.access
                 && FACTOR_ID.is_match(&report.evaluation_id)
                 && reports.insert((key, report.evaluation_id.as_str()))
-                && report.peer_factors.iter().all(|peer| {
-                    peer.access.allowed() && valid_key(&peer.factor_id, &peer.version)
-                })
+                && report.valid_peer_permissions()
         })
     }
 }

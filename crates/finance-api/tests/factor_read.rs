@@ -185,6 +185,75 @@ async fn factor_read_rejects_invalid_queries_and_disallowed_or_malformed_snapsho
     }
 }
 
+#[tokio::test]
+async fn factor_read_requires_permission_for_each_redundancy_key_in_its_evaluation() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(dir.path());
+    let mut valid = snapshot();
+    let peer = json!({
+        "factor_id": "synthetic.peer",
+        "version": "1.0.0",
+        "data_version": "synthetic-peer-data",
+        "access": access(),
+    });
+    let mut second_window = valid["evaluations"][0]["windows"][0].clone();
+    second_window["window"] = json!({
+        "name": "validation", "phase": "validation", "start": "2026-01-07", "end": "2026-01-08"
+    });
+    let redundancy = json!({
+        "synthetic.peer@1.0.0": {"count": 2, "mean": "-1.0000", "sample_std": null, "ratio": null}
+    });
+    second_window["redundancy"] = redundancy.clone();
+    valid["evaluations"][0]["windows"]
+        .as_array_mut()
+        .unwrap()
+        .push(second_window);
+    valid["evaluations"][0]["peer_factors"] = json!([peer]);
+    // A separate evaluation retains the same authorized peer in every case.
+    valid["evaluations"][1]["peer_factors"] = json!([peer]);
+
+    write_snapshot(dir.path(), &valid);
+    let evaluations = "/api/v1/factors/synthetic.factor/evaluations";
+    let (status, body) = get(&app, evaluations).await;
+    assert_eq!(status, StatusCode::OK);
+    let report = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["evaluation_id"] == "second")
+        .unwrap();
+    assert_eq!(report["windows"][1]["redundancy"], redundancy);
+    assert_eq!(report["peer_factors"][0], peer);
+
+    let mut wrong_version = peer.clone();
+    wrong_version["version"] = json!("2.0.0");
+    let mut denied = peer.clone();
+    denied["access"]["derive_non_display"] = json!(false);
+    let mut conflicting = peer.clone();
+    conflicting["data_version"] = json!("other-synthetic-peer-data");
+    for (case, peers) in [
+        ("missing from this evaluation", json!([])),
+        ("wrong version", json!([wrong_version])),
+        ("denied permission", json!([denied])),
+        ("duplicate identity", json!([peer, conflicting])),
+    ] {
+        let mut invalid = valid.clone();
+        invalid["evaluations"][0]["peer_factors"] = peers;
+        write_snapshot(dir.path(), &invalid);
+        for path in [evaluations, "/api/v1/factors"] {
+            let (status, body) = get(&app, path).await;
+            assert_eq!(
+                status,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{case} at {path}"
+            );
+            assert_eq!(body["error"]["code"], "factor_snapshot_invalid");
+            assert!(body.get("items").is_none());
+            assert!(!body.to_string().contains("synthetic.peer"));
+        }
+    }
+}
+
 #[test]
 fn factor_read_openapi_exports_typed_versions_decimal_and_limits() {
     let spec = serde_json::to_value(ApiDoc::openapi()).unwrap();
@@ -230,9 +299,11 @@ async fn python_factor_publication_is_read_by_rust_contract() {
         .arg(
             r#"
 from dataclasses import replace
+from decimal import Decimal
 from pathlib import Path
 import sys
 
+from fertile_finance.factor_evaluation import Distribution
 from fertile_finance.factor_read import FactorReadEvaluation, FactorReadPermission, publish_factor_read_snapshot
 from fertile_finance.research_catalog import FactorResearchCatalog
 from test_factor_read import AS_OF, PRECISE, synthetic_history
@@ -242,9 +313,17 @@ root = Path(sys.argv[1])
 fixture_repo = root / 'fixture-repo'
 synthetic_history(fixture_repo)
 factor = replace(definition(), parameters={'large': 2**64 - 1})
-report = replace(report_for(factor), cost_bps=PRECISE)
+peer = replace(factor, factor_id='fixture.peer', license='Synthetic evaluation peer', data_version='synthetic-peer-v1')
+peer_key = (peer.factor_id, peer.version)
+report = report_for(factor)
+last_window = replace(report.windows[-1], redundancy={
+    '@'.join(peer_key): Distribution(count=2, mean=Decimal('-1.0000'), sample_std=None, ratio=None),
+})
+report = replace(report, cost_bps=PRECISE, peer_definitions=(peer,),
+                 windows=(*report.windows[:-1], last_window))
 permissions = {
     (factor.factor_id, factor.version): FactorReadPermission(factor.license, True, True),
+    peer_key: FactorReadPermission(peer.license, True, True),
     ('research.factor-momentum', '1.0.0'): FactorReadPermission('Synthetic history', True, True),
 }
 publish_factor_read_snapshot(
@@ -287,5 +366,19 @@ publish_factor_read_snapshot(
     assert_eq!(
         evaluations["items"][0]["windows"][2]["window"]["phase"],
         "out_of_sample"
+    );
+    assert_eq!(
+        evaluations["items"][0]["peer_factors"],
+        json!([{
+            "factor_id": "fixture.peer", "version": "1.0.0", "data_version": "synthetic-peer-v1",
+            "access": {
+                "license": "Synthetic evaluation peer", "record_local": true,
+                "derive_non_display": true, "redistribute": false
+            }
+        }])
+    );
+    assert_eq!(
+        evaluations["items"][0]["windows"][2]["redundancy"]["fixture.peer@1.0.0"],
+        json!({"count": 2, "mean": "-1.0000", "sample_std": null, "ratio": null})
     );
 }
