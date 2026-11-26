@@ -1,12 +1,13 @@
-"""Align supplied daily returns with a French factor table."""
+"""Analyze research factor returns and cross-sectional ranks."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
-from decimal import localcontext
+from decimal import Decimal, localcontext
+from itertools import groupby
 
 import numpy as np
 import pandas as pd
-from scipy.stats import pearsonr
 
 from .research_decimal import RESEARCH_CONTEXT
 
@@ -44,6 +45,8 @@ def analyze_factors(
     regression: bool = False,
 ) -> FactorAnalysis:
     """Calculate Pearson correlations and optionally OLS on one complete-case sample."""
+    from scipy.stats import pearsonr
+
     cutoff = _session_date(as_of) if as_of is not None else None
     french_input = isinstance(factors, FrenchDaily)
     if french_input:
@@ -91,6 +94,38 @@ def analyze_factors(
         regression=fitted,
         regression_status=status,
     )
+
+
+def rank_correlation(left: Sequence[Decimal], right: Sequence[Decimal]) -> Decimal | None:
+    """Compute Spearman correlation on already paired scores using average ranks for ties."""
+    if len(left) != len(right):
+        raise ValueError("Rank correlation requires paired values")
+    count = len(left)
+    if count < 2:
+        return None
+    x = _doubled_average_ranks(left)
+    y = _doubled_average_ranks(right)
+    sum_x, sum_y = sum(x), sum(y)
+    variance_x = count * sum(rank**2 for rank in x) - sum_x**2
+    variance_y = count * sum(rank**2 for rank in y) - sum_y**2
+    if not variance_x or not variance_y:
+        return None
+    covariance = count * sum(a * b for a, b in zip(x, y, strict=True)) - sum_x * sum_y
+    with localcontext(RESEARCH_CONTEXT):
+        correlation = Decimal(covariance) / Decimal(variance_x * variance_y).sqrt()
+        return max(Decimal(-1), min(Decimal(1), correlation))
+
+
+def _doubled_average_ranks(values: Sequence[Decimal]) -> list[int]:
+    ranks = [0] * len(values)
+    first = 1
+    for _, indices in groupby(sorted(range(len(values)), key=values.__getitem__), key=values.__getitem__):
+        group = list(indices)
+        last = first + len(group) - 1
+        for index in group:
+            ranks[index] = first + last
+        first = last + 1
+    return ranks
 
 
 def _french_frame(batch: FrenchDaily, cutoff: date | None) -> pd.DataFrame:

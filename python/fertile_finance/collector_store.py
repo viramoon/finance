@@ -46,6 +46,15 @@ def ensure_dir(path):
         fsync_dir(path.parent)
 
 
+def atomic_publish(src, dest):
+    """Publish a completed file staged on the destination filesystem."""
+    ensure_dir(dest.parent)
+    with src.open("rb") as file:
+        os.fsync(file.fileno())
+    os.replace(src, dest)
+    fsync_dir(dest.parent)
+
+
 def atomic_json(target, value):
     state = target.parent
     with tempfile.NamedTemporaryFile("w", dir=state, prefix=".watermarks-", delete=False) as output:
@@ -149,11 +158,7 @@ class Store:
         if historical:
             if (replace is not None and dest != replace) or (replace is None and dest.exists()):
                 raise ValueError("unexpected historical Parquet interval while publishing")
-        ensure_dir(dest.parent)
-        with src.open("rb") as file:
-            os.fsync(file.fileno())
-        os.replace(src, dest)
-        fsync_dir(dest.parent)
+        atomic_publish(src, dest)
         self.marks[instrument] = max(bars[-1].ts_event, self.marks.get(instrument, -1))
 
     def append(self, batch):

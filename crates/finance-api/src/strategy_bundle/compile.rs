@@ -4,6 +4,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::catalog::is_historical_research;
 use super::parse::{Parsed, parse};
 use super::{
     Availability, Bars, Binding, Catalog, Component, Diagnostic, InputFormat, Universe,
@@ -102,6 +103,14 @@ pub fn compile<'a>(
 ) -> Result<CompiledPlan<'a>, Diagnostic> {
     let mut parsed = parse(bytes, format)?;
     schema::validate(&parsed)?;
+    if is_historical_research(string(&parsed.value["metadata"]["id"])) {
+        return Err(diagnostic(
+            &parsed,
+            "/metadata/id",
+            "RESEARCH_ONLY_STRATEGY",
+            "This strategy ID is reserved for historical research and cannot compile to a backtest plan.",
+        ));
+    }
 
     let spec = &parsed.value["spec"];
     let inputs = resolve_inputs(&parsed, spec, catalog)?;
