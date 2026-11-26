@@ -46,8 +46,8 @@ fn contract(
     id: &str,
     right: OptionRight,
     expiry: &str,
-    strike: &str,
-    multiplier: &str,
+    strike: DecimalText,
+    multiplier: DecimalText,
     oi: Option<&str>,
     gamma: Option<&str>,
 ) -> OptionContractSnapshot {
@@ -55,8 +55,8 @@ fn contract(
         instrument_id: id.parse().unwrap(),
         right,
         expiry: date(expiry),
-        strike: decimal(strike),
-        multiplier: decimal(multiplier),
+        strike,
+        multiplier,
         open_interest: oi.map(|value| OpenInterestObservation {
             value: decimal(value),
             observed_at: time(OI_TIME),
@@ -87,8 +87,8 @@ fn hand_chain() -> OptionChainSnapshot {
             "D0C120.XSIM",
             Call,
             SESSION_DATE,
-            "120",
-            "100",
+            decimal("120"),
+            decimal("100"),
             Some("10"),
             Some("0.02"),
         ),
@@ -96,8 +96,8 @@ fn hand_chain() -> OptionChainSnapshot {
             "D0P120.XSIM",
             Put,
             SESSION_DATE,
-            "120.00",
-            "10",
+            decimal("120.00"),
+            decimal("10"),
             Some("5"),
             Some("0.04"),
         ),
@@ -105,8 +105,8 @@ fn hand_chain() -> OptionChainSnapshot {
             "D3P130.XSIM",
             Put,
             LATER_EXPIRY,
-            "130",
-            "50",
+            decimal("130"),
+            decimal("50"),
             Some("8"),
             Some("0.04"),
         ),
@@ -114,8 +114,8 @@ fn hand_chain() -> OptionChainSnapshot {
             "D3C130.XSIM",
             Call,
             LATER_EXPIRY,
-            "130",
-            "25",
+            decimal("130"),
+            decimal("25"),
             Some("2"),
             Some("0.02"),
         ),
@@ -123,8 +123,8 @@ fn hand_chain() -> OptionChainSnapshot {
             "D3P120.XSIM",
             Put,
             LATER_EXPIRY,
-            "120",
-            "50",
+            decimal("120"),
+            decimal("50"),
             Some("4"),
             Some("0.02"),
         ),
@@ -253,8 +253,8 @@ fn coverage_distinguishes_missing_zero_and_asynchronous_inputs() {
         "STALE.XSIM",
         Call,
         SESSION_DATE,
-        "140",
-        "10",
+        decimal("140"),
+        decimal("10"),
         Some("7"),
         Some("0.03"),
     );
@@ -264,8 +264,8 @@ fn coverage_distinguishes_missing_zero_and_asynchronous_inputs() {
         "NO-GAMMA.XSIM",
         Call,
         SESSION_DATE,
-        "150",
-        "10",
+        decimal("150"),
+        decimal("10"),
         Some("5"),
         None,
     );
@@ -275,8 +275,8 @@ fn coverage_distinguishes_missing_zero_and_asynchronous_inputs() {
             "VALID.XSIM",
             Call,
             SESSION_DATE,
-            "100",
-            "100",
+            decimal("100"),
+            decimal("100"),
             Some("10"),
             Some("0.01"),
         ),
@@ -284,8 +284,8 @@ fn coverage_distinguishes_missing_zero_and_asynchronous_inputs() {
             "NO-OI.XSIM",
             Put,
             SESSION_DATE,
-            "110",
-            "10",
+            decimal("110"),
+            decimal("10"),
             None,
             Some("0.01"),
         ),
@@ -293,8 +293,8 @@ fn coverage_distinguishes_missing_zero_and_asynchronous_inputs() {
             "ZERO-OI.XSIM",
             Put,
             SESSION_DATE,
-            "120",
-            "10",
+            decimal("120"),
+            decimal("10"),
             Some("0"),
             Some("0.01"),
         ),
@@ -304,8 +304,8 @@ fn coverage_distinguishes_missing_zero_and_asynchronous_inputs() {
             "ZERO-GAMMA.XSIM",
             Call,
             SESSION_DATE,
-            "160",
-            "10",
+            decimal("160"),
+            decimal("10"),
             Some("4"),
             Some("0"),
         ),
@@ -365,13 +365,37 @@ fn coverage_distinguishes_missing_zero_and_asynchronous_inputs() {
 }
 
 #[test]
+fn incomplete_roster_is_partial_even_when_all_listed_contracts_are_valid() {
+    let mut chain = hand_chain();
+    chain.universe_complete = false;
+    let report = run(&chain, DealerScenario::DealerLong);
+
+    for (view, expected_count, expected_oi) in [
+        (&report.all, 5, "29"),
+        (&report.zero_dte, 2, "15"),
+        (&report.later, 3, "14"),
+    ] {
+        let coverage = &view.coverage;
+        assert_eq!(coverage.candidate_contracts, expected_count);
+        assert_eq!(coverage.valid_contracts, coverage.candidate_contracts);
+        assert!(!coverage.universe_complete);
+        assert!(
+            coverage.partial,
+            "an incomplete candidate roster is a partial estimate"
+        );
+        assert_eq!(coverage.eligible_open_interest, decimal(expected_oi));
+        assert!(coverage.total_open_interest.is_none());
+    }
+}
+
+#[test]
 fn spot_and_gamma_timing_are_independently_reported() {
     let mut chain = snapshot(vec![contract(
         "TIMING.XSIM",
         OptionRight::Call,
         SESSION_DATE,
-        "120",
-        "100",
+        decimal("120"),
+        decimal("100"),
         Some("2"),
         Some("0.01"),
     )]);
@@ -401,8 +425,8 @@ fn flip_chain() -> (OptionChainSnapshot, GammaGrid) {
             "C.XSIM",
             Call,
             SESSION_DATE,
-            "120",
-            "100",
+            decimal("120"),
+            decimal("100"),
             Some("1"),
             Some("0.03"),
         ),
@@ -410,8 +434,8 @@ fn flip_chain() -> (OptionChainSnapshot, GammaGrid) {
             "P.XSIM",
             Put,
             SESSION_DATE,
-            "120",
-            "100",
+            decimal("120"),
+            decimal("100"),
             Some("1"),
             Some("0.03"),
         ),
@@ -613,8 +637,8 @@ fn walls_use_numeric_order_for_ties_and_output_is_deterministic() {
             "HIGH.XSIM",
             OptionRight::Call,
             SESSION_DATE,
-            "1000",
-            "12.5",
+            decimal("1000"),
+            decimal("12.5"),
             Some("5"),
             Some("0.02"),
         ),
@@ -622,8 +646,8 @@ fn walls_use_numeric_order_for_ties_and_output_is_deterministic() {
             "LOW.XSIM",
             OptionRight::Put,
             LATER_EXPIRY,
-            "99",
-            "25",
+            decimal("99"),
+            decimal("25"),
             Some("5"),
             Some("0.01"),
         ),
@@ -646,8 +670,8 @@ fn rejects_invalid_snapshots_and_preserves_decimal_text() {
         "EXACT.XSIM",
         OptionRight::Call,
         SESSION_DATE,
-        "125",
-        "1",
+        decimal("125"),
+        decimal("1"),
         Some("1"),
         Some("0.010000000000000001"),
     )]);
@@ -695,8 +719,8 @@ fn exact_products_accept_large_intermediates_and_reject_unrepresentable_results(
         "SCALES.XSIM",
         OptionRight::Call,
         SESSION_DATE,
-        "125",
-        "1000000000000000000000000000",
+        decimal("125"),
+        decimal("1000000000000000000000000000"),
         Some("1000000000000000000000000000"),
         Some("0.000000000000000000000000001"),
     )]);
@@ -727,8 +751,8 @@ fn empty_and_real_zero_have_distinct_exposures() {
         "ZERO.XSIM",
         OptionRight::Call,
         SESSION_DATE,
-        "125",
-        "25",
+        decimal("125"),
+        decimal("25"),
         Some("0"),
         Some("0.03"),
     )]);
