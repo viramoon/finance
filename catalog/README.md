@@ -40,7 +40,7 @@ FINANCE_COLLECTOR_BIN="${CARGO_TARGET_DIR:-target}/debug/finance-collector" "$FI
 
 ## 官方回测与时间边界
 
-官方回测导入器把经许可并审核的 NYSE 股票或 ETF 原始日线写入独立、不可变的 [研究 catalog 快照](../docs/historical-backtest.md)。日线时间戳使用交易所会话收盘，导入拒绝负数纳秒、预 epoch 日线、重复日和非交易会话。1970-01-01T00:00:00Z 与之后的有效纳秒可通过底层时间范围校验。
+官方回测导入器把经许可并审核的 NYSE 股票或 ETF 日线写入独立、不可变的 [研究 catalog 快照](../docs/historical-backtest.md)。快照接收经复核无拆股的原始日线，或带血缘的 Yahoo 供应商拆股归一化日线。日线时间戳使用交易所会话收盘，导入拒绝负数纳秒、预 epoch 日线、重复日和非交易会话。1970-01-01T00:00:00Z 与之后的有效纳秒可通过底层时间范围校验。
 
 应用端应在构造 Bar 或调用 wrangler 之前检查有符号时间戳。显式丢弃模式返回条数及最早、最晚被丢弃时间，接口见 [Python 研究与分析](../python/README.md#unix-epoch-边界)。系统从首根被接受的 bar 起计算最长可用行情区间，官方作业从 warmup 后的第一条净值起算绩效。`^GSPC` 始于 1927 年的 98.89 年原始历史不能作为已回测覆盖，SPY 约 33.81 年的数据也不能称作 50 年回报。满窗最多允许起始边界缺五个交易日，窗口内部及末端应完整。详见 [日线窗口](../python/README.md#日线窗口)。
 
@@ -89,6 +89,8 @@ Yahoo 适配器接收纽约时区的美元日线，并以锁定的 `exchange-cal
 | `FredDailyObservation` | `observation_date`、`value`（源单位）、`realtime_start`、`realtime_end`（若源文件提供） |
 
 Yahoo 默认读取 chart `indicators.quote` 的 OHLCV，保留 `events.dividends` 与 `events.splits`，并保存 chart `indicators.adjclose` 的调整收盘价。源价的 `price_basis` 为 `yahoo_chart_quote`，表示适配器施加复权因子前的 Yahoo 值。Yahoo 源价本身可能已经过供应商的拆股归一化。若有有效的 `close` 和 `adjclose`，复权因子为 `adjclose / close`，使用 34 位十进制有效数字及 `ROUND_HALF_EVEN`。`DailyBar.adjusted()` 将因子乘到源 OHLC，派生记录的 `price_basis` 为 `yahoo_chart_adjusted_close_ratio`。`volume` 在两种视图中都保留源值，适配器不按拆股比率缩放成交量。
+
+官方研究转换独立于上述归档口径。无拆股原始模式在 `0.00002 USD` 容差内消除 OHLC 美分浮点残留，记录 `normalized_price_count`。跨拆股模式要求同一 `adjustment_as_of` 且经审核的供应商归一化 OHLCV，沿用供应商股份单位，保留最后一个相关拆股日前的精确报价及其亚美分字段计数。归一化研究快照的 `yahoo-lineage.json` 保存源路径、存档截止日、拆股事件、审核依据和输出 CSV 哈希。转换与准入详见 [研究回测手册](../docs/historical-backtest.md#准备数据)。
 
 - OHLCV 全为 `null` 时，向 catalog 写入 XNYS 会话日收盘时点的缺失记录。`DailyBar.is_missing_quote` 为真，`WriteReport.missing_quote_rows` 计入这类记录，`observations` 和实际写入区间也包含它们。非会话日的 OHLCV 和 `adjclose` 全为空时跳过，并计入 `WriteReport.skipped_missing_non_sessions`。非会话日若有源值则报错。若跳过后无主记录，写入失败并报告跳过数。
 - 单日 `adjclose` 为空或文件缺少整个 `adjclose` 序列时，源 OHLCV 照常入库。`adjusted_close`、`adjustment_factor` 和 `DailyBar.adjusted()` 都返回 `None`。若 OHLCV 全空而会话日有源 `adjclose`，仍保留该源字段，复权因子为空。禁止用相邻数据前填或插值。

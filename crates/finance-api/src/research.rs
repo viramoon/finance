@@ -264,8 +264,19 @@ pub fn dataset(root: &Path, id: &str) -> Result<Option<Dataset>, ApiError> {
         || !matches!(metadata.data_kind.as_str(), "historical" | "fixture")
         || metadata.calendar != "XNYS"
         || metadata.first_session > metadata.last_session
-        || metadata.price_basis != "raw_unadjusted"
-        || metadata.corporate_actions != "cash_dividends_excluded_split_free_reviewed"
+        || !matches!(
+            (
+                metadata.price_basis.as_str(),
+                metadata.corporate_actions.as_str()
+            ),
+            (
+                "raw_unadjusted",
+                "cash_dividends_excluded_split_free_reviewed"
+            ) | (
+                "yahoo_chart_split_normalized",
+                "cash_dividends_excluded_yahoo_split_normalized_reviewed"
+            )
+        )
         || metadata.source_sha256.len() != 64
         || !metadata
             .source_sha256

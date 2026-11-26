@@ -4,11 +4,11 @@
 
 ## 准备数据
 
-管理员准备经许可的 NYSE 上市 USD 股票或 ETF 日线，使用 UTF-8 CSV，列顺序为 `date,open,high,low,close,volume`。日期是交易所当地日期，价格是可按一美分表示的原始 OHLC，成交量为整股。标的示例为 `IBM.XNYS`。指数、市值指数的代理、分钟行情和包含拆股的区间需要独立数据和研究方案。
+管理员准备经许可的 NYSE 上市 USD 股票或 ETF 日线，使用 UTF-8 CSV，列顺序为 `date,open,high,low,close,volume`。日期是交易所当地日期，成交量为整股。现金分红不入账，两种价格口径都报告价格收益。指数、分钟行情和现金分红再投资仍需独立研究方案。不要用其他行情、调整收盘价或人工数据填补缺口。
 
-先核对来源和区间内拆股记录。当前导入协议只接收未按现金分红复权且经复核无拆股的区间。现金分红不入账，结果是价格收益。复权、拆股处理和盘中成交模拟仍需单独设计。不要用已有分钟行情、用户的研究目录或来源不明的 CSV 填补缺口。
+### IBM 2024 原始日线
 
-从已保存的 Yahoo chart JSON 导出源 quote OHLCV，或从显式指定历史数据根中的 Yahoo 序列导出。示例中的请求区间须按数据源调整，可用 `--start` 和 `--end` 显式选择经核实无拆股的闭区间。
+先核对 Yahoo 存档和公司行为记录，确认整个 `2024-01-02` 至 `2024-12-31` 区间无拆股，且更晚的公司行为也未改变该区间的原始价格与成交量口径。用已保存的 chart JSON 或显式指定的 `HistoricalCatalog` 导出 `indicators.quote`。默认转换命令遇到区间内的拆股会列出日期并退出。导入时 `--raw-split-free-reviewed` 是对原始 OHLCV 及无拆股的确认。
 
 ```sh
 export PYTHONPATH=python
@@ -27,13 +27,42 @@ export FERTILE_RESEARCH_ROOT=/path/to/isolated/research
   > /path/to/ibm-from-catalog.lineage.json
 ```
 
-转换器拒绝所选区间内已记录的拆股并列出日期。输出价格保留源 quote 数值，无法按分表示时退出并报告日期。Yahoo 可能按拆股归一化其源 quote，仍须依据来源和公司行为记录独立确认价格口径。官方导入器要求 `.XNYS` 标的，Yahoo 的 `SPY.ARCA` 仍用于公开历史数据归档。将标准输出的血缘 JSON 与 CSV 一同保存，核对 `adjustment_as_of`、实际首尾、观测数、缺口和 CSV 的 SHA-256。审核后导入所选研究根。
+原始价格用 `Decimal` 按 `ROUND_HALF_EVEN` 取最近美分。与该美分的绝对差小于或等于 `0.00002 USD` 时接受，否则退出并报告日期与 OHLC 字段。例如 `162.8300018310547` 输出为 `162.83`。血缘的 `output_price_basis` 为 `cent_normalized_yahoo_chart_quote`，`cent_tolerance_usd` 记录容差。`normalized_price_count` 统计数值改变的 OHLC 字段数，单日最多计四次。保留血缘 JSON 和 CSV，核对 `adjustment_as_of`、实际首尾、观测数、缺口和 CSV 的 SHA-256。官方导入要求 `.XNYS` 标的，`SPY.ARCA` 可继续用于公开历史归档。
 
 ```sh
 "$FINANCE_PYTHON" -m fertile_finance.research_catalog /path/to/ibm.csv \
   --instrument IBM.XNYS --asset-type stock --kind historical \
   --source "Yahoo Finance chart IBM" --raw-split-free-reviewed
 ```
+
+### 跨拆股的 IBM 长历史
+
+当 Yahoo 源 `indicators.quote` 的 OHLC 和整股成交量已由供应商统一到同一拆股后股份口径时，可按供应商归一化价格做连续研究。先用许可存档、供应商价格和成交量口径资料、公司行为记录及拆股日前后有独立依据的样本核实这一点，核对从请求起点到存档截止日的事件记录。证据未能确认统一口径时，应保留此次验收为未验证。转换器要求所选行情使用同一 `adjustment_as_of`，适合使用同一份完整存档写入的历史分区。完整长归档含 1970 年前记录时，按 [历史归档步骤](../RUNBOOK.md#手工保存公开历史数据) 显式使用 `pre_epoch="drop"` 并核对丢弃报告。
+
+归一化 CSV 延续供应商的股份口径。程序保留源成交量，用归档中的拆股事件界定报价精度政策，不再乘除拆股比率或应用 `adjclose`。最后一个相关拆股日前，按原数值保留拆股口径下的报价。构建使用的 Nautilus 高精度定点最多支持 16 位小数，无法精确存储的源值会报告日期和字段并退出。自最后一个拆股日起使用上述美分容差。运维需核对血缘中的 `split_events`，其 `session`、`numerator`、`denominator`、`source_timestamp` 和 `source_id` 记录来源事件，范围从请求起点到存档截止日，包含此范围内晚于请求结束的拆股。`split_review_evidence` 记录审核依据，`output_price_basis` 为 `yahoo_chart_split_normalized`，`preserved_subcent_price_count` 统计按源精度保留的亚美分 OHLC 字段数。
+
+以 IBM 的长存档为例。将 `FINANCE_YAHOO_SPLIT_EVIDENCE` 设为实际审核引用，内容可写供应商说明和经核对的公司行为报告编号。使用脱敏引用，血缘会随研究快照保存。日期按已核实的实际存档覆盖设置。使用新的 CSV 和血缘路径，并将 `FERTILE_RESEARCH_ROOT` 指向独立且尚未导入 IBM 的研究根。
+
+```sh
+"$FINANCE_PYTHON" -m fertile_finance.convert_research_csv \
+  --historical-data-root /path/to/history-data --series-id IBM.XNYS \
+  --start 1975-11-25 --end 2026-11-25 --output /path/to/ibm-long.csv \
+  --yahoo-split-normalized-evidence "${FINANCE_YAHOO_SPLIT_EVIDENCE:?set reviewed source references}" \
+  > /path/to/ibm-long.lineage.json
+```
+
+转换成功后核对 CSV 与血缘，再执行导入。
+
+```sh
+"$FINANCE_PYTHON" -m fertile_finance.research_catalog /path/to/ibm-long.csv \
+  --instrument IBM.XNYS --asset-type stock --kind historical \
+  --source "Yahoo Finance chart IBM" \
+  --yahoo-split-normalized-lineage /path/to/ibm-long.lineage.json
+```
+
+归一化导入核验 CSV 与血缘一致，并将 `yahoo-lineage.json` 随目录发布。研究清单的 `price_basis` 为 `yahoo_chart_split_normalized`，`corporate_actions` 为 `cash_dividends_excluded_yahoo_split_normalized_reviewed`。这个入口与 `--raw-split-free-reviewed` 互斥。跨拆股的未调整原始 OHLCV 不能作为连续价格导入。运行命令见 [隔离验收官方历史作业](../RUNBOOK.md#隔离验收官方历史作业)。价格口径的选择见 [ADR-0004](adr/ADR-0004-yahoo-split-normalized-research.md)。
+
+### 研究快照和覆盖检查
 
 合成数据用 `--kind fixture`。清单记录输入 CSV SHA-256、标的类别、数据来源和覆盖首尾。API 和 worker 用相同的 `FERTILE_RESEARCH_ROOT`。导入器在同一数据根内先写临时 Parquet，再发布完整标的目录。每个标的的 catalog 是不可覆盖的快照。需要更新时，先停止接单且等作业结束，在独立数据根准备新快照并备份旧快照，再由运维共同切换 API 和 worker 的配置。程序拒绝 catalog 内重复日期、非交易日、无有效数据，或请求区间内任何缺失的交易日。
 
@@ -43,7 +72,7 @@ export FERTILE_RESEARCH_ROOT=/path/to/isolated/research
 
 - NYSE 日历使用锁定版本的 exchange-calendars。Bar 事件时间为官方交易日收盘，正常冬令时为 21:00 UTC、美东夏令时为 20:00 UTC，半日市依日历提早。交易日按日历验证，包括缺失和休市。日线区间从 Unix epoch 起，拒绝负数纳秒和早于 1970-01-01 的日期。导入器在调用 Nautilus 构造器之前验证。
 - 请求起止日期包含边界。快慢均线使用截至当次收盘的窗口。快线大于慢线则目标为配置的整股数，否则为空仓。先加载慢线天数作 warmup，最后一个 warmup 收盘为绩效净值基线，随后才有机会成交。
-- 信号最早在下一交易日收盘执行。研究引擎先消化上一日意图，再使用本日收盘更新信号。成交模拟使用当日收盘加减 5 bp，滑点金额向上对齐到一美分，单价至少一美分。每个完整成交收 1.00 USD。初始现金 100000.00 USD，无杠杆、无借钱和做空。收盘日成交量是模拟容量上限，真实收盘盘口和可成交性需要更高分辨率数据。
+- 信号最早在下一交易日收盘执行。研究引擎先消化上一日意图，再使用本日收盘更新信号。成交模拟使用当日收盘加减 5 bp，滑点金额向上对齐到一美分，买价再向上、卖价向下对齐到美分，单价至少一美分。归一化研究使用精确收盘价生成信号和标记净值，持仓与成交量上限使用所审核的归一化股份单位。每个完整成交收 1.00 USD。初始现金 100000.00 USD，无杠杆、无借钱和做空。真实收盘盘口和可成交性需要更高分辨率数据。
 - 零量日保留在输入和审计中。零量、量不足或现金不足的意图不会提交给模拟撮合。单个订单只允许一次足额成交，并核对原生订单、时间、数量、价格、佣金及成交标识。末日持仓按收盘标记，末日的新信号不强制成交。
 - 汇总返回净损益、净值变动率和最大回撤。满窗计算 CAGR、Sharpe、波动、最大回撤和换手。官方 HTTP 作业四窗口的 Sharpe 使用 `rf=0`，无需读取 Ken French 日 RF。会话换手按实际成交名义金额除以前一会话收盘净值计，零成交日为零。组合和分红再投资仍需独立研究方案。
 - 相对实际最后一个绩效日分别回看 50、10、5 个日历年，并独立报告 `longest_sample`。每行包含请求起点、实际首尾、跨度、观测数、应有和缺失交易日及缺失比例。初始边界最多缺五个交易日，内部及末端须完整且至少两条观测才标记 `full`。请求起点早于 epoch 时保留原始日期，从 `calendar_start=1970-01-01` 统计交易日并将整窗标记不足。覆盖不足时 `metrics` 为 `null`。详见 [日线窗口](../python/README.md#日线窗口)。

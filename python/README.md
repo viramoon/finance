@@ -31,8 +31,8 @@ FERTILE_DATA_ROOT="$(mktemp -d)" PYTHONPATH=python \
 | `fertile_finance.download_yahoo_daily` | 将公开 Yahoo chart 日线下载到指定文件，有限退避并报告实际 URL |
 | `fertile_finance.isolated_historical_job` | 在独立数据根、研究根和环回端口上通过官方 HTTP API 执行一次作业 |
 | `fertile_finance.migrate_spy` | 核对旧 SPY 固定 21:00 UTC 时点并用本地 Yahoo 存档重导，支持 `--dry-run` |
-| `fertile_finance.convert_research_csv` | 从 Yahoo 文件或历史数据根生成官方导入 CSV，输出源 quote 血缘和 SHA-256 |
-| `fertile_finance.research_catalog` | 将经审核的原始 OHLCV 快照发布到指定研究根 |
+| `fertile_finance.convert_research_csv` | 从 Yahoo 文件或历史数据根生成官方导入 CSV，输出价格口径、规范计数、拆股血缘和 SHA-256 |
+| `fertile_finance.research_catalog` | 将经审核的原始无拆股或 Yahoo 拆股归一化 OHLCV 快照发布到指定研究根 |
 
 完整操作见 [运行手册](../RUNBOOK.md#隔离验收官方历史作业)、[SPY 迁移](../catalog/README.md#既有-spy-固定-2100-utc-数据) 和 [CSV 导出与审核导入](../docs/historical-backtest.md#准备数据)。
 

@@ -77,7 +77,7 @@ curl -sS http://127.0.0.1:8081/api/v1/market/status
 
 ### 隔离验收官方历史作业
 
-从 finance 仓库根运行。先按下文转换、复核并导入日线快照，再指定与部署分开的数据根、只读研究根和可用的本机端口。以下日期和端口为示例，分别按已导入标的的实际覆盖和本机空闲端口替换。
+从 finance 仓库根运行。先按 [IBM 2024 原始日线](docs/historical-backtest.md#ibm-2024-原始日线) 转换、复核并导入日线快照，再指定与部署分开的数据根、只读研究根和可用的本机端口。
 
 ```sh
 cargo build --locked -p finance-api
@@ -94,6 +94,17 @@ mkdir -p "$FINANCE_ISOLATED_DATA"
 ```
 
 运行器在环回地址启动专用 API 和 worker，通过 HTTP 提交并轮询。省略 `--port` 时自动选用高位端口。队列位于所选数据根的 `finance-state/backtests/jobs.sqlite3`。标准输出为终态作业 JSON，运行结束后 API、worker 和端口均释放。核对 `summary.research.windows` 中依序返回的 `50y`、`10y`、`5y`、`longest_sample`，并记录每行实际首尾、覆盖状态和观测数。覆盖不足时 `metrics` 为 `null`，最长样本的 `requested_years` 为 `null`。更多进程和队列说明见 [作业手册](docs/backtest-jobs.md#隔离运行官方历史作业)。
+
+长样本验收使用不同于 2024 示例的研究根。先按 [跨拆股的 IBM 长历史](docs/historical-backtest.md#跨拆股的-ibm-长历史) 完成供应商归一化口径审核、转换和血缘导入，再以同一入口提交长区间。调整日期以实际已导入的首尾为准，并给最慢均线留出预热会话。
+
+```sh
+"$FINANCE_PYTHON" -m fertile_finance.isolated_historical_job \
+  --api-bin /absolute/path/to/target/debug/finance-api \
+  --data-root "$FINANCE_ISOLATED_DATA" --research-root "$FERTILE_RESEARCH_ROOT" \
+  --instrument IBM.XNYS --start 1975-11-25 --end 2026-11-25
+```
+
+先核对终态 JSON 的 `summary.research.dataset.price_basis` 为 `yahoo_chart_split_normalized`，再检查四窗口。目录内的 `yahoo-lineage.json` 随快照归档，以复核所用的拆股事件和价格口径。
 
 **官方作业不使用 FRED。** 四窗口验收无须 FRED series ID 或 Graph CSV 的 `cosd`、`coed`。本次已导入的 2024 年 `DGS10` 共 261 条，是公开历史归档示例，其区间不影响验收。Ken French 日频也无须提供，官方 Sharpe 固定使用 `rf_source="rf=0"`。本次 French 文件的观测截止日为 2026-09-30，实际写入 1970-01-02 至 2026-09-30，共 14,308 条，另丢弃 12,030 条早于 1970 年的记录。Yahoo 和 SPY 的截止日应从各自存档独立核对。
 
@@ -204,7 +215,7 @@ PY
 
 旧 SPY 迁移先对停写的旧 catalog 或备份执行 `--dry-run`，将 Yahoo 请求日期改为旧数据实际区间。核对报告后去掉 `--dry-run`，在独立数据根重导。完整命令、标的和时间抽查约定见 [历史数据目录](catalog/README.md#既有-spy-固定-2100-utc-数据)。
 
-官方作业的输入使用 `convert_research_csv` 从 Yahoo 文件或 `HistoricalCatalog` 显式导出。保留 CSV 及其血缘报告，独立核验价格和拆股口径，再用 `research_catalog --raw-split-free-reviewed` 导入到独立研究根。命令见 [准备数据](docs/historical-backtest.md#准备数据)。
+官方作业使用 `convert_research_csv` 从许可的 Yahoo 文件或 `HistoricalCatalog` 导出 CSV 和血缘。核对原始 OHLCV 与无拆股记录后，使用 `research_catalog --raw-split-free-reviewed` 导入。跨拆股时先核实 Yahoo 已统一 OHLCV 股份口径，再使用 `--yahoo-split-normalized-evidence` 转换，并用 `research_catalog --yahoo-split-normalized-lineage` 导入。两者均在独立研究根操作。价格容差、审核证据和复制命令见 [准备数据](docs/historical-backtest.md#准备数据)。
 
 ```sh
 "$FINANCE_PYTHON" -m fertile_finance.download_yahoo_daily --help

@@ -123,6 +123,46 @@ async fn queue_access_does_not_recreate_missing_data_mount() {
 }
 
 #[tokio::test]
+async fn reviewed_yahoo_split_catalog_is_listed_and_can_submit_a_job() {
+    let temp = tempfile::tempdir().unwrap();
+    let dataset = temp.path().join("research/IBM.XNYS");
+    std::fs::create_dir_all(&dataset).unwrap();
+    let manifest = dataset.join("dataset.json");
+    let mut metadata = json!({
+        "instrument": "IBM.XNYS",
+        "asset_type": "stock",
+        "source": "Constructed fixture",
+        "source_sha256": "a".repeat(64),
+        "data_kind": "fixture",
+        "calendar": "XNYS",
+        "first_session": "1975-11-25",
+        "last_session": "2025-03-04",
+        "observations": 12400,
+        "price_basis": "yahoo_chart_split_normalized",
+        "corporate_actions": "cash_dividends_excluded_yahoo_split_normalized_reviewed"
+    });
+    std::fs::write(&manifest, metadata.to_string()).unwrap();
+    let (status, listed) = request(&temp, "GET", "/api/v1/backtests/datasets", "", "").await;
+    assert_eq!(status, 200);
+    assert_eq!(listed, json!({"items": [metadata.clone()]}));
+    assert_eq!(
+        request(&temp, "POST", "/api/v1/backtests", "yahoo", DAILY)
+            .await
+            .0,
+        202
+    );
+
+    metadata["corporate_actions"] = json!("cash_dividends_excluded_split_free_reviewed");
+    std::fs::write(&manifest, metadata.to_string()).unwrap();
+    assert_eq!(
+        request(&temp, "GET", "/api/v1/backtests/datasets", "", "")
+            .await
+            .0,
+        500
+    );
+}
+
+#[tokio::test]
 async fn historical_catalog_and_lookup_use_the_committed_request() {
     let t = tempfile::tempdir().unwrap();
     let path = "/api/v1/backtests";
