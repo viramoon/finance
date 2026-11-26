@@ -60,9 +60,10 @@ POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /a
 | 400 | `invalid_bars_query`、`invalid_indicator` | 查询参数、范围、分页或指标声明非法。 |
 | 404 | `bars_not_found` | 未发布匹配序列。 |
 | 422 | `indicator_history_unavailable` | 匹配投影缺少从起点计算所需的历史。 |
-| 422 | `indicator_input_out_of_range` | 进入指标内核的价格或数量超出支持的小数位。F1 投影中超出十进制文本规则的字段在解析时即返回 `bars_invalid`。 |
 | 422 | `indicator_work_limit` | 从序列起点到本页末尾（含返回的预览）的估算工作量超出 5,000,000。每个指标每行至少计 1，已过预热的布林带和实现波动率按各自周期计。可减小 `limit` 或选择更少、周期更短的指标。 |
 | 500 | `bars_invalid`、`bars_unreadable`、`indicator_calculation_failed`、`bars_query_failed` | 投影无效、不可读，或计算失败。指标计算错误可来自本页或更早的回放前缀。 |
+
+投影的 OHLCV 字符串遵守 [F1 十进制文本规则](market-protocol.md#精确值与时钟)，整数位和小数位合计最多 28 位。整数部分至少占一位，所以小数部分最多 27 位。超出位数的投影在解析时返回 500 `bars_invalid`。
 
 ### 只读展示投影
 

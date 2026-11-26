@@ -251,9 +251,11 @@ async fn chart_preserves_finest_f1_price_and_rejects_overprecise_wire_price() {
     let dir = tempfile::tempdir().unwrap();
     let mut snapshot = projection();
     let inside = "0.000000000000000000000000001";
-    for field in ["open", "high", "low", "close"] {
+    for field in ["open", "high", "close"] {
         snapshot["closed"][0][field] = json!(inside);
     }
+    // Both closes are within [low, high], so the negative case isolates wire precision.
+    snapshot["closed"][0]["low"] = json!("0");
     store(dir.path(), &snapshot);
     let app = app(dir.path());
     let indicator = encoded(r#"[{"use":"indicator.ema@1.0.0","params":{"period":1}}]"#);
@@ -268,9 +270,20 @@ async fn chart_preserves_finest_f1_price_and_rejects_overprecise_wire_price() {
 
     snapshot["closed"][0]["close"] = json!("0.0000000000000000000000000001");
     store(dir.path(), &snapshot);
-    let (status, error) = call(&app, &uri).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(error["error"]["code"], "bars_invalid");
+    // Check raw bars first, without any indicator input validation in this path.
+    for query in [
+        format!("{CHART}?{SCOPE}&{WINDOW}&limit=1"),
+        uri,
+        format!("{VALUES}?{SCOPE}&{WINDOW}&indicators={indicator}&limit=1"),
+    ] {
+        let (status, error) = call(&app, &query).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{query}");
+        assert_eq!(
+            error,
+            json!({"error": {"code": "bars_invalid", "message": "Invalid bars projection"}}),
+            "{query}"
+        );
+    }
 }
 
 #[tokio::test]

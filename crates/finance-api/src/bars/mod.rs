@@ -466,19 +466,12 @@ fn chart_row(bar: ProjectedBar, provisional: bool, output: Vec<IndicatorValue>) 
     }
 }
 
-fn calculation_error(cause: IndicatorError) -> ApiError {
-    match cause {
-        IndicatorError::NumericInputOutOfRange => error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "indicator_input_out_of_range",
-            "Bar price or volume exceeds the supported indicator input scale",
-        ),
-        _ => error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "indicator_calculation_failed",
-            "Cannot calculate indicators for this projection",
-        ),
-    }
+fn calculation_error(_: IndicatorError) -> ApiError {
+    error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "indicator_calculation_failed",
+        "Cannot calculate indicators for this projection",
+    )
 }
 
 fn invalid_query() -> ApiError {
