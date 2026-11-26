@@ -315,6 +315,40 @@ impl StreamDecoder<MarketDepths> for MarketDepths {
     }
 }
 
+/// A depth row that preserves protobuf decimal quantity text.
+#[cfg(feature = "async")]
+#[derive(Debug)]
+pub struct ExactMarketDepth {
+    /// The position on this side of the book.
+    pub position: i32,
+    /// 0 = insert, 1 = update, 2 = delete.
+    pub operation: i32,
+    /// 0 = ask, 1 = bid.
+    pub side: i32,
+    /// The price supplied as a protobuf double.
+    pub price: Option<f64>,
+    /// The unmodified protobuf decimal quantity, if present.
+    pub size: Option<String>,
+    /// Venue for SMART depth, MPID for direct L2 depth.
+    pub market_maker: Option<String>,
+    /// Whether the response aggregates across venues.
+    pub smart_depth: bool,
+}
+
+#[cfg(feature = "async")]
+impl StreamDecoder<ExactMarketDepth> for ExactMarketDepth {
+    const RESPONSE_MESSAGE_IDS: &[IncomingMessages] = MarketDepths::RESPONSE_MESSAGE_IDS;
+    const REQUIRES_COMPLETE_SEQUENCE: bool = true;
+
+    fn decode(_context: &DecoderContext, message: &mut ResponseMessage) -> Result<Self, Error> {
+        common::decoders::decode_exact_market_depth(message)
+    }
+
+    fn cancel_message(server_version: i32, request_id: Option<i32>, context: Option<&DecoderContext>) -> Result<Vec<u8>, Error> {
+        MarketDepths::cancel_message(server_version, request_id, context)
+    }
+}
+
 /// Stores depth market data description.
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Default)]

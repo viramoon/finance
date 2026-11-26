@@ -10,6 +10,7 @@ use futures::stream::Stream;
 use futures::StreamExt;
 use log::{debug, warn};
 use tokio::sync::{mpsc, OnceCell};
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use super::common::{filter_notice, process_decode_result, DecoderContext, ProcessingResult, RoutedItem, SubscriptionItem};
 use super::StreamDecoder;
@@ -96,6 +97,7 @@ pub struct Subscription<T> {
     cancel_fn: Option<Arc<CancelFn>>,
     /// Snapshot-end detector captured from the decoder (`None` for pre-decoded subscriptions).
     snapshot_end_fn: Option<SnapshotEndFn<T>>,
+    requires_complete_sequence: bool,
 }
 
 enum SubscriptionInner<T> {
@@ -139,6 +141,7 @@ impl<T> Clone for Subscription<T> {
             message_bus: self.message_bus.clone(),
             cancel_fn: self.cancel_fn.clone(),
             snapshot_end_fn: self.snapshot_end_fn,
+            requires_complete_sequence: self.requires_complete_sequence,
         }
     }
 }
@@ -175,6 +178,7 @@ impl<T> Subscription<T> {
             message_bus: Some(message_bus),
             cancel_fn: None,
             snapshot_end_fn: None,
+            requires_complete_sequence: false,
         }
     }
 
@@ -196,6 +200,7 @@ impl<T> Subscription<T> {
         // `StreamDecoder` bound) can flag a completed snapshot and skip the cancel on
         // drop — the async mirror of the sync side's intrinsic `snapshot_ended` tracking.
         sub.snapshot_end_fn = Some(<T as StreamDecoder<T>>::is_snapshot_end);
+        sub.requires_complete_sequence = D::REQUIRES_COMPLETE_SEQUENCE;
         sub
     }
 
@@ -229,6 +234,7 @@ impl<T> Subscription<T> {
             message_bus: None,
             cancel_fn: None,
             snapshot_end_fn: None,
+            requires_complete_sequence: false,
         }
     }
 
@@ -355,6 +361,7 @@ impl<T: Send + 'static> Stream for Subscription<T> {
             stream_ended,
             snapshot_ended,
             snapshot_end_fn,
+            requires_complete_sequence,
             ..
         } = this;
         loop {
@@ -365,7 +372,13 @@ impl<T: Send + 'static> Stream for Subscription<T> {
                     // executor between immediately-available items.
                     let routed = match Pin::new(&mut subscription.stream).poll_next(cx) {
                         Poll::Ready(Some(Ok(item))) => item,
-                        Poll::Ready(Some(Err(_lagged))) => continue, // skip BroadcastStream lag
+                        Poll::Ready(Some(Err(BroadcastStreamRecvError::Lagged(count)))) => {
+                            if *requires_complete_sequence {
+                                stream_ended.store(true, Ordering::Relaxed);
+                                return Poll::Ready(Some(Err(Error::SubscriptionLagged(count))));
+                            }
+                            continue;
+                        }
                         Poll::Ready(None) => return Poll::Ready(None),
                         Poll::Pending => return Poll::Pending,
                     };

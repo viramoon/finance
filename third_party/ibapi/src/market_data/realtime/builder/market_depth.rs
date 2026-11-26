@@ -103,4 +103,9 @@ impl<'a> MarketDepthBuilder<'a, crate::client::r#async::Client> {
     pub async fn subscribe(self) -> Result<crate::subscriptions::Subscription<MarketDepths>, Error> {
         crate::market_data::realtime::r#async::market_depth(self.client, self.contract, self.number_of_rows, self.smart_depth).await
     }
+
+    /// Subscribe without rounding protobuf size strings or skipping lost positional updates.
+    pub async fn subscribe_exact(self) -> Result<crate::subscriptions::Subscription<crate::market_data::realtime::ExactMarketDepth>, Error> {
+        crate::market_data::realtime::r#async::market_depth(self.client, self.contract, self.number_of_rows, self.smart_depth).await
+    }
 }
