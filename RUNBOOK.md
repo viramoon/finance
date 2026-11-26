@@ -4,7 +4,7 @@
 
 ## 数据目录与 Git 检查
 
-把行情根目录、研究目录、数据库、截图、日志、崩溃转储和备份放在 Git 工作树之外。IBKR paper 与回放各用独立数据根。开发克隆运行 `sh scripts/install-data-guard-hooks.sh` 安装暂存区和推送检查。处理阻断时先用本地检查定位路径，清理待推送历史中的违规文件；合成样本的复现和例外登记见 [数据入仓防护](docs/data-guard.md)。
+把行情根目录、研究目录、数据库、截图、日志、崩溃转储和备份放在 Git 工作树之外。IBKR paper 与回放各用独立数据根。开发克隆运行 `sh scripts/install-data-guard-hooks.sh` 安装暂存区和推送检查。处理阻断时先用 `python3 -B scripts/data_guard.py --show-paths range origin/main HEAD` 定位 PR 范围内的问题。清理尚未发布的违规历史。防护启用前已发布的提交可经单独评审登记历史豁免，再追加提交移除仍留在目标树中的违规文件或补齐合成 fixture 来源。合成样本复现和登记流程见 [数据入仓防护](docs/data-guard.md)。
 
 ## 部署、启停与回滚
 
