@@ -4,7 +4,11 @@ fertile 的主项目与 submodule，基于 NautilusTrader 的交易与数据系�
 
 本仓库按 [issue #1 方案 v2](https://github.com/viramoon/finance/issues/1#issuecomment-6834604073) 初始化。当前提供 [Nautilus 源码构建](docs/build.md)、上游离线回测批任务、[配置策略回测](docs/backtest-jobs.md#配置策略作业) 及 [行情与回测 HTTP API](docs/api.md)。TBD 项由后续 issue 明确。开发从 [AGENTS.md](AGENTS.md) 开始。
 
+`finance-ib` 提供 paper 只读的美股及 OPRA 顶档订阅接口，以及需显式启用的私有权限探针。真实账户各产品权限仍待验收。操作见 [IBKR 接入](docs/integrations/ib.md#美股-l1-和-opra-权限验收)。
+
 本地行情链路支持 F1 事件追加、恢复和独立 Parquet 投影，Hyperliquid 公共永续行情已接入。[本地行情 WAL、投影与封段接口](docs/market-wal.md)
+
+finance-api 提供 v1 行情 WAL、投影、水位、缺口及因子研究只读查询，并从代码导出 REST OpenAPI 和版本化 WS/SSE 消息契约。[首批读契约与导出命令](docs/api.md#首批读契约)
 
 历史期权库支持通过只读 paper 请求接口取得已确认的未到期 IBKR 合约闭合 bar，当前使用合成回放验证，真实请求由 F9a 接入。Databento OPRA 提供默认禁用的离线费用估算。[历史期权链](docs/option-history.md)
 

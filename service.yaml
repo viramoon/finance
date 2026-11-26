@@ -98,6 +98,14 @@ processes:
     bind_host: 127.0.0.1
     port: 8081 # FINANCE_API_PORT / config.api.port 可覆盖
     dependencies: [data_root]
+    read_contract:
+      version: v1
+      documentation: docs/api.md
+      market_state: [finance-state/market-wal, finance-state/market-projection]
+      factor_snapshot: finance-state/factor-research/read-v1.json
+      cache_control: private, no-store
+      openapi_export: cargo run --locked -q -p finance-api -- export-openapi
+      stream_schema_export: cargo run --locked -q -p finance-api -- export-read-stream DIRECTORY
     health:
       live_path: /healthz/live
       ready_path: /healthz/ready
@@ -105,6 +113,14 @@ processes:
       ready: 数据根目录可读；不代表交易 ready
     restart_policy: 由 fertile deploy/ 的守护配置决定
 batch_jobs:
+  - name: ib-market-entitlements
+    command: bash scripts/check-ib-entitlements.sh
+    working_directory: finance
+    dependencies: [ib_gateway]
+    account: paper
+    opt_in_env: IB_LIVE_TEST
+    client_id_from: ib.probe_client_id
+    output: 脱敏 JSON 到标准输出
   - name: backtest-sample
     command: bash scripts/backtest-sample.sh
     output: "${FERTILE_DATA_ROOT}/finance-state/backtests/sample/latest.json"
