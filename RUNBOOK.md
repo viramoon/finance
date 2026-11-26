@@ -150,6 +150,14 @@ FERTILE_DATA_ROOT=/path/to/decision-data scripts/finance-decision \
   --plan /path/to/sma-plan.json --replay /path/to/test-bars.ndjson
 ```
 
+运行 `StrategyBundle` 时，用同一个 `finance-strategy compile` 命令生成 F2 计划，准备按 XNYS 收盘顺序写入的会话 NDJSON，再通过已有源码构建的 Python 环境启动。每帧包含闭合行情、点时成分和只读组合快照。格式见 [配置策略会话输入](docs/decision-process.md#配置策略会话输入)。
+
+```sh
+target/debug/finance-strategy compile /path/to/bundle.yaml > /path/to/bundle-plan.json
+FINANCE_PYTHON=/path/to/source-built/venv/bin/python FERTILE_DATA_ROOT=/path/to/bundle-decision-data \
+  scripts/finance-decision --plan /path/to/bundle-plan.json --replay /path/to/decision-sessions.ndjson
+```
+
 一次性回放在读完后退出。对持续追加的同一文件加 `--follow`，运维可单独向该进程发送 SIGTERM 再使用同一参数启动。保留回放文件已提交的字节前缀和 `finance-state/decisions/decisions.sqlite3`。重启会重建指标状态、核对前缀并从持久断点续读。遇到缺口、更正或输入文件替换，先核对源和覆盖范围。用已复核的新输入基线和新数据根建立独立记录。进程健康由守护器检查，消费进度用决策库中的持久检查点核对。此进程只读行情，写入本地策略目标和消费进度，无端口或账户配置。文件格式、边界与诊断见 [实时决策接口](docs/decision-process.md)。
 
 ### 历史价量补拉

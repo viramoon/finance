@@ -27,6 +27,8 @@ curl 'http://127.0.0.1:8081/api/v1/backtests?limit=20'
 
 `StrategyBundle` 作业使用 [F2 编译器](strategy-bundle.md) 统一处理文件和登记版本，将编译计划和回放快照关联到同一队列记录。现有 worker 用 Nautilus `BacktestEngine` 执行现金权益的离线模拟成交。提交和查询见 [HTTP 接口](api.md#配置策略提交与结果)。
 
+配置作业与实时决策共用收盘指标、配方和目标生成。在回测中，模拟成交更新的组合状态作为下一次收盘求值的输入。实时决策使用显式的只读组合快照，并持久化配方目标。会话输入格式见 [实时决策接口](decision-process.md#配置策略会话输入)。
+
 ### 本地回放数据
 
 在既有数据根的 `finance-state/backtests/strategy-inputs/<bars_ref>/<universe_ref>.json` 发布受信任的回放文件。单文件上限 32 MiB，路径中的两个引用来自已编译的版本化数据和股票池 ID。文件由运维或研究侧从已审查的本地数据生成，使用原子替换发布。测试数据可用 [合成生成器](../tests/config_strategy_replay_fixture.py) 写入独立临时根。默认使用三个每会话上涨一美元的标的，并分别在入场和退出的执行会话设置一条晚到 bar。`--target-weights` 生成另一组固定价格序列，让前三名的次序在回测中变化，用于核对 Top-N 截断、等权名义金额和调仓。

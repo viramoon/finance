@@ -5,6 +5,7 @@ from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
 from hashlib import sha256
+import json
 from pathlib import Path
 import os
 import signal
@@ -14,7 +15,8 @@ import sys
 import time
 
 from .market_protocol import AssetKind, BarClosed, Event, Kind, ProtocolError
-from .strategy_evaluation import ClosedBar, Decision, SmaCrossoverPlan, open_evaluator
+from .strategy_evaluation import ClosedBar, SmaCrossoverPlan, _unique_object, open_evaluator
+from .strategy_plan import BUNDLE_PLAN_VERSION, checked_bundle_plan
 
 
 STATE_DIRECTORY = Path("finance-state/decisions")
@@ -34,53 +36,36 @@ class _Checkpoint:
     prefix_sha256: str
 
 
-def _open_store(connection: sqlite3.Connection, plan: SmaCrossoverPlan) -> _Checkpoint:
-    connection.executescript("""
+def _open_store(connection: sqlite3.Connection, replay) -> _Checkpoint:
+    connection.execute("""
         CREATE TABLE IF NOT EXISTS decision_checkpoint (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             plan_sha256 TEXT NOT NULL,
             replay_offset INTEGER NOT NULL CHECK (replay_offset >= 0),
             replay_sha256 TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS decisions (
-            replay_offset INTEGER PRIMARY KEY,
-            plan_sha256 TEXT NOT NULL,
-            source TEXT NOT NULL,
-            product TEXT NOT NULL,
-            channel TEXT NOT NULL,
-            instrument_id TEXT NOT NULL,
-            epoch TEXT NOT NULL,
-            seq TEXT NOT NULL,
-            cursor TEXT NOT NULL,
-            license TEXT NOT NULL,
-            exchange_ts TEXT NOT NULL,
-            first_available_ts TEXT NOT NULL,
-            decision_ts TEXT NOT NULL,
-            target_shares TEXT NOT NULL,
-            UNIQUE (epoch, seq)
-        );
         """)
     with connection:
         connection.execute(
             "INSERT OR IGNORE INTO decision_checkpoint VALUES (1, ?, 0, ?)",
-            (plan.content_sha256, sha256().hexdigest()),
+            (replay.plan_sha256, sha256().hexdigest()),
         )
         plan_hash, offset, digest = connection.execute(
             "SELECT plan_sha256, replay_offset, replay_sha256 FROM decision_checkpoint WHERE id = 1"
         ).fetchone()
-    if plan_hash != plan.content_sha256:
+    if plan_hash != replay.plan_sha256:
         raise DecisionError("decision store belongs to a different strategy plan")
+    replay.initialize(connection)
     return _Checkpoint(offset, digest)
 
 
 def _commit(
     connection: sqlite3.Connection,
-    plan: SmaCrossoverPlan,
+    replay,
     prior: _Checkpoint,
     checkpoint: _Checkpoint,
-    event: Event,
-    decision: Decision | None,
-    decision_ts: int,
+    frame,
+    decision,
 ) -> None:
     with connection:
         updated = connection.execute(
@@ -90,16 +75,7 @@ def _commit(
         )
         if updated.rowcount != 1:
             raise DecisionError("decision checkpoint moved during evaluation; another process owns the stream")
-        if decision is not None:
-            connection.execute(
-                """INSERT INTO decisions (
-                    replay_offset, plan_sha256, source, product, channel, instrument_id,
-                    epoch, seq, cursor, license, exchange_ts, first_available_ts, decision_ts, target_shares
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (checkpoint.offset, plan.content_sha256, *event.stream_key, event.epoch, event.seq,
-                 event.cursor, event.license, str(decision.ts_event), event.first_available_ts, str(decision_ts),
-                 format(decision.target_shares, "f")),
-            )
+        replay.record(connection, checkpoint.offset, frame, decision)
 
 
 def _replay_error_path(error: ProtocolError) -> str:
@@ -138,15 +114,93 @@ def _check_replay(path: Path, opened: os.stat_result, offset: int) -> None:
         raise DecisionError("replay was replaced or truncated")
 
 
+class _SmaReplay:
+    def __init__(self, plan):
+        self.plan = plan
+        self.plan_sha256 = plan.content_sha256
+        self.evaluator = open_evaluator(plan)
+        self.previous = None
+        self.decision_ts = 0
+
+    def initialize(self, connection):
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS decisions (
+                replay_offset INTEGER PRIMARY KEY,
+                plan_sha256 TEXT NOT NULL,
+                source TEXT NOT NULL,
+                product TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                instrument_id TEXT NOT NULL,
+                epoch TEXT NOT NULL,
+                seq TEXT NOT NULL,
+                cursor TEXT NOT NULL,
+                license TEXT NOT NULL,
+                exchange_ts TEXT NOT NULL,
+                first_available_ts TEXT NOT NULL,
+                decision_ts TEXT NOT NULL,
+                target_shares TEXT NOT NULL,
+                UNIQUE (epoch, seq)
+            )
+        """)
+
+    def decode(self, raw, offset):
+        event = _decode(raw, offset, self.previous, self.plan)
+        self.previous = event
+        if isinstance(event.payload, BarClosed):
+            self.decision_ts = max(self.decision_ts, event.exchange_ts.integer, event.first_available_ts.integer)
+            return event, self.decision_ts
+        return event, None
+
+    def evaluate(self, event, _offset):
+        if isinstance(event.payload, BarClosed):
+            return self.evaluator.evaluate(
+                ClosedBar(event.instrument_id, event.exchange_ts.integer, event.payload.close.decimal)
+            )
+        return None
+
+    def record(self, connection, offset, event, decision):
+        if decision is not None:
+            connection.execute(
+                """INSERT INTO decisions (
+                    replay_offset, plan_sha256, source, product, channel, instrument_id,
+                    epoch, seq, cursor, license, exchange_ts, first_available_ts, decision_ts, target_shares
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (offset, self.plan_sha256, *event.stream_key, event.epoch, event.seq,
+                 event.cursor, event.license, str(decision.ts_event), event.first_available_ts,
+                 str(self.decision_ts), format(decision.target_shares, "f")),
+            )
+
+
+def _load_plan(raw):
+    try:
+        plan = json.loads(raw, object_pairs_hook=_unique_object)
+    except (UnicodeError, ValueError, RecursionError):
+        raise DecisionError("Invalid compiled strategy plan JSON") from None
+    if isinstance(plan, dict) and plan.get("plan_version") == BUNDLE_PLAN_VERSION:
+        return plan
+    return SmaCrossoverPlan.from_json(raw)
+
+
+def _replay_adapter(plan):
+    if isinstance(plan, SmaCrossoverPlan):
+        return _SmaReplay(plan)
+    plan = checked_bundle_plan(plan)
+    try:
+        from .decision_bundle import BundleDecisionReplay
+    except ImportError:
+        raise DecisionError("StrategyBundle replay requires the source-built Nautilus Python environment") from None
+    return BundleDecisionReplay(plan)
+
+
 def _consume(
-    plan: SmaCrossoverPlan,
+    plan: SmaCrossoverPlan | dict,
     replay_path: Path,
     database: Path,
     *,
     follow: bool,
     stopped: Callable[[], bool],
 ) -> None:
-    evaluator = open_evaluator(plan)
+    adapter = _replay_adapter(plan)
     # Read-only, nonblocking open also lets us reject non-regular inputs such as FIFOs.
     with os.fdopen(os.open(replay_path, os.O_RDONLY | os.O_NONBLOCK), "rb") as replay:
         opened = os.fstat(replay.fileno())
@@ -155,10 +209,8 @@ def _consume(
         database.parent.parent.mkdir(exist_ok=True)
         database.parent.mkdir(exist_ok=True)
         with closing(sqlite3.connect(database)) as connection:
-            checkpoint = _open_store(connection, plan)
+            checkpoint = _open_store(connection, adapter)
             digest = sha256()
-            previous = None
-            decision_ts = 0
             while not stopped():
                 start = replay.tell()
                 _check_replay(replay_path, opened, start)
@@ -182,31 +234,24 @@ def _consume(
                     consumed.offset == checkpoint.offset and consumed != checkpoint
                 ):
                     raise DecisionError("replay prefix differs from the committed checkpoint")
-                event = _decode(raw, start, previous, plan)
-                previous = event
-                decision = None
-                if isinstance(event.payload, BarClosed):
-                    close_ts = event.exchange_ts.integer
-                    decision_ts = max(decision_ts, close_ts, event.first_available_ts.integer)
-                    if follow and consumed.offset > checkpoint.offset:
-                        while not stopped() and decision_ts > time.time_ns():
-                            _check_replay(replay_path, opened, consumed.offset)
-                            time.sleep(_POLL_SECONDS)
-                        if stopped():
-                            return
+                frame, available = adapter.decode(raw, start)
+                if available is not None and follow and consumed.offset > checkpoint.offset:
+                    while not stopped() and available > time.time_ns():
                         _check_replay(replay_path, opened, consumed.offset)
-                    decision = evaluator.evaluate(
-                        ClosedBar(event.instrument_id, close_ts, event.payload.close.decimal)
-                    )
+                        time.sleep(_POLL_SECONDS)
+                    if stopped():
+                        return
+                    _check_replay(replay_path, opened, consumed.offset)
+                decision = adapter.evaluate(frame, start)
                 if consumed.offset > checkpoint.offset:
-                    _commit(connection, plan, checkpoint, consumed, event, decision, decision_ts)
+                    _commit(connection, adapter, checkpoint, consumed, frame, decision)
                     checkpoint = consumed
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="finance-decision", description=__doc__)
     parser.add_argument("--plan", type=Path, required=True, help="compiled strategy plan JSON")
-    parser.add_argument("--replay", type=Path, required=True, help="append-only F1 event NDJSON")
+    parser.add_argument("--replay", type=Path, required=True, help="append-only F1 events or StrategyBundle sessions")
     parser.add_argument("--follow", action="store_true", help="wait for complete appended frames")
     args = parser.parse_args()
 
@@ -238,7 +283,7 @@ def main() -> int:
                 database.exists() and input_path.samefile(database)
             ):
                 raise DecisionError("inputs must be outside the decision state directory")
-        plan = SmaCrossoverPlan.from_json(args.plan.read_bytes())
+        plan = _load_plan(args.plan.read_bytes())
         _consume(plan, args.replay, database, follow=args.follow, stopped=lambda: stopping)
     except (ValueError, sqlite3.Error, OSError) as error:
         print(f"finance-decision: {error}", file=sys.stderr)

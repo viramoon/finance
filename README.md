@@ -87,6 +87,6 @@ curl http://127.0.0.1:8081/healthz/ready
 curl http://127.0.0.1:8081/api/v1/backtests/sample
 ```
 
-端口默认 8081，配置优先级、错误状态、精确金额与 OpenAPI 导出见 [API 文档](docs/api.md)。示例接口读取 latest.json。多个回测 worker 可在同一宿主上通过 SQLite 租约并行领取作业。collector 的行情状态可在 /api/v1/market/status 查询。`scripts/finance-decision` 单独消费闭合行情回放，与 `SmaCrossover` 回测共用 CPU 求值器，产出本地决策记录。启动与恢复见 [运行手册](RUNBOOK.md#实时决策与并行回测)。
+端口默认 8081，配置优先级、错误状态、精确金额与 OpenAPI 导出见 [API 文档](docs/api.md)。示例接口读取 latest.json。多个回测 worker 可在同一宿主上通过 SQLite 租约并行领取作业。collector 的行情状态可在 /api/v1/market/status 查询。`scripts/finance-decision` 独立消费闭合行情与策略所需的本地只读快照，与 `SmaCrossover` 和 `StrategyBundle` 回测共用对应的目标求值器。启动与恢复见 [运行手册](RUNBOOK.md#实时决策与并行回测)。
 
 `StrategyBundle` 作业用同一编译器接受内联 YAML/JSON 或已登记版本，支持入场/出场与目标权重两类配方。作业锁定本地回放快照，可从结果查看各配方的资金、仓位、净额和成本归因。离线复验方法见 [运行手册](RUNBOOK.md#隔离验收配置策略作业)。

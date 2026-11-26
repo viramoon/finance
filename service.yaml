@@ -101,7 +101,10 @@ processes:
     follow_arg: --follow
     data_root_env: FERTILE_DATA_ROOT
     interpreter_env: FINANCE_PYTHON # 默认 python3
-    dependencies: [data_root, approved_f1_replay]
+    dependencies: [data_root, approved_decision_replay]
+    replay_formats:
+      sma_crossover: f1_event_ndjson
+      strategy_bundle: decision_session_ndjson # 使用源码构建的 Python 环境
     state: finance-state/decisions/decisions.sqlite3
     health: 监测进程状态与持久消费进度
     restart_policy: fertile deploy/
