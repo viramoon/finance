@@ -4,6 +4,8 @@ finance-collector 在数据根的 catalog 下写入 Nautilus v1.231.0 可直接�
 
 获准持久化的 F1 多事件流使用独立的 [WAL 与市场事件 Parquet](../docs/market-wal.md)，投影目录位于 `catalog/market-events`。
 
+数据根与研究根应位于 Git 工作树之外。回放 CSV 属于 [已登记的合成 fixture](../.data-guard/sources.json)。实际行情、数据库和导出文件的目录约定见 [数据入仓防护](../docs/data-guard.md)。
+
 ## 输入与恢复
 
 BarSource 按标的订阅、接收闭合 bar，并支持按时间区间回补。输入标识为完整 Nautilus 标的 ID，如 SPY.ARCA。价格与数量从源到存储均为十进制字符串 / 定点对象，时间为 UTC 纳秒。单个 writer 按标的、bar 规格和 UTC 日期分组。Nautilus v1.231.0 在 data/bar/<完整 bar type> 下扫描时间区间文件，跨日拆文件，文件名使用上游生成的起止时间。
