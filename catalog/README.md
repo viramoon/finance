@@ -61,7 +61,7 @@ catalog/historical/fred/DGS10/current
 - `replace` 重写指定的闭区间。区间外原有记录保留，区间内原有的观察值与事件按日期整体替换。传入记录须在指定范围内。省略边界时使用传入主记录和事件共同覆盖的首尾，详细签名见 [Python 研究接口](../python/README.md)。
 - Yahoo、Ken French 和 FRED 加载器共用 [Unix epoch 校验](../python/README.md#unix-epoch-边界)，默认 `pre_epoch="reject"`，拒绝早于 1970-01-01 的样本。调用方可显式指定 `pre_epoch="drop"`，查看 `dropped_pre_epoch` 的 `count`、`first`、`last`，分别对应丢弃数、最早和最晚日期。`WriteReport.first` 和 `last` 报告此次实际写入主记录的首尾，区间含两端。没有主记录的输入无法提交。
 
-公开历史数据分区供研究读取，`HistoricalCatalog` 不注册可下单工具。Yahoo 股票和 ETF 使用权益序列 ID，指数 `^GSPC` 对应参考序列 `GSPC.INDEX`。`SPY` 是独立标的，有自己的价格与公司行为。官方 `SmaCrossover` 作业继续使用上文经审核的历史回测快照和原有准入条件。
+公开历史数据分区供研究读取，`HistoricalCatalog` 不注册可下单工具。Yahoo 股票和 ETF 使用权益序列 ID，指数 `^GSPC` 对应参考序列 `GSPC.INDEX`。`SPY` 是独立标的，有自己的价格与公司行为。先使用 `convert_research_csv` 从允许的 Yahoo 序列导出 CSV 和血缘，经审核再导入官方 `SmaCrossover` 使用的历史回测快照。官方准入与命令见 [准备数据](../docs/historical-backtest.md#准备数据)。
 
 ### 日线时间戳
 
@@ -100,8 +100,16 @@ Yahoo 默认读取 chart `indicators.quote` 的 OHLCV，保留 `events.dividends
 
 识别旧数据时先核对来源和价格口径，再以 XNYS 会话表比对多个交易日。若冬令时、夏令时及半日市的日线均标为 21:00 UTC，则符合旧路径的固定时点特征。一条冬令时记录不足以区分两种约定。旧数据的时间和复权口径应保留在原分析记录中。
 
-1. 备份旧 catalog，并记录源文件、标的 ID、日期范围、价格口径和原消费方。
-2. 在独立数据根使用经许可的源 OHLCV、调整收盘价和公司行为重新导入，让适配器按会话生成 UTC 收盘时间。若旧数据只保存复权 OHLC，则从原始存档或供应商补齐源数据。
-3. 验证日期覆盖、条数、冬令时和夏令时收盘、半日市时间、源价精度、复权因子和公司行为。向新数据根切换研究读取配置，并保留旧备份供复现及回退。
+先停止旧 catalog 写入并备份，记录源文件、标的 ID、日期范围、价格口径和原消费方。将经许可的 Yahoo SPY 日线及公司行为存为覆盖旧交易日的 JSON。下例的 `--source-catalog` 指向含原生 Nautilus 日线 Bar 的目录。默认检查 `SPY.ARCA-1-DAY-LAST-EXTERNAL`，其余 Bar 类型见 `--help`。
 
-迁移需要按上述步骤单独执行，现有 SPY 数据和 catalog 无需为启用新适配器改写。
+```sh
+PYTHONPATH=python "$FINANCE_PYTHON" -B -m fertile_finance.migrate_spy \
+  --source-catalog /path/to/legacy-nautilus-catalog \
+  --target-data-root /path/to/new-data-root \
+  --yahoo-json /path/to/archive/yahoo-SPY.json --adjustment-as-of YYYY-MM-DD \
+  --dry-run
+```
+
+`--dry-run` 只读并输出检查结果。旧数据缺少可区分时点的证据或归档无法覆盖所需的源行情时，命令退出非零并说明原因。检查通过后用相同参数去掉 `--dry-run`。命令通过 Yahoo 适配器将源 OHLCV、调整收盘价及公司行为重导到目标根的 `catalog/historical/yahoo/SPY.ARCA`。应选择尚无该序列的独立数据根，并保留旧 catalog。
+
+核对报告中源路径、标的 ID、新旧首尾和条数，以及冬令时、夏令时和半日市抽查日期与 UTC 时点。核对分红、拆股计数和覆盖缺口后，才将研究读取配置切换至新数据根。

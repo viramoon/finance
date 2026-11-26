@@ -34,3 +34,18 @@ curl 'http://127.0.0.1:8081/api/v1/backtests?limit=20'
 如需清理历史记录，先停止 API 和 worker，确认没有 queued、running 的作业，用 sqlite3 的 .backup 备份至受保护路径。按已确认的保留截止日期在事务中仅删除终态的旧记录，运行 PRAGMA integrity_check 后再启服务。被删除记录的幂等键将释放，不应清理仍在客户端重试窗口内的作业。
 
 在隔离环境复验崩溃恢复，先 cargo build --locked -p finance-api，设置 FINANCE_API_BIN 为构建出的二进制绝对路径，运行 python3 scripts/test-job-recovery.py。该脚本对临时数据根和独立端口发真实 curl，验证去重、SIGKILL 后子进程回收、一轮重入、终态摘要以及真实超时。FINANCE_DRILL_PORT 可固定演练端口，运行前须确保未被服务占用。
+
+## 隔离运行官方历史作业
+
+使用 `python -m fertile_finance.isolated_historical_job --help` 查看一次性运行入口。按 [运行手册](../RUNBOOK.md#隔离验收官方历史作业) 指定已构建的 finance-api、独立数据根和已导入标的的独立研究根。两个根须为已存在、互不包含的绝对目录，路径组件使用实体目录。API 和 worker 共用本次调用的数据路径，队列位于数据根的 `finance-state/backtests/jobs.sqlite3`。运行器直接使用本机环回的 finance-api，从同一源码构建的 Python 环境启动 worker。服务配置只影响本次进程，部署环境文件、web 和 PostgreSQL 不参与。
+
+运行器提交 `SmaCrossover` 后轮询官方作业终态，把响应 JSON 写到标准输出。失败或超时返回非零状态，保留专用队列供诊断。结束或中断时回收本次启动的进程并释放端口。结果与 [HTTP 契约](api.md#历史回测与提交确认) 一致。
+
+官方作业不使用 FRED，运行器无需 FRED 序列 ID、`cosd` 或 `coed`。2024 年示例的 `DGS10` 和本次截止 2026-09-30 的 Ken French 日频均供归档与研究。验收无需导入或扩展这些归档。四窗口按标的实际净值和交易日覆盖判定，Sharpe 使用 `rf=0`。单独归档 DGS10 的流程见 [可选扩展 FRED 归档以对齐 SPY 样本](../RUNBOOK.md#可选扩展-fred-归档以对齐-spy-样本)。
+
+在允许本机环回监听的环境中，用构造的日线 fixture 验证真实 HTTP 提交、终态和端口释放。测试自动创建临时数据根和研究根，并使用空闲的高位端口。
+
+```sh
+FINANCE_API_BIN=/absolute/path/to/target/debug/finance-api PYTHONPATH=python \
+  "$FINANCE_PYTHON" -B tests/isolated_historical_job_drill.py -v
+```
