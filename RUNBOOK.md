@@ -58,6 +58,10 @@ scripts/finance-backtest-worker
 
 Replay 可单独运行。paper 模式下 probe 用 client ID 91，collector 用 92，93 预留给 trader，凭据由盒子上的 Gateway 读取。连接、补数、权限与 pacing 故障定位见 [IB 接入](docs/integrations/ib.md)，水位、精度和杀进程恢复见 [catalog](catalog/README.md)，worker 的资源限制、队列恢复及幂等请求见 [作业说明](docs/backtest-jobs.md)。部署守护从 fertile 的 runbook 进入。
 
+### 主图查询
+
+用 `GET /api/v1/indicators` 核对已注册的算法版本。请求 `GET /api/v1/market/bars` 时提供与展示投影一致的标的、源、产品、周期和复权口径。404 时检查同一数据根下是否已发布该序列。收到 `indicator_history_unavailable` 时核对 `history_complete` 和序列起点，补足前置历史后重新发布。收到 `indicator_work_limit` 时减小 `limit` 后分页。500 时由投影发布方核对文件权限、时间次序和 OHLCV 类型。旧数据的问题按快照覆盖、`as_of`、`first_available_ts` 和 `delay_tier` 排查。API 启动参数与健康检查沿用原接口，部署须在受控数据根发布合法展示投影。详细契约见 [主图 API](docs/api.md#主图行情与指标)。
+
 ### 在盒子上验证 paper 行情恢复
 
 先用已登录的 Gateway 运行上方 probe。给 paper collector 配置独立的已挂载数据根目录，例如 /home/box/fertile/data-paper；finance-api 用同一数据根，回放继续使用自己的目录。使用实时市场数据订阅时将 FINANCE_COLLECTOR_CONFIG 指向 config/collector/ib-cloudbox.yaml；选择延迟数据时使用 config/collector/ib-delayed.yaml。确认 SPY 对应交易时段有行情，按 [IB 接入](docs/integrations/ib.md) 检查订阅权限与 pacing 日志。

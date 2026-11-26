@@ -4,6 +4,8 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::indicators::IndicatorError;
+
 use super::parse::{Parsed, parse};
 use super::{
     Availability, Bars, Binding, Catalog, Component, Diagnostic, InputFormat, Universe,
@@ -35,6 +37,9 @@ pub struct CompiledComponent {
     pub local_id: String,
     pub component: &'static str,
     pub kind: &'static str,
+    /// Explicit output selection for an indicator used as a scalar factor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
     pub depends_on: Vec<String>,
     pub warmup_sessions: u64,
     pub available_at: Availability,
@@ -429,8 +434,25 @@ fn resolve_factors(
     let mut order = Vec::with_capacity(graph.len());
     while let Some(id) = ready.pop_first() {
         let (definition, deps) = &graph[id];
+        let path = child_path("/spec/factors", id);
+        let factor = &factors[id];
         let mut available_at = definition.availability.max(bars_availability);
-        let mut warmup_sessions = definition.warmup_sessions(&factors[id]["params"]);
+        let mut warmup_sessions = definition
+            .checked_warmup_sessions(&factor["params"])
+            .map_err(|error| match error {
+                IndicatorError::MacdPeriodOrder => diagnostic(
+                    parsed,
+                    &format!("{path}/params/fast_period"),
+                    "INVALID_VALUE",
+                    "The MACD fast period must be smaller than the slow period.",
+                ),
+                _ => diagnostic(
+                    parsed,
+                    &format!("{path}/params"),
+                    "INVALID_VALUE",
+                    "The indicator parameters do not match its registered definition.",
+                ),
+            })?;
         for dependency in deps {
             let (dependency_time, dependency_warmup) = resolved[dependency];
             available_at = available_at.max(dependency_time);
@@ -438,7 +460,7 @@ fn resolve_factors(
         }
         check_availability(
             parsed,
-            &format!("{}/use", child_path("/spec/factors", id)),
+            &format!("{path}/use"),
             available_at,
             Availability::SessionClose,
         )?;
@@ -455,6 +477,7 @@ fn resolve_factors(
             local_id: id.to_owned(),
             component: definition.id,
             kind: definition.kind,
+            output: factor["output"].as_str().map(str::to_owned),
             depends_on: deps.iter().map(|id| (*id).to_owned()).collect(),
             warmup_sessions,
             available_at,
@@ -544,6 +567,7 @@ fn resolve_modules(
             local_id: id.clone(),
             component: definition.id,
             kind: definition.kind,
+            output: None,
             depends_on,
             warmup_sessions,
             available_at,

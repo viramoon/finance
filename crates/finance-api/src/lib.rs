@@ -1,4 +1,6 @@
+pub mod bars;
 pub mod config;
+pub mod indicators;
 pub mod jobs;
 pub mod market;
 pub mod research;
@@ -7,7 +9,7 @@ use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, str::FromStr};
+use std::{path::PathBuf, str::FromStr, sync::Arc};
 use utoipa::{OpenApi, ToSchema};
 
 #[derive(Clone)]
@@ -146,12 +148,18 @@ async fn sample(State(state): State<AppState>) -> Result<Json<BacktestSummary>, 
     Ok(Json(summary))
 }
 pub fn router(state: AppState) -> Router {
+    let source = Arc::new(bars::LocalBarsSource::new(state.data_root.clone()));
+    router_with_bars_source(state, source)
+}
+
+pub fn router_with_bars_source(state: AppState, source: Arc<dyn bars::BarsSource>) -> Router {
     Router::new()
         .route("/healthz/live", get(live))
         .route("/healthz/ready", get(ready))
         .route("/api/v1/backtests/sample", get(sample))
         .route("/api/v1/market/status", get(market::status))
         .route("/api/v1/backtests/datasets", get(research::datasets))
+        .merge(bars::routes(source))
         .merge(jobs::routes())
         .with_state(state)
 }
@@ -162,6 +170,9 @@ pub fn router(state: AppState) -> Router {
         ready,
         sample,
         market::status,
+        bars::chart,
+        bars::catalog,
+        bars::values,
         jobs::submit,
         jobs::detail,
         jobs::list,

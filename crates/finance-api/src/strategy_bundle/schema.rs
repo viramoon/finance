@@ -3,11 +3,12 @@
 use regex::Regex;
 use rust_decimal::Decimal;
 use serde_json::{Map, Value, json};
+use std::borrow::Cow;
 use std::sync::LazyLock;
 
 use super::parse::Parsed;
 use super::registry::{MAX_PERIOD, component, components};
-use super::{Diagnostic, child_path, diagnostic};
+use super::{Component, Diagnostic, child_path, diagnostic};
 
 const VERSION_PATTERN: &str = r"(0|[1-9][0-9]{0,9})(\.(0|[1-9][0-9]{0,9})){2}";
 const VERSIONED_ID: &str = r"[a-z][a-z0-9_-]{0,62}(\.[a-z][a-z0-9_-]{0,62}){0,7}";
@@ -102,11 +103,11 @@ impl TextFormat {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Field {
     name: &'static str,
-    rule: Rule,
+    rule: Rule<'static>,
     required: bool,
 }
 
-pub(super) const fn field(name: &'static str, rule: Rule) -> Field {
+pub(super) const fn field(name: &'static str, rule: Rule<'static>) -> Field {
     Field {
         name,
         rule,
@@ -114,7 +115,7 @@ pub(super) const fn field(name: &'static str, rule: Rule) -> Field {
     }
 }
 
-const fn optional(name: &'static str, rule: Rule) -> Field {
+const fn optional(name: &'static str, rule: Rule<'static>) -> Field {
     Field {
         name,
         rule,
@@ -136,28 +137,44 @@ impl Placement {
         }
     }
 
-    fn fields(self) -> &'static [Field] {
-        match self {
+    fn fields(self, definition: Option<&Component>) -> Cow<'static, [Field]> {
+        let fields = match self {
             Self::Factor => FACTOR_FIELDS,
             Self::Module => MODULE_FIELDS,
+        };
+        if let Some(indicator) = definition.and_then(|item| item.indicator) {
+            let mut fields = fields.to_vec();
+            let rule = Rule::Choices(indicator.outputs);
+            fields.push(if indicator.outputs.len() > 1 {
+                field("output", rule)
+            } else {
+                optional("output", rule)
+            });
+            Cow::Owned(fields)
+        } else {
+            Cow::Borrowed(fields)
         }
     }
 
-    fn parameter_rule(self, value: &Value) -> Option<Rule> {
+    fn resolve(self, value: &Value) -> Option<&'static Component> {
         let resolved = component(value["use"].as_str()?)?;
         let expected_kind = match self {
             Self::Factor => resolved.kind,
             Self::Module => value["kind"].as_str()?,
         };
         // Unknown IDs and slot mismatches belong to the semantic pass.
-        (self.accepts(resolved.kind) && expected_kind == resolved.kind)
-            .then_some(Rule::Record(resolved.parameters))
+        (self.accepts(resolved.kind) && expected_kind == resolved.kind).then_some(resolved)
     }
 
     fn validate(self, parsed: &Parsed, value: &Value, path: &str) -> Result<(), Diagnostic> {
-        Rule::Record(self.fields()).validate(parsed, value, path)?;
-        if let Some(rule) = self.parameter_rule(value) {
-            rule.validate(parsed, &value["params"], &child_path(path, "params"))?;
+        let definition = self.resolve(value);
+        Rule::Record(&self.fields(definition)).validate(parsed, value, path)?;
+        if let Some(definition) = definition {
+            Rule::Record(&definition.parameters).validate(
+                parsed,
+                &value["params"],
+                &child_path(path, "params"),
+            )?;
         }
         Ok(())
     }
@@ -167,7 +184,7 @@ impl Placement {
             .iter()
             .filter(|item| self.accepts(item.kind))
             .map(|item| {
-                let mut branch = Rule::Record(self.fields()).json_schema();
+                let mut branch = Rule::Record(&self.fields(Some(item))).json_schema();
                 branch["properties"]["use"] = json!({ "const": item.id });
                 branch["properties"]["params"] = item.parameter_schema();
                 if matches!(self, Self::Module) {
@@ -181,23 +198,35 @@ impl Placement {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) enum Rule {
+pub(super) enum Rule<'a> {
     Object,
     Boolean,
-    Integer { min: u64, max: u64 },
-    String { min: usize, max: usize },
+    Integer {
+        min: u64,
+        max: u64,
+    },
+    String {
+        min: usize,
+        max: usize,
+    },
     Text(TextFormat),
     Literal(&'static str),
     Choices(&'static [&'static str]),
-    Array { item: &'static Rule, min: usize },
-    Map { value: &'static Rule, min: usize },
-    Record(&'static [Field]),
+    Array {
+        item: &'static Rule<'static>,
+        min: usize,
+    },
+    Map {
+        value: &'static Rule<'static>,
+        min: usize,
+    },
+    Record(&'a [Field]),
     Component(Placement),
     Recipe,
     ExecutionModel,
 }
 
-impl Rule {
+impl Rule<'_> {
     fn validate(self, parsed: &Parsed, value: &Value, path: &str) -> Result<(), Diagnostic> {
         let error = |code, message: String| diagnostic(parsed, path, code, message);
         let mismatch = |expected: &str| error("TYPE_MISMATCH", format!("expected {expected}"));
@@ -416,8 +445,8 @@ impl Rule {
                 }
             }
             Self::Component(placement) => {
-                if let Some(rule) = placement.parameter_rule(value) {
-                    rule.normalize(&mut value["params"]);
+                if let Some(definition) = placement.resolve(value) {
+                    Rule::Record(&definition.parameters).normalize(&mut value["params"]);
                 }
             }
             Self::Recipe => recipe_rule(value).normalize(value),
@@ -426,11 +455,11 @@ impl Rule {
     }
 }
 
-const LOCAL: Rule = Rule::Text(TextFormat::LocalId);
-const VERSIONED_REF: Rule = Rule::Text(TextFormat::VersionedReference);
-const CURRENCY_CODE: Rule = Rule::Text(TextFormat::Currency);
-const DECIMAL_STRING: Rule = Rule::Text(TextFormat::Decimal);
-const LOCAL_LIST: Rule = Rule::Array {
+const LOCAL: Rule<'static> = Rule::Text(TextFormat::LocalId);
+const VERSIONED_REF: Rule<'static> = Rule::Text(TextFormat::VersionedReference);
+const CURRENCY_CODE: Rule<'static> = Rule::Text(TextFormat::Currency);
+const DECIMAL_STRING: Rule<'static> = Rule::Text(TextFormat::Decimal);
+const LOCAL_LIST: Rule<'static> = Rule::Array {
     item: &LOCAL,
     min: 0,
 };
@@ -454,10 +483,10 @@ const MODULE_FIELDS: &[Field] = &[
     field("params", Rule::Object),
 ];
 
-const RECIPE_TYPES: Rule = Rule::Choices(&["entry_exit", "target_weights"]);
+const RECIPE_TYPES: Rule<'static> = Rule::Choices(&["entry_exit", "target_weights"]);
 const FILTERS: Field = field("filters", LOCAL_LIST);
 const RISK: Field = field("risk", LOCAL_LIST);
-const ENTRY_EXIT: Rule = Rule::Record(&[
+const ENTRY_EXIT: Rule<'static> = Rule::Record(&[
     field("type", Rule::Literal("entry_exit")),
     field("entry", LOCAL),
     field("exit", LOCAL),
@@ -465,14 +494,14 @@ const ENTRY_EXIT: Rule = Rule::Record(&[
     field("sizing", LOCAL),
     RISK,
 ]);
-const TARGET_WEIGHTS: Rule = Rule::Record(&[
+const TARGET_WEIGHTS: Rule<'static> = Rule::Record(&[
     field("type", Rule::Literal("target_weights")),
     field("allocator", LOCAL),
     FILTERS,
     RISK,
 ]);
 
-fn recipe_rule(value: &Value) -> Rule {
+fn recipe_rule(value: &Value) -> Rule<'static> {
     match value["type"].as_str().expect("validated recipe type") {
         "entry_exit" => ENTRY_EXIT,
         "target_weights" => TARGET_WEIGHTS,
@@ -480,7 +509,7 @@ fn recipe_rule(value: &Value) -> Rule {
     }
 }
 
-const SLEEVE: Rule = Rule::Record(&[
+const SLEEVE: Rule<'static> = Rule::Record(&[
     field("recipe", LOCAL),
     field("budget_weight", DECIMAL_STRING),
     field(
@@ -497,7 +526,7 @@ pub(super) const LOT_SIZE_POLICY: Field =
 pub(super) const COMMISSION_BPS: Field = field("commission_bps", DECIMAL_STRING);
 pub(super) const SLIPPAGE_BPS: Field = field("slippage_bps", DECIMAL_STRING);
 
-const ROOT: Rule = Rule::Record(&[
+const ROOT: Rule<'static> = Rule::Record(&[
     field("apiVersion", Rule::Literal("fertile.finance/strategy/v1")),
     field("kind", Rule::Literal("StrategyBundle")),
     field(

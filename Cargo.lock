@@ -311,6 +311,7 @@ version = "0.0.0"
 dependencies = [
  "axum",
  "chrono",
+ "finance-market-protocol",
  "regex",
  "rusqlite",
  "rust_decimal",

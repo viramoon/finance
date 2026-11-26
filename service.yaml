@@ -66,6 +66,11 @@ processes:
     bind_host: 127.0.0.1
     port: 8081 # FINANCE_API_PORT / config.api.port 可覆盖
     dependencies: [data_root]
+    query_routes:
+      bars: /api/v1/market/bars
+      indicator_registry: /api/v1/indicators
+      indicator_values: /api/v1/indicators/values
+    bars_query_projection: "${FERTILE_DATA_ROOT}/finance-state/bars/v1"
     health:
       live_path: /healthz/live
       ready_path: /healthz/ready

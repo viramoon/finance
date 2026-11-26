@@ -11,7 +11,7 @@
 | `spec.universe` | `ref` 引用已登记的点时成分集合，`membership` 为 `point_in_time`，集合须在对应会话开盘时可见。 |
 | `spec.data` | `bars` 引用已登记的日线来源，`timeframe` 为 `1d`，`price_basis` 为 `raw_split_free_reviewed`。数据、股票池和初始现金使用 USD。 |
 | `spec.clock` | `calendar` 引用已登记交易日历。按 `session_close` 决策，最早于 `next_session_close` 成交。声明 `warmup_sessions`，缺输入使用 `block_new_risk`。 |
-| `spec.factors` | 以局部 ID 声明因子或指标。每项填写 `use` 和 `params`，可通过 `depends_on` 声明同一文件内的因子依赖，省略表示没有显式依赖。 |
+| `spec.factors` | 以局部 ID 声明因子或指标。每项填写 `use` 和 `params`，可通过 `depends_on` 声明同一文件内的因子依赖，省略表示没有显式依赖。多列指标须以 `output` 选择一列。 |
 | `spec.modules` | 以局部 ID 声明可复用模块。每项填写 `kind`、`use` 和 `params`，例如信号模块的 `params.factor` 引用已声明的因子。 |
 | `spec.recipes` | 以局部 ID 声明至少一个配方。配方槽位引用 `modules` 中的局部 ID。 |
 | `spec.portfolio` | 声明初始现金、至少一个子组合及全局风险上限。按 `fixed_budgets` 分配，余量留 `cash`，按 `by_instrument` 净额。 |
@@ -21,6 +21,10 @@
 `entry_exit` 填写 `entry`、`exit`、`filters`、`sizing`、`risk`。`target_weights` 填写 `allocator`、`filters`、`risk`。`filters` 和 `risk` 各自可以为空数组。两种配方采用各自封闭的字段集合，共用账户资金、按标的净额和全局限额。
 
 注册表逐项列出组件类型、参数 schema、输入序列与单位、输出、预热、持仓状态依赖、支持资产和引擎。参数可以填写注册表定义的常量与局部引用。配置文件只能使用已登记组件。收盘收益的阈值以比率表示，例如 `"0.02"` 表示 2%。Wilder RSI 的阈值使用 RSI 点数，例如 `"30"`。
+
+`spec.factors` 可引用 [v1 指标库](indicators.md) 的完整 `indicator.*@1.0.0` ID，其参数和所需历史来自同一算法登记。布林带的 `output` 可选 `middle`、`upper`、`lower`，MACD 可选 `macd`、`signal`、`histogram`。单列指标可以省略 `output`，或显式使用 `value`。例如 `use: "indicator.bollinger@1.0.0"`、`params: {period: 20}`、`output: lower` 选择下轨作为因子。已声明的 `output` 写入已解析计划的对应 `factors` 项。历史需求按决策 bar 之前已结束的会话计数，现有 `warmup_sessions` 仍以 2520 为上限。
+
+一个会话只有一根完整日线时，`indicator.vwap@1.0.0` 在成交量为正时得到该日线的典型价 `(high+low+close)/3`。`indicator.close_return@1.0.0` 的 `period` 按观测到的 bar 计数。既有 `factor.close_return@1.0.0` 的 `lookback_sessions` 沿用会话口径。
 
 精确小数使用带引号的十进制字符串，整数部分最多 10 位，小数部分最多 18 位，可用负号。整数部分的前导零仅允许单个 `0`。这些字段禁用数字字面量和科学计数法。权重须在 0 到 1 之间，初始资金须为正且能精确表示为美元分，费用与滑点均在 0 至 10000 基点之间。周期等整数字段采用可精确表示为整数的数值。预热为 0 至 2520，收益与持有期窗口为 1 至 2520，RSI 周期为 2 至 2520，`top_n` 为 1 至 1000，优先级为 0 至 2147483647。预热还须满足组件和依赖声明，计数口径为决策时刻之前已完成的会话。
 
@@ -180,4 +184,4 @@ initial_cash = Decimal(plan["bundle"]["spec"]["portfolio"]["initial_cash"]["amou
 
 `spec.clock.calendar` 与标的主数据的 `calendar_id` 共用日历代码。跨契约接入时采用 1–32 位 ASCII 大写字母或数字，首位之后也允许下划线和连字符。当前示例目录只登记 `XNYS`，编译器要求股票池和日线目录的日历与决策日历一致。`metadata.id` 中的 `example.*` 是策略 ID，`spec.universe.ref` 和 `spec.data.bars` 中的 `example.*@1.0.0` 是各自目录的引用。后续解析股票池成分和日线记录时，实际标的使用 `<LOCAL>.<VENUE>`，例如 `SPY.ARCA`。标的和日历的完整规则见 [行情标的、事件与流协议](market-protocol.md)。
 
-F7 接入持久版本绑定、数据与成分的快照哈希、引擎提交、成本和运行区间，并将编译计划归入不可变 `run_manifest`。指标计算由 C4/F6 接入，因子评价由 F8 接入。
+F7 接入持久版本绑定、数据与成分的快照哈希、引擎提交、成本和运行区间，并将编译计划归入不可变 `run_manifest`。运行期指标读取已解析的版本和参数，使用 [共享指标内核](indicators.md) 计算闭合且可见的 bar。因子评价由 F8 接入。

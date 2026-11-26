@@ -436,7 +436,313 @@
         "cash_equity"
       ],
       "availability": "session_close",
-      "description": "Wilder RSI uses the close. An undefined flat-series value is missing.",
+      "description": "Wilder average true range, using high minus low for the first bar and including the prior close thereafter.",
+      "engines": [
+        "nautilus_cash_equity"
+      ],
+      "factor_parameters": [],
+      "id": "indicator.atr@1.0.0",
+      "inputs": [
+        {
+          "series": "daily_bar.high",
+          "unit": "quote_currency_per_share"
+        },
+        {
+          "series": "daily_bar.low",
+          "unit": "quote_currency_per_share"
+        },
+        {
+          "series": "daily_bar.close",
+          "unit": "quote_currency_per_share"
+        }
+      ],
+      "kind": "indicator",
+      "output": {
+        "kind": "factor_value",
+        "unit": "quote_currency_per_share"
+      },
+      "outputs": [
+        "value"
+      ],
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "period": {
+            "maximum": 2520,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "period"
+        ],
+        "type": "object"
+      },
+      "position_state": [],
+      "supports_short": false,
+      "trigger": null,
+      "warmup": {
+        "prior_bars": "period - 1",
+        "type": "indicator"
+      }
+    },
+    {
+      "assets": [
+        "cash_equity"
+      ],
+      "availability": "session_close",
+      "description": "Bollinger bands use the SMA of closes and two population standard deviations on either side.",
+      "engines": [
+        "nautilus_cash_equity"
+      ],
+      "factor_parameters": [],
+      "id": "indicator.bollinger@1.0.0",
+      "inputs": [
+        {
+          "series": "daily_bar.close",
+          "unit": "quote_currency_per_share"
+        }
+      ],
+      "kind": "indicator",
+      "output": {
+        "kind": "factor_value",
+        "unit": "quote_currency_per_share"
+      },
+      "outputs": [
+        "middle",
+        "upper",
+        "lower"
+      ],
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "period": {
+            "maximum": 2520,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "period"
+        ],
+        "type": "object"
+      },
+      "position_state": [],
+      "supports_short": false,
+      "trigger": null,
+      "warmup": {
+        "prior_bars": "period - 1",
+        "type": "indicator"
+      }
+    },
+    {
+      "assets": [
+        "cash_equity"
+      ],
+      "availability": "session_close",
+      "description": "Simple (current close minus prior close) / prior close over period observed bars. A zero base close is undefined.",
+      "engines": [
+        "nautilus_cash_equity"
+      ],
+      "factor_parameters": [],
+      "id": "indicator.close_return@1.0.0",
+      "inputs": [
+        {
+          "series": "daily_bar.close",
+          "unit": "quote_currency_per_share"
+        }
+      ],
+      "kind": "indicator",
+      "output": {
+        "kind": "factor_value",
+        "unit": "return_ratio"
+      },
+      "outputs": [
+        "value"
+      ],
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "period": {
+            "maximum": 2520,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "period"
+        ],
+        "type": "object"
+      },
+      "position_state": [],
+      "supports_short": false,
+      "trigger": null,
+      "warmup": {
+        "prior_bars": "period",
+        "type": "indicator"
+      }
+    },
+    {
+      "assets": [
+        "cash_equity"
+      ],
+      "availability": "session_close",
+      "description": "Exponential moving average of closes with alpha 2/(period + 1).",
+      "engines": [
+        "nautilus_cash_equity"
+      ],
+      "factor_parameters": [],
+      "id": "indicator.ema@1.0.0",
+      "inputs": [
+        {
+          "series": "daily_bar.close",
+          "unit": "quote_currency_per_share"
+        }
+      ],
+      "kind": "indicator",
+      "output": {
+        "kind": "factor_value",
+        "unit": "quote_currency_per_share"
+      },
+      "outputs": [
+        "value"
+      ],
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "period": {
+            "maximum": 2520,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "period"
+        ],
+        "type": "object"
+      },
+      "position_state": [],
+      "supports_short": false,
+      "trigger": null,
+      "warmup": {
+        "prior_bars": "period - 1",
+        "type": "indicator"
+      }
+    },
+    {
+      "assets": [
+        "cash_equity"
+      ],
+      "availability": "session_close",
+      "description": "Fast EMA minus slow EMA, with its signal EMA and the histogram of their difference. Fast period must be smaller than slow period.",
+      "engines": [
+        "nautilus_cash_equity"
+      ],
+      "factor_parameters": [],
+      "id": "indicator.macd@1.0.0",
+      "inputs": [
+        {
+          "series": "daily_bar.close",
+          "unit": "quote_currency_per_share"
+        }
+      ],
+      "kind": "indicator",
+      "output": {
+        "kind": "factor_value",
+        "unit": "quote_currency_per_share"
+      },
+      "outputs": [
+        "macd",
+        "signal",
+        "histogram"
+      ],
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "fast_period": {
+            "maximum": 2520,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "signal_period": {
+            "maximum": 2520,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "slow_period": {
+            "maximum": 2520,
+            "minimum": 2,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "fast_period",
+          "slow_period",
+          "signal_period"
+        ],
+        "type": "object"
+      },
+      "position_state": [],
+      "supports_short": false,
+      "trigger": null,
+      "warmup": {
+        "prior_bars": "slow_period + signal_period - 2",
+        "type": "indicator"
+      }
+    },
+    {
+      "assets": [
+        "cash_equity"
+      ],
+      "availability": "session_close",
+      "description": "Unannualized sample standard deviation of period consecutive single-bar simple returns. A zero base close makes its return window undefined.",
+      "engines": [
+        "nautilus_cash_equity"
+      ],
+      "factor_parameters": [],
+      "id": "indicator.realized_volatility@1.0.0",
+      "inputs": [
+        {
+          "series": "daily_bar.close",
+          "unit": "quote_currency_per_share"
+        }
+      ],
+      "kind": "indicator",
+      "output": {
+        "kind": "factor_value",
+        "unit": "return_ratio"
+      },
+      "outputs": [
+        "value"
+      ],
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "period": {
+            "maximum": 2520,
+            "minimum": 2,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "period"
+        ],
+        "type": "object"
+      },
+      "position_state": [],
+      "supports_short": false,
+      "trigger": null,
+      "warmup": {
+        "prior_bars": "period",
+        "type": "indicator"
+      }
+    },
+    {
+      "assets": [
+        "cash_equity"
+      ],
+      "availability": "session_close",
+      "description": "Wilder RSI uses close-to-close changes and alpha 1/period. An undefined flat-series value is missing.",
       "engines": [
         "nautilus_cash_equity"
       ],
@@ -453,6 +759,9 @@
         "kind": "factor_value",
         "unit": "rsi_points_0_to_100"
       },
+      "outputs": [
+        "value"
+      ],
       "parameters": {
         "additionalProperties": false,
         "properties": {
@@ -477,6 +786,155 @@
       "warmup": {
         "name": "period",
         "type": "parameter"
+      }
+    },
+    {
+      "assets": [
+        "cash_equity"
+      ],
+      "availability": "session_close",
+      "description": "Simple moving average (MA) of close prices.",
+      "engines": [
+        "nautilus_cash_equity"
+      ],
+      "factor_parameters": [],
+      "id": "indicator.sma@1.0.0",
+      "inputs": [
+        {
+          "series": "daily_bar.close",
+          "unit": "quote_currency_per_share"
+        }
+      ],
+      "kind": "indicator",
+      "output": {
+        "kind": "factor_value",
+        "unit": "quote_currency_per_share"
+      },
+      "outputs": [
+        "value"
+      ],
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "period": {
+            "maximum": 2520,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "period"
+        ],
+        "type": "object"
+      },
+      "position_state": [],
+      "supports_short": false,
+      "trigger": null,
+      "warmup": {
+        "prior_bars": "period - 1",
+        "type": "indicator"
+      }
+    },
+    {
+      "assets": [
+        "cash_equity"
+      ],
+      "availability": "session_close",
+      "description": "Simple moving average of observed bar volume.",
+      "engines": [
+        "nautilus_cash_equity"
+      ],
+      "factor_parameters": [],
+      "id": "indicator.volume_sma@1.0.0",
+      "inputs": [
+        {
+          "series": "daily_bar.volume",
+          "unit": "shares"
+        }
+      ],
+      "kind": "indicator",
+      "output": {
+        "kind": "factor_value",
+        "unit": "shares"
+      },
+      "outputs": [
+        "value"
+      ],
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "period": {
+            "maximum": 2520,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "period"
+        ],
+        "type": "object"
+      },
+      "position_state": [],
+      "supports_short": false,
+      "trigger": null,
+      "warmup": {
+        "prior_bars": "period - 1",
+        "type": "indicator"
+      }
+    },
+    {
+      "assets": [
+        "cash_equity"
+      ],
+      "availability": "session_close",
+      "description": "Session volume-weighted mean of (high + low + close)/3. Undefined until cumulative volume is positive.",
+      "engines": [
+        "nautilus_cash_equity"
+      ],
+      "factor_parameters": [],
+      "id": "indicator.vwap@1.0.0",
+      "inputs": [
+        {
+          "series": "daily_bar.high",
+          "unit": "quote_currency_per_share"
+        },
+        {
+          "series": "daily_bar.low",
+          "unit": "quote_currency_per_share"
+        },
+        {
+          "series": "daily_bar.close",
+          "unit": "quote_currency_per_share"
+        },
+        {
+          "series": "daily_bar.volume",
+          "unit": "shares"
+        },
+        {
+          "series": "session",
+          "unit": "trading_day"
+        }
+      ],
+      "kind": "indicator",
+      "output": {
+        "kind": "factor_value",
+        "unit": "quote_currency_per_share"
+      },
+      "outputs": [
+        "value"
+      ],
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "position_state": [],
+      "supports_short": false,
+      "trigger": null,
+      "warmup": {
+        "prior_bars": "0",
+        "type": "indicator"
       }
     },
     {

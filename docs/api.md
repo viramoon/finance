@@ -37,6 +37,40 @@ GET /api/v1/market/status 从 collector 持久状态读取各标的水位和新�
 
 POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /api/v1/backtests/{id} 查看执行进度与摘要，GET /api/v1/backtests 按 cursor 和 limit 翻页。提交使用同库事务完成幂等检查和容量检查，worker 独立执行。完整输入范围、超时和恢复见 [作业运维](backtest-jobs.md)。公网入口由 web 鉴权并限流。
 
+## 主图行情与指标
+
+| 请求 | 响应 |
+| --- | --- |
+| `GET /api/v1/market/bars` | 精确 OHLCV，可在同一行附带零至 16 个指标。 |
+| `GET /api/v1/indicators` | `definitions` 列出版本化指标、参数、输出及算法口径。 |
+| `GET /api/v1/indicators/values` | 使用同一投影和计算过程，每行保留 bar 时钟和指标，须请求 1 至 16 个指标。 |
+
+两个时间序列接口都要求 `instrument_id`、`source`、`product`、`timeframe`、`adjustment`、`start` 和 `end`。前三项沿用 [F1 标的与产品](market-protocol.md#标的与产品) 格式。`timeframe` 支持 1 至 86400 秒（`s`）、1 至 1440 分钟（`m`）、1 至 24 小时（`h`）和 `1d`，数字无前导零。`adjustment` 是发布方登记的 F1 标识，例如 `raw`。查询与周期和复权标签精确匹配，跨口径转换由发布方处理。
+
+区间使用带时区的 RFC3339 时间，按 `open_ts` 落在 `[start, end)` 选取，按 `open_ts` 升序返回。`limit` 默认为 500，范围为 1 至 1000。存在 `next_start` 时将其作为下页的 `start`，保留其余参数。分页读取最新快照，`as_of` 改变时应重新开始。`as_of` 是投影发布时间。历史点时查询由策略输入方按实际可见版本回放。
+
+`indicators` 是 URL 编码的 JSON 数组，例如 `[{"use":"indicator.sma@1.0.0","params":{"period":2}}]`。指标声明及逐行 `indicator_values` 按请求顺序排列。区间内首点会使用同一投影中的前置闭合历史。`include_provisional` 默认为 `false`。请求预览时，可在末尾返回一根未闭合 bar。每行的 `provisional` 标签独立于指标的 `status`。`status` 为 `ready` 时，`values` 提供各列的十进制字符串，`warmup` 和 `undefined` 都返回空 `values`。OHLCV 也保留源十进制字符串。交易时钟与精度见 [v1 指标口径](indicators.md)。
+
+响应携带 `series`、`provenance`、`as_of`、`coverage`、`next_start`、`indicators` 和 `rows`。`provenance` 保留 `license`、`delay_tier`、`calendar_id`、`market_timezone` 和发布方的展示授权标记。每行的 `first_available_ts` 属于这一版源 bar。最新快照的指标可能包含后到的前置 bar 或更正。图表可用源 bar 的时钟显示延迟，由 web 对浏览器执行身份和产品权限检查。三个端点均设置 `Cache-Control: private, no-store`。
+
+`coverage` 包含 `history_complete`、`first_closed_open_ts`、`last_closed_end_ts`、`closed_bars`、`returned_closed_bars` 和 `returned_provisional`。快照首尾为已观测闭合 bar 的边界，两者之间可能有缺口。bars 端点的 `rows[].bar` 含 OHLCV 和时钟，values 端点把 `open_ts`、`end_ts`、`first_available_ts`、`trading_day` 放在每行顶层。
+
+| HTTP 状态 | `error.code` | 含义 |
+| --- | --- | --- |
+| 400 | `invalid_bars_query`、`invalid_indicator` | 查询参数、范围、分页或指标声明非法。 |
+| 404 | `bars_not_found` | 未发布匹配序列。 |
+| 422 | `indicator_history_unavailable` | 匹配投影缺少从起点计算所需的历史。 |
+| 422 | `indicator_work_limit` | 本页的估算工作量超出 5,000,000 个观测。每个指标按通过预热的行数估算，布林带和实现波动率再乘以各自周期。减小 `limit` 后分页。 |
+| 500 | `bars_invalid`、`bars_unreadable`、`indicator_calculation_failed`、`bars_query_failed` | 投影无效、不可读，或计算失败。 |
+
+### 只读展示投影
+
+finance-api 读取现有 `FERTILE_DATA_ROOT` 下的 `finance-state/bars/v1/<source>/<product>/<instrument_id>/<adjustment>/<timeframe>.json`。受信的投影发布方按整份快照原子替换普通文件，并递增该序列的 `as_of`。投影目录下的路径使用实际目录和文件。快照结构为 `schema_version: "1.0"`、`series`（与请求相同的五项序列键）、`provenance`（含 `display: "authorized_display"`）、`as_of`、`history_complete`、`closed` 和可为空的 `provisional`。`closed` 最多 50,000 行，文件最多 32 MiB。编制投影时由发布方核对产品是否同时允许本地留存与展示。文件只放在受控数据根，访问权限交由部署配置管理。
+
+每根 bar 包含 `open_ts`、`end_ts`、`first_available_ts`、`trading_day`（`YYYY-MM-DD`）和十进制 `open`、`high`、`low`、`close`、`volume`。同一序列的区间按时间递增且互不重叠。闭合 bar 要求 `end_ts ≤ first_available_ts ≤ as_of`，未闭合 bar 以 `open_ts ≤ first_available_ts ≤ as_of` 验证，允许延迟源在理论收盘后继续输出未闭合预览。`24X7` 序列的 `market_timezone` 为 `UTC`，单根 bar 的半开区间落在同一 UTC 交易日，允许在次日零点结束。`history_complete` 表示已包含声明序列起点以来的历史。缺少起点历史时仍可请求原始 bars，指标请求返回 422。交易日内缺 bar 的处理由 [指标口径](indicators.md) 定义。
+
+当前查询端提供 `BarsSource` 读取边界。F3 负责接入实际投影和重新发布更正。长期分钟历史需要向指标内核提供完整闭合前缀，或接入与同一组件版本对应的等价状态检查点。现有 collector Parquet 和研究目录使用各自管道。
+
 ## 示例批任务
 
 先完成 [源码构建](build.md)，执行一条命令：
