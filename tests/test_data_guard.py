@@ -19,6 +19,7 @@ import zlib
 REPO = Path(__file__).resolve().parents[1]
 RULES = ".data-guard/rules.json"
 SOURCES = ".data-guard/sources.json"
+PUBLISHED = ".data-guard/published.json"
 GUARD = "scripts/data_guard.py"
 INSTALLER = "scripts/install-data-guard-hooks.sh"
 HOOKS = (".githooks/pre-commit", ".githooks/pre-push")
@@ -295,6 +296,179 @@ class GitGuardTest(unittest.TestCase):
             "source": "Generated from the seed and fixed inputs without external data.",
         }}})
         self.git("add", SOURCES)
+
+    def head(self):
+        return self.git("rev-parse", "HEAD").stdout.strip().decode("ascii")
+
+    def stage_published(self, *commits):
+        self.write_json(PUBLISHED, {"version": 1, "commits": {
+            commit: "Synthetic history published before enforcement." for commit in commits
+        }})
+        self.git("add", PUBLISHED)
+
+    def approve_on_default_branch(self, *commits):
+        self.git("switch", "-q", "main")
+        self.stage_published(*commits)
+        self.git("commit", "-qm", "Approve the synthetic published history")
+        self.git("push", "-q", "origin", "main")
+        return self.head()
+
+    def test_pr_cannot_approve_its_own_history(self):
+        self.git("switch", "-qc", "candidate")
+        self.stage("temporary.txt", b"PAR1" + MARKER)
+        self.git("commit", "--no-verify", "-qm", "Add a synthetic violation")
+        violation = self.head()
+        self.git("rm", "-q", "temporary.txt")
+        self.stage_published(violation)
+        self.git("commit", "-qm", "Try to approve history in the same PR")
+        self.git("switch", "-q", "main")
+        self.git("merge", "--no-ff", "-qm", "Simulate CI merge commit", "candidate")
+
+        self.rejected(self.check("range", self.base, "HEAD", success=False), b"blocked-magic")
+
+    def test_pre_push_trusts_default_branch_instead_of_advertised_ref(self):
+        self.git("switch", "-qc", "legacy")
+        self.stage("temporary.txt", b"PAR1" + MARKER)
+        self.git("commit", "--no-verify", "-qm", "Add a synthetic violation")
+        violation = self.head()
+        self.git("rm", "-q", "temporary.txt")
+        self.git("commit", "-qm", "Remove the violation")
+
+        self.git("switch", "-qc", "candidate", self.base)
+        self.stage_published(violation)
+        self.git("commit", "-qm", "Approve history on a non-default branch")
+        self.git("push", "-q", "origin", "candidate")
+        self.git("merge", "--no-ff", "-qm", "Include the legacy branch", "legacy")
+        for refspec in ("candidate", "candidate:refs/heads/new-candidate"):
+            with self.subTest(refspec=refspec):
+                self.rejected(self.git("push", "-q", "origin", refspec, success=False), b"blocked-magic")
+
+        self.approve_on_default_branch(violation)
+        self.git("switch", "-q", "candidate")
+        self.git("push", "-q", "origin", "candidate", "candidate:refs/heads/new-candidate")
+
+    def test_pre_commit_reads_head_and_checks_candidate_even_with_an_exemption(self):
+        self.stage(PUBLISHED, b'{"version":2,"commits":{}}\n')
+        self.git("commit", "--no-verify", "-qm", "Simulate malformed trusted metadata")
+        self.stage_published(self.head())
+        self.rejected(self.git("commit", "-qm", "Try to shadow HEAD metadata", success=False),
+                      b"invalid-published")
+
+        self.git("reset", "--hard", self.base)
+        self.stage_published(self.head())
+        self.stage("tests/fixtures/unregistered.csv", b"price,volume\n1.00,2\n")
+        self.rejected(self.git("commit", "-qm", "Try to exempt staged content", success=False),
+                      b"fixture-source-required")
+
+    def test_published_ancestry_is_exempt_but_new_transient_violations_are_checked(self):
+        self.git("switch", "-qc", "legacy")
+        self.git("rm", "-q", SOURCES)
+        self.stage("historical.txt", b"PAR1" + MARKER)
+        self.git("commit", "--no-verify", "-qm", "Add synthetic content before enforcement")
+        self.git("rm", "-q", "historical.txt")
+        self.git("commit", "--no-verify", "-qm", "Remove the historical violation")
+        base = self.approve_on_default_branch(self.head())
+        self.git("switch", "-q", "legacy")
+        self.git("restore", "--source=main", "--staged", "--worktree", SOURCES)
+        self.git("commit", "-qm", "Restore the required fixture manifest")
+        self.check("range", base, "HEAD")
+
+        self.stage("new.txt", b"PAR1" + MARKER)
+        self.git("commit", "--no-verify", "-qm", "Add a new synthetic violation")
+        self.git("rm", "-q", "new.txt")
+        self.git("commit", "-qm", "Remove the new violation from the tip")
+        self.rejected(self.check("range", base, "HEAD", success=False), b"blocked-magic")
+        self.rejected(self.git("push", "-q", "origin", "legacy", success=False), b"blocked-magic")
+
+    def test_net_diff_checks_all_remaining_paths_even_when_tip_is_exempt(self):
+        self.git("switch", "-qc", "legacy")
+        examples = forbidden_examples()
+        for path, data, _ in examples:
+            self.stage(path, data)
+        self.git("commit", "--no-verify", "-qm", "Add synthetic violations before enforcement")
+        legacy = self.head()
+        base = self.approve_on_default_branch(legacy)
+
+        result = self.check("range", base, legacy, success=False)
+        for _, _, reason in examples:
+            self.rejected(result, reason)
+        self.assertIn(f"rejected ({len(examples)})".encode(), result.stderr)
+        push = self.git("push", "-q", "origin", "legacy", success=False)
+        self.rejected(push, b"fixture-source-required")
+        self.rejected(push, b"blocked-magic")
+
+    def test_net_diff_requires_target_sources_and_checks_registered_digest(self):
+        self.git("switch", "-qc", "legacy")
+        self.git("rm", "-q", SOURCES)
+        self.git("commit", "--no-verify", "-qm", "Simulate a branch without fixture sources")
+        no_sources = self.head()
+        path = "tests/fixtures/legacy.csv"
+        self.stage(path, b"price,volume\n1.00,2\n")
+        self.stage("make_fixture.py", b'print("price,volume\\n1.00,3")\n')
+        self.register(path, b"price,volume\n1.00,3\n")
+        self.git("commit", "--no-verify", "-qm", "Add a fixture with an incorrect digest")
+        wrong_digest = self.head()
+        base = self.approve_on_default_branch(wrong_digest)
+        self.rejected(self.check("range", base, no_sources, success=False), b"invalid-sources")
+        self.rejected(self.check("range", base, wrong_digest, success=False), b"fixture-digest")
+
+        self.git("switch", "-q", "legacy")
+        self.stage(path, self.run_command(sys.executable, "make_fixture.py").stdout)
+        self.git("commit", "-qm", "Regenerate the fixture with its reviewed recipe")
+        self.check("range", base, "HEAD")
+
+    def test_missing_and_non_commit_objects_grant_no_exemption(self):
+        self.git("switch", "-qc", "candidate")
+        self.stage("temporary.txt", b"PAR1" + MARKER)
+        self.git("commit", "--no-verify", "-qm", "Add a synthetic violation")
+        blob = self.git("rev-parse", "HEAD:temporary.txt").stdout.strip().decode("ascii")
+        self.git("rm", "-q", "temporary.txt")
+        self.git("commit", "-qm", "Remove the violation")
+        base = self.approve_on_default_branch("f" * 40, "f" * 64, blob)
+
+        self.check("range", base, base)
+        result = self.check("range", base, "candidate", success=False)
+        self.rejected(result, b"blocked-magic")
+        self.assertNotIn(b"git-read-failed", result.stderr)
+
+    def test_published_schema_rejects_invalid_candidates_and_oversize_blobs(self):
+        sha = b"a" * 40
+        valid = b'{"version":1,"commits":{"' + sha + b'":"Synthetic reason"}}'
+        cases = {
+            "unknown key": b'{"version":1,"commits":{},"other":0}',
+            "duplicate key": b'{"version":1,"commits":{},"commits":{}}',
+            "duplicate sha": valid[:-2] + b',"' + sha + b'":"Duplicate"}}',
+            "missing commits": b'{"version":1}',
+            "wrong version": valid.replace(b'"version":1', b'"version":2'),
+            "boolean version": valid.replace(b'"version":1', b'"version":true'),
+            "floating version": valid.replace(b'"version":1', b'"version":1.0'),
+            "non-object root": b"[]",
+            "non-object commits": b'{"version":1,"commits":[]}',
+            "abbreviated sha": valid.replace(sha, sha[:-1]),
+            "uppercase sha": valid.replace(sha, sha.upper()),
+            "non-hex sha": valid.replace(sha, b"g" * 40),
+            "empty reason": valid.replace(b"Synthetic reason", b""),
+            "blank reason": valid.replace(b"Synthetic reason", b" \\t"),
+            "non-string reason": valid.replace(b'"Synthetic reason"', b"null"),
+            "oversize blob": valid.ljust(data_guard.MAX_POLICY_BYTES + 1),
+        }
+        for case, data in cases.items():
+            with self.subTest(case=case):
+                self.stage(PUBLISHED, data)
+                self.rejected(self.git("commit", "-qm", "Try invalid metadata", success=False),
+                              b"invalid-published")
+
+        self.stage(PUBLISHED, valid.ljust(data_guard.MAX_POLICY_BYTES))
+        self.check("staged")
+        self.unstage(PUBLISHED)
+        (self.root / PUBLISHED).symlink_to("sources.json")
+        self.git("add", PUBLISHED)
+        self.rejected(self.check("staged", success=False), b"invalid-published")
+        self.unstage(PUBLISHED)
+        self.stage(PUBLISHED + "/nested.txt", b"A directory cannot be the exemption list.\n")
+        self.rejected(self.check("staged", success=False), b"invalid-published")
+        self.git("commit", "--no-verify", "-qm", "Simulate invalid metadata in a PR")
+        self.rejected(self.check("range", self.base, "HEAD", success=False), b"invalid-published")
 
     def test_generated_fixture_passes_commit_push_and_ci(self):
         recipe = (
