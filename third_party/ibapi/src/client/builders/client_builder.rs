@@ -257,6 +257,7 @@ pub mod async_impl {
     pub struct ClientBuilder {
         state: BuilderState,
         disable_auto_reconnect: bool,
+        pub(crate) terminal_notice: Option<fn(i32) -> bool>,
     }
 
     impl ClientBuilder {
@@ -396,6 +397,13 @@ pub mod async_impl {
             !self.disable_auto_reconnect
         }
 
+        /// End this connection on matching IB notice codes, including during
+        /// handshake and on requests whose response decoder skips warnings.
+        pub fn disconnect_on_notice(mut self, matches: fn(i32) -> bool) -> Self {
+            self.terminal_notice = Some(matches);
+            self
+        }
+
         async fn connect_with_sender(self, sender: broadcast::Sender<Notice>) -> Result<Client, Error> {
             let auto_reconnect = self.auto_reconnect_enabled();
             let pieces = self.state.validate()?;
@@ -404,6 +412,7 @@ pub mod async_impl {
                 pieces.client_id,
                 pieces.tcp_no_delay,
                 auto_reconnect,
+                self.terminal_notice,
                 pieces.startup_callback,
                 sender,
             )

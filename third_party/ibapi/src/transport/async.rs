@@ -324,7 +324,7 @@ impl<S: AsyncStream> AsyncTcpMessageBus<S> {
                 _ = message_bus.dispatch_messages(auto_reconnect) => {}
             }
             message_bus.request_shutdown_sync();
-            message_bus.close_subscription_channels().await;
+            message_bus.finish_shutdown().await;
         }));
 
         Ok(())
@@ -412,7 +412,9 @@ impl<S: AsyncStream> AsyncTcpMessageBus<S> {
     }
 
     /// Drop the senders so that outstanding subscriptions terminate.
-    async fn close_subscription_channels(&self) {
+    async fn finish_shutdown(&self) {
+        // Release the socket even while old subscription handles still own the bus.
+        self.connection.socket.close().await;
         {
             let mut channels = self.request_channels.write().await;
             channels.clear();
@@ -446,6 +448,11 @@ impl<S: AsyncStream> AsyncTcpMessageBus<S> {
 
     /// Route error message using routing decision
     async fn route_error_message(&self, message: ResponseMessage, payload: DecodedError) -> Result<(), Error> {
+        if self.connection.terminal_notice.is_some_and(|matches| matches(payload.error_code)) {
+            let notice = Notice::from(payload);
+            let _ = self.connection.notice_sender.send(notice);
+            return Err(Error::Shutdown);
+        }
         let sent_to_update_stream = self.send_order_update(&message).await;
         let request_id = payload.request_id;
         let is_warning = is_warning_error(payload.error_code);
@@ -662,13 +669,10 @@ impl<S: AsyncStream> AsyncMessageBus for AsyncTcpMessageBus<S> {
             channels.insert(request_id, sender);
         }
 
-        self.connection.write_message(&message).await?;
-
-        Ok(AsyncInternalSubscription::with_cleanup(
-            receiver,
-            self.cleanup_sender.clone(),
-            CleanupSignal::Request(request_id),
-        ))
+        // Own registration before the write can fail or its future can be dropped.
+        let subscription = AsyncInternalSubscription::with_cleanup(receiver, self.cleanup_sender.clone(), CleanupSignal::Request(request_id));
+        self.send_message(message).await?;
+        Ok(subscription)
     }
 
     async fn send_order_request(&self, order_id: i32, message: Vec<u8>) -> Result<AsyncInternalSubscription, Error> {
@@ -679,7 +683,7 @@ impl<S: AsyncStream> AsyncMessageBus for AsyncTcpMessageBus<S> {
             channels.insert(order_id, sender);
         }
 
-        self.connection.write_message(&message).await?;
+        self.send_message(message).await?;
 
         Ok(AsyncInternalSubscription::with_cleanup(
             receiver,
@@ -701,7 +705,7 @@ impl<S: AsyncStream> AsyncMessageBus for AsyncTcpMessageBus<S> {
             }
         };
 
-        self.connection.write_message(&message).await?;
+        self.send_message(message).await?;
 
         Ok(AsyncInternalSubscription::with_cleanup(
             receiver,
@@ -711,11 +715,16 @@ impl<S: AsyncStream> AsyncMessageBus for AsyncTcpMessageBus<S> {
     }
 
     async fn send_message(&self, message: Vec<u8>) -> Result<(), Error> {
-        self.connection.write_message(&message).await
+        let mut shutdown = self.shutdown_requested.subscribe();
+        tokio::select! {
+            biased;
+            _ = shutdown.wait_for(|requested| *requested) => Err(Error::Shutdown),
+            result = self.connection.write_message(&message) => result,
+        }
     }
 
     async fn cancel_subscription(&self, request_id: i32, message: Vec<u8>) -> Result<(), Error> {
-        self.connection.write_message(&message).await?;
+        self.send_message(message).await?;
 
         // Single write lock: the previous version held a read guard while
         // awaiting the write upgrade and self-deadlocked on the same task.
@@ -729,7 +738,7 @@ impl<S: AsyncStream> AsyncMessageBus for AsyncTcpMessageBus<S> {
     }
 
     async fn cancel_order_subscription(&self, order_id: i32, message: Vec<u8>) -> Result<(), Error> {
-        self.connection.write_message(&message).await?;
+        self.send_message(message).await?;
 
         let mut channels = self.order_channels.write().await;
         if let Some(sender) = channels.get(&order_id) {
@@ -777,7 +786,7 @@ impl<S: AsyncStream> AsyncMessageBus for AsyncTcpMessageBus<S> {
                 Err(err) => warn!("Error joining processing task: {err}"),
             }
         }
-        self.close_subscription_channels().await;
+        self.finish_shutdown().await;
     }
 
     fn request_shutdown_sync(&self) {

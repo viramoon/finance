@@ -37,6 +37,7 @@ pub struct AsyncConnection<S: AsyncStream = AsyncTcpSocket> {
     /// `self.connection.notice_sender`) and any pre-bound `NoticeStream` the
     /// user obtained from `ClientBuilder::connect_with_notice_stream`.
     pub(crate) notice_sender: broadcast::Sender<Notice>,
+    pub(crate) terminal_notice: Option<fn(i32) -> bool>,
 }
 
 impl<S: AsyncStream> std::fmt::Debug for AsyncConnection<S> {
@@ -59,11 +60,13 @@ impl AsyncConnection<AsyncTcpSocket> {
         address: &str,
         client_id: i32,
         tcp_no_delay: bool,
+        terminal_notice: Option<fn(i32) -> bool>,
         startup_callback: Option<Arc<dyn Fn(StartupMessage) + Send + Sync>>,
         notice_sender: broadcast::Sender<Notice>,
     ) -> Result<Self, Error> {
         let socket = AsyncTcpSocket::connect(address, tcp_no_delay).await?;
-        let connection = Self::with_socket(socket, client_id, startup_callback, notice_sender, MessageRecorder::from_env());
+        let mut connection = Self::with_socket(socket, client_id, startup_callback, notice_sender, MessageRecorder::from_env());
+        connection.terminal_notice = terminal_notice;
         connection.establish_connection().await?;
         Ok(connection)
     }
@@ -89,6 +92,7 @@ impl<S: AsyncStream> AsyncConnection<S> {
             connection_handler: ConnectionHandler::default(),
             startup_callback,
             notice_sender,
+            terminal_notice: None,
         }
     }
 
@@ -272,6 +276,14 @@ impl<S: AsyncStream> AsyncConnection<S> {
         let server_version = self.server_version();
         loop {
             let mut message = self.read_message().await?;
+            if message.message_type() == crate::messages::IncomingMessages::Error {
+                if let Some(matches) = self.terminal_notice {
+                    let notice = Notice::from(&message);
+                    if matches(notice.code) {
+                        return Err(Error::Notice(notice));
+                    }
+                }
+            }
             let info = self.connection_handler.parse_account_info(server_version, &mut message, &ctx)?;
 
             // Merge received info

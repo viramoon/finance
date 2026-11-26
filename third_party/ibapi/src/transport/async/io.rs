@@ -4,10 +4,15 @@
 //! method-async via `#[async_trait]`. Frame-level: `read_message` returns the
 //! already-unframed body so callers don't repeat the length-prefix dance.
 
+use std::future::poll_fn;
+use std::io;
+use std::pin::Pin;
+use std::sync::Mutex as StdMutex;
+use std::task::{ready, Poll};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWrite};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -18,6 +23,7 @@ use crate::errors::Error;
 pub(crate) trait AsyncIo {
     async fn read_message(&self) -> Result<Vec<u8>, Error>;
     async fn write_all(&self, buf: &[u8]) -> Result<(), Error>;
+    async fn close(&self);
 }
 
 #[async_trait]
@@ -33,8 +39,9 @@ pub(crate) trait AsyncStream: AsyncIo + AsyncReconnect + Send + Sync + 'static +
 /// task and the request senders.
 #[derive(Debug)]
 pub(crate) struct AsyncTcpSocket {
-    reader: Mutex<OwnedReadHalf>,
-    writer: Mutex<OwnedWriteHalf>,
+    reader: Mutex<Option<OwnedReadHalf>>,
+    writer: StdMutex<Option<OwnedWriteHalf>>,
+    write_order: Mutex<()>,
     connection_url: String,
     tcp_no_delay: bool,
 }
@@ -45,8 +52,9 @@ impl AsyncTcpSocket {
         stream.set_nodelay(tcp_no_delay)?;
         let (read_half, write_half) = stream.into_split();
         Ok(Self {
-            reader: Mutex::new(read_half),
-            writer: Mutex::new(write_half),
+            reader: Mutex::new(Some(read_half)),
+            writer: StdMutex::new(Some(write_half)),
+            write_order: Mutex::new(()),
             connection_url: address.to_string(),
             tcp_no_delay,
         })
@@ -57,6 +65,7 @@ impl AsyncTcpSocket {
 impl AsyncIo for AsyncTcpSocket {
     async fn read_message(&self) -> Result<Vec<u8>, Error> {
         let mut reader = self.reader.lock().await;
+        let reader = reader.as_mut().ok_or(Error::Shutdown)?;
         let mut length_bytes = [0u8; 4];
         reader.read_exact(&mut length_bytes).await?;
         let message_length = u32::from_be_bytes(length_bytes) as usize;
@@ -65,11 +74,28 @@ impl AsyncIo for AsyncTcpSocket {
         Ok(data)
     }
 
-    async fn write_all(&self, buf: &[u8]) -> Result<(), Error> {
-        let mut writer = self.writer.lock().await;
-        writer.write_all(buf).await?;
-        writer.flush().await?;
-        Ok(())
+    async fn write_all(&self, mut remaining: &[u8]) -> Result<(), Error> {
+        // Serialize whole frames, but borrow the socket only during a poll.
+        // Closing it must not depend on the owner polling a stalled write again.
+        let _frame = self.write_order.lock().await;
+        poll_fn(|cx| {
+            let mut writer = self.writer.lock()?;
+            let writer = writer.as_mut().ok_or(Error::Shutdown)?;
+            while !remaining.is_empty() {
+                let n = ready!(Pin::new(&mut *writer).poll_write(cx, remaining))?;
+                if n == 0 {
+                    return Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero).into()));
+                }
+                remaining = &remaining[n..];
+            }
+            Poll::Ready(Ok(ready!(Pin::new(writer).poll_flush(cx))?))
+        })
+        .await
+    }
+
+    async fn close(&self) {
+        self.reader.lock().await.take();
+        self.writer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
     }
 }
 
@@ -79,8 +105,9 @@ impl AsyncReconnect for AsyncTcpSocket {
         let stream = TcpStream::connect(&self.connection_url).await?;
         stream.set_nodelay(self.tcp_no_delay)?;
         let (new_reader, new_writer) = stream.into_split();
-        *self.reader.lock().await = new_reader;
-        *self.writer.lock().await = new_writer;
+        let _frame = self.write_order.lock().await;
+        *self.reader.lock().await = Some(new_reader);
+        *self.writer.lock()? = Some(new_writer);
         Ok(())
     }
 

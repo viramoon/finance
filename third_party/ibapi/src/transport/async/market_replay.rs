@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use prost::Message;
-use tokio::sync::Notify;
+use tokio::sync::{oneshot, Notify};
 
 use super::io::{AsyncIo, AsyncReconnect, AsyncStream};
 use super::AsyncTcpMessageBus;
@@ -21,6 +21,10 @@ use crate::{proto, server_versions, Client, ClientBuilder, Error};
 /// One successfully written market data operation, decoded from an outbound frame.
 #[derive(Debug, Eq, PartialEq)]
 pub enum MarketWrite {
+    /// Explicit managed-account verification after the handshake.
+    Accounts,
+    /// Read-only connection probe heartbeat.
+    ServerTime,
     /// Start the API during a scripted reconnect.
     StartApi(Option<i32>),
     /// Session-level preference.
@@ -53,7 +57,7 @@ pub struct MarketReplay {
 impl MarketReplay {
     /// Create a synthetic post-handshake client. This neither opens a socket nor records frames to disk.
     pub fn open() -> Result<(Self, Client), Error> {
-        Self::open_mode(ReplayStream::default(), true)
+        Self::open_mode(ReplayStream::default(), Client::builder())
     }
 
     /// Create a replay that reads frames in the production background dispatcher.
@@ -68,20 +72,21 @@ impl MarketReplay {
                 dispatcher: Some(Arc::new(DispatcherSignals::default())),
                 ..ReplayStream::default()
             },
-            builder.auto_reconnect_enabled(),
+            builder,
         )
     }
 
-    fn open_mode(stream: ReplayStream, auto_reconnect: bool) -> Result<(Self, Client), Error> {
+    fn open_mode(stream: ReplayStream, builder: ClientBuilder) -> Result<(Self, Client), Error> {
         let metadata = ConnectionMetadata {
             client_id: 91,
             server_version: server_versions::PROTOBUF_REST_MESSAGES_3,
             ..Default::default()
         };
-        let connection = AsyncConnection::replay(stream.clone(), metadata.client_id, metadata.server_version);
+        let mut connection = AsyncConnection::replay(stream.clone(), metadata.client_id, metadata.server_version);
+        connection.terminal_notice = builder.terminal_notice;
         let bus = Arc::new(AsyncTcpMessageBus::new(connection)?);
         if stream.dispatcher.is_some() {
-            bus.clone().process_messages(auto_reconnect)?;
+            bus.clone().process_messages(builder.auto_reconnect_enabled())?;
         }
         let client = Client::new(metadata, bus.clone())?;
         Ok((Self { stream, bus }, client))
@@ -108,6 +113,42 @@ impl MarketReplay {
         .await?;
         self.inject(IncomingMessages::ContractDataEnd, proto::ContractDataEnd { req_id: Some(request_id) })
             .await
+    }
+
+    /// Answer an explicit managed-account request with synthetic identities.
+    pub async fn managed_accounts(&self, accounts: &str) -> Result<(), Error> {
+        self.inject(
+            IncomingMessages::ManagedAccounts,
+            proto::ManagedAccounts {
+                accounts_list: Some(accounts.into()),
+            },
+        )
+        .await
+    }
+
+    /// Answer a heartbeat with an arbitrary synthetic Unix timestamp.
+    pub async fn server_time(&self, timestamp: i64) -> Result<(), Error> {
+        self.inject(
+            IncomingMessages::CurrentTime,
+            proto::CurrentTime {
+                current_time: Some(timestamp),
+            },
+        )
+        .await
+    }
+
+    /// Inject a global (-1) or request-scoped IB notice, without any real vendor text.
+    pub async fn notice(&self, id: i32, code: i32) -> Result<(), Error> {
+        self.inject(
+            IncomingMessages::Error,
+            proto::ErrorMessage {
+                id: Some(id),
+                error_code: Some(code),
+                error_msg: Some("synthetic notice".into()),
+                ..Default::default()
+            },
+        )
+        .await
     }
 
     /// Inject a request-scoped actual market type callback in its generated Protobuf representation.
@@ -152,7 +193,19 @@ impl MarketReplay {
 
     /// Fail the next write while leaving the mock read side and SDK connection status intact.
     pub fn fail_next_write(&self) {
-        self.stream.frames.lock().unwrap().fail_next_write = true;
+        self.fail_next_write_with(ErrorKind::BrokenPipe);
+    }
+
+    /// Return this local I/O error on the next write while the read side stays open.
+    pub fn fail_next_write_with(&self, kind: ErrorKind) {
+        self.stream.frames.lock().unwrap().write_error = Some(kind);
+    }
+
+    /// Accept the next outbound frame, but wait for release before completing its write.
+    pub fn hold_next_write(&self) -> oneshot::Sender<()> {
+        let (release, held) = oneshot::channel();
+        self.stream.frames.lock().unwrap().held_write = Some(held);
+        release
     }
 
     /// Cause the background dispatcher to reconnect to a peer that never acknowledges its handshake.
@@ -164,6 +217,15 @@ impl MarketReplay {
 
     /// Trigger a socket loss with a complete synthetic handshake queued for a replacement connection.
     pub fn disconnect_and_answer_reconnect(&self, accounts: &str) {
+        self.queue_reconnect_reply(accounts, None);
+    }
+
+    /// Put a notice inside a replacement handshake, before account information.
+    pub fn disconnect_with_handshake_notice(&self, accounts: &str, code: i32) {
+        self.queue_reconnect_reply(accounts, Some(code));
+    }
+
+    fn queue_reconnect_reply(&self, accounts: &str, code: Option<i32>) {
         let signals = self.stream.dispatcher.as_ref().expect("requires background dispatcher");
         let mut frames = self.stream.frames.lock().unwrap();
         frames.inbound.push_back(Err(Error::ConnectionReset));
@@ -173,6 +235,17 @@ impl MarketReplay {
             "20000101 00:00:00 UTC"
         )
         .into_bytes()));
+        if let Some(code) = code {
+            frames.inbound.push_back(Ok(encode_protobuf_message(
+                IncomingMessages::Error as i32,
+                &proto::ErrorMessage {
+                    id: Some(-1),
+                    error_code: Some(code),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            )));
+        }
         frames.inbound.push_back(Ok(encode_protobuf_message(
             IncomingMessages::NextValidId as i32,
             &proto::NextValidId { order_id: Some(1) }.encode_to_vec(),
@@ -214,6 +287,16 @@ impl MarketReplay {
         self.stream.frames.lock().unwrap().reconnect_attempts
     }
 
+    /// Whether the bus released its underlying transport.
+    pub fn is_closed(&self) -> bool {
+        self.stream.frames.lock().unwrap().closed
+    }
+
+    /// Number of request channels still owned by the dispatcher.
+    pub async fn registered_requests(&self) -> usize {
+        self.bus.request_channels.read().await.len()
+    }
+
     /// Wait until the given number of requests has reached the replay transport.
     pub async fn wait_for_writes(&self, count: usize) {
         let signals = self.stream.dispatcher.as_ref().expect("requires background dispatcher");
@@ -252,11 +335,15 @@ fn decode_write(frame: &[u8]) -> MarketWrite {
     let kind = i32::from_be_bytes(frame[4..8].try_into().unwrap()) - PROTOBUF_MSG_ID;
     let body = &frame[8..];
     const START_API: i32 = OutgoingMessages::StartApi as i32;
+    const ACCOUNTS: i32 = OutgoingMessages::RequestManagedAccounts as i32;
+    const SERVER_TIME: i32 = OutgoingMessages::RequestCurrentTime as i32;
     const SELECT_TYPE: i32 = OutgoingMessages::RequestMarketDataType as i32;
     const CONFIRM: i32 = OutgoingMessages::RequestContractData as i32;
     const SUBSCRIBE: i32 = OutgoingMessages::RequestMarketData as i32;
     const CANCEL: i32 = OutgoingMessages::CancelMarketData as i32;
     match kind {
+        ACCOUNTS => MarketWrite::Accounts,
+        SERVER_TIME => MarketWrite::ServerTime,
         START_API => MarketWrite::StartApi(proto::StartApiRequest::decode(body).unwrap().client_id),
         SELECT_TYPE => MarketWrite::SelectType(proto::MarketDataTypeRequest::decode(body).unwrap().market_data_type),
         CONFIRM => MarketWrite::Confirm(proto::ContractDataRequest::decode(body).unwrap().req_id),
@@ -279,7 +366,9 @@ fn decode_write(frame: &[u8]) -> MarketWrite {
 struct ReplayFrames {
     inbound: VecDeque<Result<Vec<u8>, Error>>,
     outbound: Vec<Vec<u8>>,
-    fail_next_write: bool,
+    write_error: Option<ErrorKind>,
+    held_write: Option<oneshot::Receiver<()>>,
+    closed: bool,
     reconnect_attempts: usize,
     handshake_written: bool,
     reconnect_answered: bool,
@@ -338,19 +427,32 @@ impl AsyncIo for ReplayStream {
     }
 
     async fn write_all(&self, frame: &[u8]) -> Result<(), Error> {
-        let mut frames = self.frames.lock().unwrap();
-        if std::mem::take(&mut frames.fail_next_write) {
-            return Err(io::Error::new(ErrorKind::BrokenPipe, "synthetic write failure").into());
-        }
-        if frame.starts_with(b"API\0") {
-            frames.handshake_written = true;
-        } else {
-            frames.outbound.push(frame.to_vec());
-            if let Some(signals) = &self.dispatcher {
-                signals.outbound_ready.notify_one();
+        let held = {
+            let mut frames = self.frames.lock().unwrap();
+            if frames.closed {
+                return Err(Error::Shutdown);
             }
+            if let Some(kind) = frames.write_error.take() {
+                return Err(io::Error::new(kind, "synthetic write failure").into());
+            }
+            if frame.starts_with(b"API\0") {
+                frames.handshake_written = true;
+            } else {
+                frames.outbound.push(frame.to_vec());
+                if let Some(signals) = &self.dispatcher {
+                    signals.outbound_ready.notify_one();
+                }
+            }
+            frames.held_write.take()
+        };
+        if let Some(held) = held {
+            held.await.map_err(|_| Error::Shutdown)?;
         }
         Ok(())
+    }
+
+    async fn close(&self) {
+        self.frames.lock().unwrap().closed = true;
     }
 }
 
