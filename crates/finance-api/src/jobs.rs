@@ -1,12 +1,17 @@
 //! Durable, single-host submission. SQLite's write transaction serializes the
 //! idempotency lookup, capacity check and insertion across API processes.
-use crate::strategy_bundle::legacy_sma_parameters_valid;
-use crate::{ApiError, AppState, BacktestSummary, ErrorBody, error, research};
+use crate::{
+    ApiError, AppState, BacktestSummary, ErrorBody,
+    bundle_jobs::{self, BundleAdmission, BundleRequestView, BundleSubmission, QueuedBundle},
+    error, research,
+    strategy_bundle::legacy_sma_parameters_valid,
+};
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path, Query, State, rejection::JsonRejection},
+    body::{Body, to_bytes},
+    extract::{FromRequest, Path, Query, Request, State},
     http::{HeaderMap, StatusCode},
-    routing::get,
+    routing::{get, post},
 };
 use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -14,10 +19,14 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 const CAPACITY: i64 = 128;
+const LEGACY_REQUEST_BYTES: usize = 8192;
+// Each UTF-8 source byte can expand to at most six bytes in a JSON string.
+const STRATEGY_REQUEST_BYTES: usize = 6 * crate::strategy_bundle::MAX_BYTES + 4096;
 const SAMPLE_FIRST: i64 = 1704150060;
 const SAMPLE_LAST: i64 = SAMPLE_FIRST + 8 * 60;
-const FIRST_RESEARCH_DAY: NaiveDate = NaiveDate::from_epoch_days(0).unwrap();
-const LAST_RESEARCH_DAY: NaiveDate = NaiveDate::from_ymd_opt(2100, 12, 31).unwrap();
+const FIRST_RESEARCH_DAY: NaiveDate = DateTime::<Utc>::UNIX_EPOCH.naive_utc().date();
+const LAST_BUNDLE_ENDPOINT: NaiveDate = NaiveDate::from_ymd_opt(2101, 1, 1).unwrap();
+const LAST_RESEARCH_DAY: NaiveDate = LAST_BUNDLE_ENDPOINT.pred_opt().unwrap();
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -69,14 +78,7 @@ impl JobRequest {
                 if !research::instrument_valid(&self.instrument) {
                     return Err(invalid("Choose a catalog XNYS stock or ETF"));
                 }
-                if ![self.start, self.end].iter().all(|t| {
-                    (FIRST_RESEARCH_DAY..=LAST_RESEARCH_DAY).contains(&t.date_naive())
-                        && t.time() == NaiveTime::MIN
-                }) {
-                    return Err(invalid(
-                        "Use dates from 1970-01-01 through 2100-12-31 at UTC midnight",
-                    ));
-                }
+                validate_daily_dates(self.start, self.end, LAST_RESEARCH_DAY)?;
                 if !matches!(params, (Some(fast), Some(slow), Some(shares))
                     if legacy_sma_parameters_valid(fast, slow, shares))
                 {
@@ -89,6 +91,45 @@ impl JobRequest {
             _ => Err(invalid("Unsupported strategy")),
         }
     }
+}
+
+fn validate_daily_dates(
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    last_endpoint: NaiveDate,
+) -> Result<(), ApiError> {
+    if start >= end {
+        return Err(invalid("Start must precede end"));
+    }
+    if ![start, end].iter().all(|t| {
+        (FIRST_RESEARCH_DAY..=last_endpoint).contains(&t.date_naive()) && t.time() == NaiveTime::MIN
+    }) {
+        return Err(invalid(&format!(
+            "Use dates from {FIRST_RESEARCH_DAY} through {last_endpoint} at UTC midnight"
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(untagged)]
+pub enum SubmitRequest {
+    Legacy(JobRequest),
+    Bundle(BundleSubmission),
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(untagged)]
+pub enum JobRequestView {
+    Legacy(JobRequest),
+    Bundle(BundleRequestView),
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum QueuedRequest {
+    Legacy(JobRequest),
+    Bundle(QueuedBundle),
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -105,7 +146,7 @@ pub enum JobStatus {
 pub struct Job {
     pub id: i64,
     pub status: JobStatus,
-    pub request: JobRequest,
+    pub request: JobRequestView,
     pub attempt: u8,
     pub created_at: DateTime<Utc>,
     pub summary: Option<BacktestSummary>,
@@ -135,18 +176,44 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/backtests", get(list).post(submit))
         .route("/api/v1/backtests/{id}", get(detail))
         .route("/api/v1/backtests/by-key", get(by_key))
-        .layer(DefaultBodyLimit::max(8192))
+        .route("/api/v1/strategies", post(bundle_jobs::register))
 }
-fn invalid(message: &str) -> ApiError {
+pub(super) fn invalid(message: &str) -> ApiError {
     error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_request", message)
 }
-fn storage_error(err: impl std::fmt::Display) -> ApiError {
+pub(super) fn storage_error(err: impl std::fmt::Display) -> ApiError {
     eprintln!("backtest queue: {err}");
     error(
         StatusCode::INTERNAL_SERVER_ERROR,
         "queue_error",
         "Cannot access job queue",
     )
+}
+
+pub(super) fn key_conflict() -> ApiError {
+    error(
+        StatusCode::CONFLICT,
+        "key_conflict",
+        "Key already used for another request",
+    )
+}
+
+fn check_capacity(conn: &Connection) -> Result<(), ApiError> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM jobs WHERE status IN ('queued','running')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)?;
+    if count >= CAPACITY {
+        return Err(error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "queue_full",
+            "Backtest queue full",
+        ));
+    }
+    Ok(())
 }
 fn submission_key(headers: &HeaderMap) -> Result<String, ApiError> {
     let mut keys = headers.get_all("Idempotency-Key").iter();
@@ -162,7 +229,7 @@ fn submission_key(headers: &HeaderMap) -> Result<String, ApiError> {
             invalid("One Idempotency-Key with 1..128 visible ASCII characters is required")
         })
 }
-async fn db<T: Send + 'static>(
+pub(super) async fn db<T: Send + 'static>(
     state: AppState,
     op: impl FnOnce(&mut Connection) -> Result<T, ApiError> + Send + 'static,
 ) -> Result<T, ApiError> {
@@ -187,20 +254,37 @@ async fn db<T: Send + 'static>(
     .await
     .map_err(storage_error)?
 }
-#[utoipa::path(post, path = "/api/v1/backtests", params(("Idempotency-Key" = String, Header, description="Stable submission key, 1–128 visible ASCII characters")), request_body = JobRequest, responses(
-    (status=202,body=Accepted),(status=409,body=ErrorBody),(status=422,body=ErrorBody),(status=429,body=ErrorBody),(status=500,body=ErrorBody)))]
+#[utoipa::path(post, path = "/api/v1/backtests", params(("Idempotency-Key" = String, Header, description="Stable submission key, 1–128 visible ASCII characters")), request_body = SubmitRequest, responses(
+    (status=202,body=Accepted),(status=404,body=ErrorBody),(status=409,body=ErrorBody),(status=422,body=ErrorBody),(status=429,body=ErrorBody),(status=500,body=ErrorBody)))]
 pub async fn submit(
     State(state): State<AppState>,
     headers: HeaderMap,
-    request: Result<Json<JobRequest>, JsonRejection>,
+    request: Request,
 ) -> Result<(StatusCode, Json<Accepted>), ApiError> {
     let key = submission_key(&headers)?;
-    let req = request
-        .map_err(|_| invalid("Invalid job request or parameters"))?
-        .0;
-    req.validate()?;
-    let request = serde_json::to_string(&req).map_err(storage_error)?;
+    let (parts, body) = request.into_parts();
+    let bytes = to_bytes(body, STRATEGY_REQUEST_BYTES)
+        .await
+        .map_err(|_| invalid("Invalid job request or parameters"))?;
+    let size = bytes.len();
+    let request =
+        Json::<SubmitRequest>::from_request(Request::from_parts(parts, Body::from(bytes)), &state)
+            .await
+            .map_err(|_| invalid("Invalid job request or parameters"))?
+            .0;
+    match &request {
+        SubmitRequest::Legacy(req) => {
+            if size > LEGACY_REQUEST_BYTES {
+                return Err(invalid("Invalid job request or parameters"));
+            }
+            req.validate()?;
+        }
+        SubmitRequest::Bundle(req) => {
+            validate_daily_dates(req.start, req.end, LAST_BUNDLE_ENDPOINT)?
+        }
+    }
     let research_root = state.research_root.clone();
+    let data_root = state.data_root.clone();
     let id = db(state, move |conn| {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -211,42 +295,51 @@ pub async fn submit(
             })
             .optional()
             .map_err(storage_error)?;
-        if let Some((id, stored)) = existing {
-            if stored != request {
-                return Err(error(
-                    StatusCode::CONFLICT,
-                    "key_conflict",
-                    "Key already used for another request",
-                ));
+        let request = match request {
+            SubmitRequest::Legacy(req) => {
+                let request = serde_json::to_string(&req).map_err(storage_error)?;
+                if let Some((id, stored)) = existing {
+                    return if stored == request {
+                        Ok(id)
+                    } else {
+                        Err(key_conflict())
+                    };
+                }
+                if req.strategy == "SmaCrossover" {
+                    let dataset = research::dataset(&research_root, &req.instrument)?;
+                    if !dataset.is_some_and(|d| {
+                        req.start.date_naive() <= d.last_session
+                            && req.end.date_naive() >= d.first_session
+                    }) {
+                        return Err(error(
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            "no_data",
+                            "No configured dataset overlaps the requested dates",
+                        ));
+                    }
+                }
+                check_capacity(&tx)?;
+                request
             }
-            return Ok(id);
-        }
-        if req.strategy == "SmaCrossover" {
-            let dataset = research::dataset(&research_root, &req.instrument)?;
-            if !dataset.is_some_and(|d| {
-                req.start.date_naive() <= d.last_session && req.end.date_naive() >= d.first_session
-            }) {
-                return Err(error(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "no_data",
-                    "No configured dataset overlaps the requested dates",
-                ));
+            SubmitRequest::Bundle(req) => {
+                let previous = if let Some((_, stored)) = &existing {
+                    let parsed: QueuedRequest =
+                        serde_json::from_str(stored).map_err(storage_error)?;
+                    match parsed {
+                        QueuedRequest::Legacy(_) => return Err(key_conflict()),
+                        QueuedRequest::Bundle(bundle) => Some(bundle),
+                    }
+                } else {
+                    None
+                };
+                match bundle_jobs::admit(&tx, &data_root, req, previous.as_ref(), check_capacity)? {
+                    BundleAdmission::Retry => return Ok(existing.expect("existing job").0),
+                    BundleAdmission::New(queued) => {
+                        serde_json::to_string(&queued).map_err(storage_error)?
+                    }
+                }
             }
-        }
-        let count: i64 = tx
-            .query_row(
-                "SELECT count(*) FROM jobs WHERE status IN ('queued','running')",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(storage_error)?;
-        if count >= CAPACITY {
-            return Err(error(
-                StatusCode::TOO_MANY_REQUESTS,
-                "queue_full",
-                "Backtest queue full",
-            ));
-        }
+        };
         tx.execute(
             "INSERT INTO jobs(idem,request) VALUES (?1,?2)",
             params![key, request],
@@ -286,9 +379,10 @@ pub async fn by_key(
 
 const COLUMNS: &str = "id,status,request,attempt,created_at,summary,error";
 fn parse<T: serde::de::DeserializeOwned>(value: &str, idx: usize) -> rusqlite::Result<T> {
-    serde_json::from_str(value).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(idx, rusqlite::types::Type::Text, Box::new(e))
-    })
+    serde_json::from_str(value).map_err(|e| text_error(idx, e))
+}
+fn text_error(idx: usize, error: serde_json::Error) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(idx, rusqlite::types::Type::Text, Box::new(error))
 }
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
     let status: String = r.get(1)?;
@@ -301,10 +395,16 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
         _ => return Err(rusqlite::Error::InvalidQuery),
     };
     let created_at: String = r.get(4)?;
+    let request = match parse::<QueuedRequest>(&r.get::<_, String>(2)?, 2)? {
+        QueuedRequest::Legacy(request) => JobRequestView::Legacy(request),
+        QueuedRequest::Bundle(bundle) => {
+            JobRequestView::Bundle(bundle.view().map_err(|e| text_error(2, e))?)
+        }
+    };
     Ok(Job {
         id: r.get(0)?,
         status,
-        request: parse(&r.get::<_, String>(2)?, 2)?,
+        request,
         attempt: r.get(3)?,
         created_at: created_at.parse().map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(e))

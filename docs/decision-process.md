@@ -8,7 +8,7 @@
 
 当前求值计划是 `fertile.finance/sma-crossover-plan/v1`。`finance-strategy compile-legacy-sma` 复用历史回测的标的与参数规则。要求现有 XNYS 股票或 ETF 格式、`2 ≤ fast_period < slow_period ≤ 250`、`1 ≤ shares ≤ 1000`。计划含 `instrument_id`、`strategy`、`plan_version`、`parameters` 和 `content_sha256`。哈希覆盖其余字段的按键排序、紧凑 UTF-8 JSON。回测从现有 `SmaCrossover` 作业参数构造同一版本的计划。
 
-CPU 求值器用两个有限窗口比较收盘均线，窗口和以 27 位小数的定点整数保存，比较时使用交叉相乘。收到第 `slow_period` 根闭合 bar 时开始输出，快线严格高于慢线时目标为配置股数，其余为零。对当前 bar 生成的目标仅供观察，回测适配器依原有规则在下一会话使用目标做模拟成交。上游 `DemoStrategy` 仍用于源码构建示例。通用 `StrategyBundle` 计划的执行由 F7 集成。
+CPU 求值器用两个有限窗口比较收盘均线，窗口和以 27 位小数的定点整数保存，比较时使用交叉相乘。收到第 `slow_period` 根闭合 bar 时开始输出，快线严格高于慢线时目标为配置股数，其余为零。对当前 bar 生成的目标仅供观察，回测适配器依原有规则在下一会话使用目标做模拟成交。上游 `DemoStrategy` 仍用于源码构建示例。通用 `StrategyBundle` 计划由 [配置策略作业](backtest-jobs.md#配置策略作业) 执行。
 
 ## 回放输入和重启
 
@@ -30,4 +30,4 @@ CPU 求值器用两个有限窗口比较收盘均线，窗口和以 27 位小数
 
 - F3 已提供 `projected_partitions`，可按 WAL 顺序枚举已提交的 Parquet 分区。准备回放时，按一个 F1 流分区导出 `event_json`，保留原始可用时间与控制帧，核对计算许可 `derive_non_display` 和覆盖质量报告。`read_latest_event` 返回最新修订，适用于点查。直接跟随投影需将断点绑定到投影源和已提交位置，并明确缺口、更正和保留边界。当前决策入口使用追加式 NDJSON 的字节断点。见 [F3 投影接口](market-wal.md#parquet-与投影游标)。
 - F6 将 `IndicatorEngine::push_closed` 及其批量入口接入求值后端。适配时核对预热、点时可用性和均线比较精度，策略求值使用未为展示舍入的值。
-- F7 将 `run_config_strategy_backtest` 内的策略目标生成与模拟成交分开，把已编译 `StrategyBundle`、闭合会话和所需的只读持仓及股票池快照接到共享求值接口。实时和回测共用目标生成，分别验证 `A1_B2` 与 `target_weights` 的逐点及重启一致性。
+- F7 的 `run_config_strategy_backtest` 已执行离线配置回测。后续接入实时决策时，可从该路径提取目标生成，将已编译 `StrategyBundle`、闭合会话及只读持仓和股票池快照接到共享求值接口，并验证 `A1_B2` 与 `target_weights` 的逐点及重启一致性。

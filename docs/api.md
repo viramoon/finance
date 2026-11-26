@@ -2,7 +2,7 @@
 
 finance-api 是独立的 Rust / axum 进程；web 通过 HTTP 调用，frontend 只调用 web。当前不启动 Nautilus、trader、collector 或 IBKR，也不在 HTTP 请求中执行回测。服务部署唯一来源仍为 fertile deploy/，本仓库 service.yaml 记录组件接口。
 
-用于接口测试和文档的行情样本须来自已登记的合成 fixture。防护启用前已发布分支的合成样本在合入前也须通过来源和 SHA-256 检查。将实际 API 响应、运行日志和数据库留在工作树之外，目录和样本准入方式见 [数据入仓防护](data-guard.md)。
+用于接口测试和文档的行情样本须来自已登记的合成 fixture。API 的 PR 作业以 PR 基分支 SHA 的硬规则检查 Git 对象，样本来源和 SHA-256 由候选树的清单提供。防护启用前已发布分支的合成样本也须通过该检查。将实际 API 响应、运行日志和数据库留在工作树之外，目录和样本准入方式见 [数据入仓防护](data-guard.md)。
 
 ## 运行与配置
 
@@ -40,6 +40,25 @@ GET /api/v1/market/status 从 collector 持久状态读取各标的水位和新�
 POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /api/v1/backtests/{id} 查看执行进度与摘要，GET /api/v1/backtests 按 cursor 和 limit 翻页。提交使用同库事务完成幂等检查和容量检查。多个 worker 可独立领取并续租，租约是服务端状态。完整输入范围、超时和恢复见 [作业运维](backtest-jobs.md)。公网入口由 web 鉴权并限流。
 
 `finance-decision` 的信号与检查点保存在本地决策库，读写边界见 [实时决策接口](decision-process.md)。
+
+## 配置策略提交与结果
+
+`POST /api/v1/strategies` 接受 `{"format":"yaml","content":"<配置文件内容>"}`，也接受带 `format: "json"` 的 JSON 配置文档。通过校验时返回 200 和 `{id, version, content_sha256}`。同一版本的等价文档可重复登记。登记或内联入队遇到已绑定不同内容的版本时返回 409 `VERSION_CONFLICT`，`error.path` 为 `/metadata/version`，`error.location` 指向本次提交的 YAML 或 JSON 配置中的版本值，行列从 1 起算。配置校验错误返回 422，`error` 包含编译器错误码、消息、字段 `path` 和行列 `location`。原始配置上限为 256 KiB。
+
+`POST /api/v1/backtests` 支持如下请求，继续使用 `Idempotency-Key`。配置作业使用 UTC 午夜端点和半开区间 `[start, end)`，可覆盖 1970-01-01 至 2100-12-31，最晚结束端点为 2101-01-01。决策及成交按 XNYS 当地会话时钟执行。
+
+```json
+{
+  "strategy": "StrategyBundle",
+  "start": "2024-03-01T00:00:00Z",
+  "end": "2024-04-15T00:00:00Z",
+  "source": {"kind": "registered", "id": "example.equity-momentum", "version": "1.0.0"}
+}
+```
+
+使用 `source: {"kind":"inline","format":"yaml","content":"<配置文件内容>"}` 可直接编译并登记。内联文件和相同已登记版本使用同一编译路径。同一键、相同区间和相同规范化配置哈希返回原作业 ID。使用同一键提交另一份有效配置或区间返回 409 `key_conflict`。指定未知登记版本返回 404 `strategy_version_not_found`，缺少已发布的本地回放快照返回 422 `no_data`。
+
+列表与详情以已登记版本和 `content_sha256` 表示配置作业请求。成功摘要保留通用作业字段，`instrument` 为 `PORTFOLIO`，并带有 `run_manifest` 与 `strategy_report`。前者锁定实际执行版本与回放数据，后者包含净值、仓位、成交、子账、冲突归因和覆盖。金额、价格、数量和权重以十进制字符串表示，回放时钟的 UTC 纳秒时间戳也以字符串传输。已有 `DemoStrategy` 和 `SmaCrossover` 请求、详情及历史摘要仍可读取。参见 [配置策略作业](backtest-jobs.md#配置策略作业)。
 
 ## 示例批任务
 

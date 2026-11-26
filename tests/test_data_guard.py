@@ -313,6 +313,173 @@ class GitGuardTest(unittest.TestCase):
         self.git("push", "-q", "origin", "main")
         return self.head()
 
+    def stage_rules(self, **changes):
+        rules = json.loads(self.git("show", f"{self.base}:{RULES}").stdout)
+        rules.update(changes)
+        self.write_json(RULES, rules)
+        self.git("add", RULES)
+
+    def stage_relaxed_rules(self):
+        self.stage_rules(max_blob_bytes=524288, blocked_path_components=[], blocked_suffixes=[],
+                         blocked_magic=[], fixture_paths=[], fixture_suffixes=[])
+
+    def stage_rule_change_examples(self):
+        # Fixed synthetic bytes. The JSON text exercises content detection even
+        # after removing every path and suffix that requires fixture provenance.
+        examples = tuple(item for item in forbidden_examples() if item[0] in {
+            "oversize.txt", "nested/LoGs/hint.txt", "archive.ZIP", "renamed-parquet.txt", "quotes.txt",
+        }) + (
+            ("plain.csv", MARKER, b"fixture-source-required"),
+            ("tests/fixtures/plain.json", b'{"synthetic":true}', b"fixture-source-required"),
+        )
+        for path, data, _ in examples:
+            self.stage(path, data)
+        return examples
+
+    def assert_rule_change_rejected(self, result, examples):
+        for path, _, reason in examples:
+            self.rejected(result, reason + b" " + ascii(path).encode("ascii"))
+
+    def test_pre_commit_enforces_head_rules_over_relaxed_index(self):
+        self.stage_relaxed_rules()
+        self.check("staged")
+        self.write(RULES, b"Unstaged policy bytes.\n")
+        examples = self.stage_rule_change_examples()
+        result = self.git("commit", "-qm", "Try to loosen staged checks", success=False)
+        self.assert_rule_change_rejected(result, examples)
+        self.assertEqual(self.head(), self.base)
+
+    def test_unborn_pre_commit_enforces_builtin_rules(self):
+        self.git("switch", "--orphan", "initial")
+        for path in (GUARD, SOURCES):
+            self.stage(path, self.git("show", f"{self.base}:{path}").stdout)
+        self.stage_relaxed_rules()
+        self.check("staged")
+        examples = self.stage_rule_change_examples()
+        result = self.git("commit", "-qm", "Try to loosen initial checks", success=False)
+        self.assert_rule_change_rejected(result, examples)
+
+    def test_pre_push_enforces_tracking_default_rules_over_candidate_and_advertised_ref(self):
+        self.git("switch", "-qc", "candidate")
+        self.stage_relaxed_rules()
+        self.git("commit", "-qm", "Propose rule changes on a topic branch")
+        self.git("push", "-q", "origin", "candidate")
+        advertised = self.head()
+        examples = self.stage_rule_change_examples()
+        self.git("commit", "--no-verify", "-qm", "Simulate synthetic violations on the topic branch")
+        for destination in ("candidate", "candidate:new-candidate"):
+            with self.subTest(destination=destination):
+                result = self.git("push", "-q", "origin", destination, success=False)
+                self.assert_rule_change_rejected(result, examples)
+        refs = self.git("--git-dir", self.remote, "for-each-ref", "--format=%(objectname) %(refname)").stdout
+        self.assertEqual(refs.decode("ascii").splitlines(), [
+            f"{advertised} refs/heads/candidate", f"{self.base} refs/heads/main",
+        ])
+
+    def test_ci_enforces_pr_base_rules_in_merge_tree_and_branch_history(self):
+        self.git("switch", "-qc", "candidate")
+        self.stage_relaxed_rules()
+        examples = self.stage_rule_change_examples()
+        self.git("commit", "--no-verify", "-qm", "Simulate a PR with relaxed rules and synthetic violations")
+        self.git("switch", "-q", "main")
+        self.git("merge", "--no-ff", "-qm", "Simulate CI merge commit", "candidate")
+        result = self.check("range", self.base, "HEAD", success=False)
+        for path, _, reason in examples:
+            self.rejected(result, reason)
+            self.assertNotIn(path.encode("ascii"), result.stderr)
+        self.assertIn(f"rejected ({len(examples) * 3})".encode("ascii"), result.stderr)
+
+        self.git("switch", "-q", "candidate")
+        self.git("rm", "-q", "--", *(path for path, _, _ in examples))
+        self.git("commit", "-qm", "Remove the synthetic violations before review")
+        result = self.check("range", self.base, "HEAD", success=False)
+        for _, _, reason in examples:
+            self.rejected(result, reason)
+        self.assertIn(f"rejected ({len(examples)})".encode("ascii"), result.stderr)
+
+    def test_rule_schema_is_checked_by_all_entries_and_in_intermediate_commits(self):
+        invalid_json = b'{"version":1,"version":' + MARKER + b"}"
+        original = self.git("show", f"{self.base}:{RULES}").stdout
+        for case in ("malformed", "duplicate", "unknown-text-switch", "oversize", "deleted", "symlink", "directory"):
+            with self.subTest(case=case):
+                self.git("reset", "--hard", self.base)
+                if case == "malformed":
+                    self.stage(RULES, invalid_json)
+                elif case == "duplicate":
+                    self.stage(RULES, b'{"version":1,' + original[1:])
+                elif case == "unknown-text-switch":
+                    self.stage_rules(blocked_text_features=[])
+                elif case == "oversize":
+                    self.stage(RULES, original.ljust(data_guard.MAX_POLICY_BYTES + 1))
+                else:
+                    self.git("rm", "-q", RULES)
+                    if case == "symlink":
+                        (self.root / RULES).symlink_to("sources.json")
+                        self.git("add", RULES)
+                    elif case == "directory":
+                        self.stage(RULES + "/nested.txt", b"A rules file must be a regular blob.\n")
+                self.rejected(self.git("commit", "-qm", "Try invalid rules", success=False), b"invalid-rules")
+                self.git("commit", "--no-verify", "-qm", "Simulate unchecked rules")
+                self.rejected(self.git("push", "-q", "origin", "HEAD:candidate", success=False), b"invalid-rules")
+                self.rejected(self.check("range", self.base, "HEAD", success=False), b"invalid-rules")
+
+        self.git("restore", f"--source={self.base}", "--staged", "--worktree", RULES)
+        self.git("commit", "--no-verify", "-qm", "Restore valid rules at the tip")
+        self.rejected(self.check("range", self.base, "HEAD", success=False), b"invalid-rules")
+        self.rejected(self.git("push", "-q", "origin", "HEAD:candidate", success=False), b"invalid-rules")
+
+    def test_reviewed_rules_apply_to_followup_changes_after_merge(self):
+        self.git("switch", "-qc", "policy")
+        suffixes = json.loads(self.git("show", f"{self.base}:{RULES}").stdout)["blocked_suffixes"]
+        self.stage_rules(blocked_suffixes=[*suffixes, ".sample"])
+        self.git("commit", "-qm", "Propose a narrower policy")
+        self.git("push", "-q", "origin", "policy")
+        self.git("switch", "-q", "main")
+        self.git("merge", "--no-ff", "-qm", "Simulate review and merge", "policy")
+        self.check("range", self.base, "HEAD")
+        self.git("push", "-q", "origin", "HEAD:reviewed")
+        self.git("--git-dir", self.remote, "symbolic-ref", "HEAD", "refs/heads/reviewed")
+        self.git("remote", "set-head", "origin", "reviewed")
+        reviewed = self.head()
+
+        self.stage("generated.sample", MARKER)
+        self.rejected(self.git("commit", "-qm", "Try a newly disallowed suffix", success=False),
+                      b"blocked-extension")
+        self.git("commit", "--no-verify", "-qm", "Simulate a later PR using that suffix")
+        self.check("range", self.base, "HEAD")
+        self.rejected(self.check("range", reviewed, "HEAD", success=False), b"blocked-extension")
+        self.rejected(self.git("push", "-q", "origin", "HEAD:candidate", success=False), b"blocked-extension")
+
+    def test_pre_push_rejects_clean_push_when_configured_default_is_missing(self):
+        self.git("switch", "-qc", "candidate")
+        self.stage("safe.md", b"Ordinary synthetic content.\n")
+        self.git("commit", "-qm", "Add a safe document")
+        self.git("remote", "set-head", "origin", "-d")
+        self.git("push", "-q", "origin", "candidate")  # Exact main fallback for an unset remote HEAD.
+        self.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/missing")
+        self.rejected(self.git("push", "-q", "origin", "HEAD:new-candidate", success=False),
+                      b"missing-trusted-ref")
+
+    def test_pre_commit_requires_rules_when_head_exists_even_if_tree_is_empty(self):
+        self.git("switch", "--orphan", "initial")
+        self.git("commit", "--no-verify", "--allow-empty", "-qm", "Simulate a HEAD predating rules")
+        for path in (GUARD, SOURCES, RULES):
+            self.stage(path, self.git("show", f"{self.base}:{path}").stdout)
+        self.rejected(self.git("commit", "-qm", "Try to shadow missing HEAD rules", success=False),
+                      b"invalid-rules")
+
+    def test_valid_candidate_cannot_replace_invalid_trusted_rules(self):
+        self.stage_rules(version=2)
+        self.git("commit", "--no-verify", "-qm", "Simulate malformed rules in a trusted tree")
+        self.git("push", "--no-verify", "-q", "origin", "main")
+        trusted = self.head()
+        self.stage_rules()
+        self.rejected(self.git("commit", "-qm", "Try to shadow malformed trusted rules", success=False),
+                      b"invalid-rules")
+        self.git("commit", "--no-verify", "-qm", "Simulate a candidate repairing the trusted rules")
+        self.rejected(self.check("range", trusted, "HEAD", success=False), b"invalid-rules")
+        self.rejected(self.git("push", "-q", "origin", "HEAD:candidate", success=False), b"invalid-rules")
+
     def test_pr_cannot_approve_its_own_history(self):
         self.git("switch", "-qc", "candidate")
         self.stage("temporary.txt", b"PAR1" + MARKER)

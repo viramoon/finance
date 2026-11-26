@@ -1,5 +1,5 @@
 use rust_decimal::Decimal;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,9 +25,11 @@ pub struct CompiledPlan<'a> {
     pub conflict_rules: ConflictRules,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ResolvedInputs<'a> {
+    #[serde(borrow)]
     pub universe: Universe<'a>,
+    #[serde(borrow)]
     pub bars: Bars<'a>,
 }
 
@@ -152,12 +154,7 @@ pub fn compile<'a>(
             )
         })?;
     if matches!(binding, Binding::Conflict { .. }) {
-        return Err(diagnostic(
-            &parsed,
-            "/metadata/version",
-            "VERSION_CONFLICT",
-            "Different content is already bound to this strategy ID and version. Choose a new version to change the content.",
-        ));
+        return Err(version_conflict(&parsed));
     }
 
     Ok(CompiledPlan {
@@ -201,6 +198,24 @@ pub fn compile_legacy_sma(
     let canonical = serde_json::to_vec(&plan).expect("JSON tree is serializable");
     plan["content_sha256"] = Value::String(sha256(&canonical));
     Ok(plan)
+}
+
+/// Locate a version conflict discovered by a caller's transaction after compilation.
+pub(crate) fn diagnose_version_conflict(
+    bytes: &[u8],
+    format: InputFormat,
+) -> Result<Diagnostic, Diagnostic> {
+    let parsed = parse(bytes, format)?;
+    Ok(version_conflict(&parsed))
+}
+
+fn version_conflict(parsed: &Parsed) -> Diagnostic {
+    diagnostic(
+        parsed,
+        "/metadata/version",
+        "VERSION_CONFLICT",
+        "Different content is already bound to this strategy ID and version. Choose a new version to change the content.",
+    )
 }
 
 fn sha256(bytes: &[u8]) -> String {
