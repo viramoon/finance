@@ -367,6 +367,82 @@ fn invalid_bars_and_overflow_leave_engine_at_the_last_commit() {
 }
 
 #[test]
+fn window_overflows_fail_atomically_during_batch_incremental_and_restart() {
+    let tiny = decimal("0.000000000000000000000000001");
+    let cases = [
+        ("close_return", 1, vec![tiny, Decimal::ONE_HUNDRED]),
+        ("bollinger", 2, vec![Decimal::ZERO, Decimal::MAX]),
+        (
+            "realized_volatility",
+            3,
+            vec![tiny, Decimal::from(70), tiny, Decimal::from(70)],
+        ),
+    ];
+    for (name, period, closes) in cases {
+        let specs = [
+            spec("sma", json!({"period": 1})),
+            spec(name, json!({"period": period})),
+        ];
+        let mut bars: Vec<_> = closes
+            .into_iter()
+            .enumerate()
+            .map(|(index, close)| Bar {
+                open: close,
+                high: close,
+                low: close,
+                close,
+                ..bar(index as i64, 1, 1)
+            })
+            .collect();
+        let last = bars.pop().unwrap();
+        let mut live = IndicatorEngine::new(&specs);
+        let mut restarted = IndicatorEngine::new(&specs);
+        for bar in &bars {
+            live.push_closed(bar).unwrap();
+            restarted.advance_closed(bar).unwrap();
+        }
+        assert_eq!(
+            batch(&specs, bars.iter().chain([&last])),
+            Err(IndicatorError::NumericOverflow),
+            "{name} batch"
+        );
+        assert_eq!(
+            live.push_closed(&last),
+            Err(IndicatorError::NumericOverflow),
+            "{name} incremental"
+        );
+        assert_eq!(
+            restarted.advance_closed(&last),
+            Err(IndicatorError::NumericOverflow),
+            "{name} restart"
+        );
+        assert_eq!(
+            restarted.preview(&last),
+            Err(IndicatorError::NumericOverflow),
+            "{name} preview"
+        );
+
+        let close = bars.last().unwrap().close;
+        let corrected = Bar {
+            open: close,
+            high: close,
+            low: close,
+            close,
+            ..last
+        };
+        let expected = batch(&specs, bars.iter().chain([&corrected])).unwrap();
+        assert_eq!(
+            &live.push_closed(&corrected).unwrap(),
+            expected.last().unwrap()
+        );
+        assert_eq!(
+            &restarted.push_closed(&corrected).unwrap(),
+            expected.last().unwrap()
+        );
+    }
+}
+
+#[test]
 fn registry_rejects_unknown_versions_and_invalid_parameter_shapes() {
     let invalid = [
         (

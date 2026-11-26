@@ -742,7 +742,7 @@
         "cash_equity"
       ],
       "availability": "session_close",
-      "description": "Wilder RSI uses close-to-close changes and alpha 1/period. An undefined flat-series value is missing.",
+      "description": "Wilder RSI uses close-to-close changes and alpha 1/period. It is undefined until the series has a gain or a loss.",
       "engines": [
         "nautilus_cash_equity"
       ],

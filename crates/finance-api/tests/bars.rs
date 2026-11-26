@@ -198,6 +198,55 @@ async fn chart_pages_replay_prefix_and_preserve_precision_and_status() {
 }
 
 #[tokio::test]
+async fn chart_indicators_propagate_overflow_from_visible_and_replayed_bars() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = projection();
+    // Three synthetic prices. The second bar's one-bar return exceeds
+    // Decimal's range; the third's would be 1% if the failed bar were accepted.
+    for (bar, close) in snapshot["closed"].as_array_mut().unwrap().iter_mut().zip([
+        "0.000000000000000000000000001",
+        "100",
+        "101",
+    ]) {
+        for field in ["open", "high", "low", "close"] {
+            bar[field] = json!(close);
+        }
+    }
+    store(dir.path(), &snapshot);
+    let app = app(dir.path());
+    let indicator = encoded(r#"[{"use":"indicator.close_return@1.0.0","params":{"period":1}}]"#);
+    let (status, first) = call(
+        &app,
+        &format!("{CHART}?{SCOPE}&{WINDOW}&indicators={indicator}&limit=1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["next_start"], "2024-01-02T14:31:00Z");
+    assert_eq!(first["rows"][0]["indicator_values"][0]["status"], "warmup");
+
+    for start in ["14:31:00", "14:32:00", "14:33:00"] {
+        let window = format!("start=2024-01-02T{start}Z&end=2024-01-02T14:34:00Z");
+        for route in [CHART, VALUES] {
+            let (status, error) = call(
+                &app,
+                &format!(
+                    "{route}?{SCOPE}&{window}&indicators={indicator}&limit=1&include_provisional=true"
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{route} {start}");
+            assert_eq!(
+                error,
+                json!({"error":{
+                    "code":"indicator_calculation_failed",
+                    "message":"Cannot calculate indicators for this projection"
+                }})
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn chart_rejects_unapproved_mismatched_invalid_or_incomplete_indicator_input() {
     let dir = tempfile::tempdir().unwrap();
     let app = app(dir.path());
@@ -388,12 +437,23 @@ async fn smaller_visible_page_recovers_from_indicator_work_limit_with_full_prefi
     assert_eq!(status, StatusCode::OK);
     assert_eq!(result["rows"].as_array().unwrap().len(), 1);
     assert!(result["next_start"].is_string());
-    for point in result["rows"][0]["indicator_values"].as_array().unwrap() {
+    let points = result["rows"][0]["indicator_values"].as_array().unwrap();
+    assert_eq!(points.len(), 3);
+    for point in points {
         assert_eq!(
             point,
             &json!({"status":"ready","values":{"lower":"10","middle":"10","upper":"10"}})
         );
     }
+
+    let late_start = encoded(&(first + TimeDelta::minutes(3_500)).to_rfc3339());
+    let (status, result) = call(
+        &app,
+        &format!("{CHART}?{SCOPE}&start={late_start}&end={end}&indicators={indicators}&limit=1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(result["error"]["code"], "indicator_work_limit");
 }
 
 #[tokio::test]

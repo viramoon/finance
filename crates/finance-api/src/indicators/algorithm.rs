@@ -1,11 +1,16 @@
 use std::{collections::VecDeque, iter};
 
 use chrono::NaiveDate;
+use num_bigint_dig::{BigInt, Sign};
+use num_traits::Zero;
 use rust_decimal::Decimal;
 
 use super::{
     Bar, IndicatorSpec,
-    math::{Average, Numeric, add, deviation, div, mul, return_ratio, sub},
+    math::{
+        Average, Numeric, add, deviation, div, mul, return_ratio, rounded_ratio,
+        rounded_scaled_ratio, scaled_mantissa, sub,
+    },
     registry::Kind,
 };
 
@@ -25,13 +30,14 @@ pub(super) enum Output {
 #[derive(Debug, Clone, Default)]
 pub(super) struct Rsi {
     count: usize,
-    gains: Decimal,
-    losses: Decimal,
+    gains: BigInt,
+    losses: BigInt,
+    last_ratio: Option<Decimal>,
 }
 
 #[derive(Debug, Clone)]
 pub(super) enum Algorithm {
-    Sma(Decimal),
+    Sma(BigInt),
     Ema(Average),
     Rsi(Rsi),
     Bollinger,
@@ -43,18 +49,18 @@ pub(super) enum Algorithm {
     Atr(Average),
     Vwap {
         day: Option<NaiveDate>,
-        average: Decimal,
-        volume: Decimal,
+        weighted_prices: BigInt,
+        volume: BigInt,
     },
     Return,
     Volatility,
-    VolumeSma(Decimal),
+    VolumeSma(BigInt),
 }
 
 impl Algorithm {
     pub(super) fn new(spec: &IndicatorSpec) -> Self {
         match spec.kind() {
-            Kind::Sma => Self::Sma(Decimal::ZERO),
+            Kind::Sma => Self::Sma(BigInt::zero()),
             Kind::Ema => Self::Ema(Average::default()),
             Kind::Rsi => Self::Rsi(Rsi::default()),
             Kind::Bollinger => Self::Bollinger,
@@ -66,17 +72,13 @@ impl Algorithm {
             Kind::Atr => Self::Atr(Average::default()),
             Kind::Vwap => Self::Vwap {
                 day: None,
-                average: Decimal::ZERO,
-                volume: Decimal::ZERO,
+                weighted_prices: BigInt::zero(),
+                volume: BigInt::zero(),
             },
             Kind::Return => Self::Return,
             Kind::Volatility => Self::Volatility,
-            Kind::VolumeSma => Self::VolumeSma(Decimal::ZERO),
+            Kind::VolumeSma => Self::VolumeSma(BigInt::zero()),
         }
-    }
-
-    pub(super) fn requires_state_update(&self) -> bool {
-        !matches!(self, Self::Bollinger | Self::Return | Self::Volatility)
     }
 
     pub(super) fn update(
@@ -113,9 +115,9 @@ impl Algorithm {
             }
             Self::Vwap {
                 day,
-                average,
+                weighted_prices,
                 volume,
-            } => vwap(day, average, volume, bar)?,
+            } => vwap(day, weighted_prices, volume, bar)?,
             Self::Return => match lagged {
                 Some(base) => return_ratio(bar.close, base.bar.close)?
                     .map_or(Output::Undefined, Output::Scalar),
@@ -139,17 +141,20 @@ fn scalar(value: Option<Decimal>) -> Output {
 }
 
 fn moving_mean(
-    total: &mut Decimal,
+    total: &mut BigInt,
     sample: Decimal,
     outgoing: Option<Decimal>,
     preceding: usize,
     period: usize,
 ) -> Numeric<Option<Decimal>> {
-    *total = add(sub(*total, outgoing.unwrap_or(Decimal::ZERO))?, sample)?;
+    if let Some(outgoing) = outgoing {
+        *total -= scaled_mantissa(outgoing);
+    }
+    *total += scaled_mantissa(sample);
     if preceding + 1 < period {
         Ok(None)
     } else {
-        Ok(Some(div(*total, Decimal::from(period))?))
+        rounded_scaled_ratio(total, &BigInt::from(period)).map(Some)
     }
 }
 
@@ -163,32 +168,44 @@ impl Rsi {
         let Some(previous_close) = previous_close else {
             return Ok(Output::Warmup);
         };
-        let change = sub(close, previous_close)?;
-        let gain = change.max(Decimal::ZERO);
-        let loss = change.min(Decimal::ZERO).abs();
-        // The gain/loss ratio is invariant to their common period divisor.
-        // Retain period-scaled Wilder state so the seed cannot lose tiny moves
-        // by dividing both totals into the minimum Decimal quantum.
+        let flat = close == previous_close;
         if self.count < period {
             self.count += 1;
-            self.gains = add(self.gains, gain)?;
-            self.losses = add(self.losses, loss)?;
-            if self.count < period {
-                return Ok(Output::Warmup);
-            }
         } else {
-            let n = Decimal::from(period);
-            self.gains = add(sub(self.gains, div(self.gains, n)?)?, gain)?;
-            self.losses = add(sub(self.losses, div(self.losses, n)?)?, loss)?;
+            // Period-scaled Wilder totals use 64 fractional digits. Each update
+            // truncates by less than one such unit, and the preceding error
+            // decays geometrically with the totals.
+            let period = period as u32;
+            for total in [&mut self.gains, &mut self.losses] {
+                *total *= period - 1;
+                *total /= period;
+            }
+            // Both totals undergo the same mathematical decay on flat bars.
+            // Preserve that ratio while advancing the totals for the next move.
+            if flat {
+                return Ok(self.last_ratio.map_or(Output::Undefined, Output::Scalar));
+            }
         }
-        let total = add(self.gains, self.losses)?;
-        if total.is_zero() {
-            return Ok(Output::Undefined);
+        if !flat {
+            const RSI_INPUT_SCALE: i128 = 10_i128.pow(64 - Decimal::MAX_SCALE);
+            let change =
+                (scaled_mantissa(close) - scaled_mantissa(previous_close)) * RSI_INPUT_SCALE;
+            match change.sign() {
+                Sign::Plus => self.gains += change,
+                Sign::Minus => self.losses -= change,
+                Sign::NoSign => {}
+            }
         }
-        Ok(Output::Scalar(mul(
-            div(self.gains, total)?,
-            Decimal::ONE_HUNDRED,
-        )?))
+        if self.count < period {
+            return Ok(Output::Warmup);
+        }
+        let total = &self.gains + &self.losses;
+        self.last_ratio = if total.is_zero() {
+            None
+        } else {
+            Some(rounded_ratio(&(&self.gains * 100u8), &total)?)
+        };
+        Ok(self.last_ratio.map_or(Output::Undefined, Output::Scalar))
     }
 }
 
@@ -236,34 +253,28 @@ fn macd(
 
 fn vwap(
     day: &mut Option<NaiveDate>,
-    average: &mut Decimal,
-    volume: &mut Decimal,
+    weighted_prices: &mut BigInt,
+    volume: &mut BigInt,
     bar: &Bar,
 ) -> Numeric<Output> {
     if *day != Some(bar.trading_day) {
         *day = Some(bar.trading_day);
-        *average = Decimal::ZERO;
-        *volume = Decimal::ZERO;
+        weighted_prices.set_zero();
+        volume.set_zero();
     }
     if !bar.volume.is_zero() {
-        let price = div(add(add(bar.high, bar.low)?, bar.close)?, Decimal::from(3))?;
-        let total = add(*volume, bar.volume)?;
-        // Keep the weighted mean directly. A price-times-volume product can
-        // underflow for valid small lots even when the mean is representable.
-        *average = if volume.is_zero() {
-            price
-        } else {
-            add(
-                *average,
-                mul(sub(price, *average)?, div(bar.volume, total)?)?,
-            )?
-        };
-        *volume = total;
+        let quantity = scaled_mantissa(bar.volume);
+        let price_sum =
+            scaled_mantissa(bar.high) + scaled_mantissa(bar.low) + scaled_mantissa(bar.close);
+        // Keep the factor of three in the denominator and the quantity in
+        // integer units so neither a typical price nor a weight is rounded.
+        *weighted_prices += price_sum * &quantity;
+        *volume += quantity;
     }
     if volume.is_zero() {
         Ok(Output::Undefined)
     } else {
-        Ok(Output::Scalar(*average))
+        rounded_scaled_ratio(weighted_prices, &(&*volume * 3_u32)).map(Output::Scalar)
     }
 }
 

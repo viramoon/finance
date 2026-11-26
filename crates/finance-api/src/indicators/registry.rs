@@ -96,7 +96,7 @@ const COMMON: IndicatorDefinition = IndicatorDefinition {
     reset: None,
     missing_bar: "Skip absent bars. Do not synthesize observations or backfill by carrying forward.",
     price_basis: "Use one caller-supplied price basis per series; do not adjust prices or volume in the indicator.",
-    rounding: "Round displayed output to nearest with ties to even; keep Decimal precision in the state.",
+    rounding: "Round output to nearest with ties to even. Display rounding does not feed back into indicator state.",
     decimal_places: OUTPUT_DECIMAL_PLACES,
     kind: Kind::Sma,
 };
@@ -116,7 +116,7 @@ static REGISTRY: &[IndicatorDefinition] = &[
     },
     IndicatorDefinition {
         id: RSI_ID,
-        description: "Wilder RSI uses close-to-close changes and alpha 1/period. An undefined flat-series value is missing.",
+        description: "Wilder RSI uses close-to-close changes and alpha 1/period. It is undefined until the series has a gain or a loss.",
         parameters: RSI_PARAMS,
         unit: "rsi_points_0_to_100",
         warmup: "period",

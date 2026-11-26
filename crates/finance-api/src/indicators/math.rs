@@ -1,6 +1,9 @@
+use num_bigint_dig::BigInt;
+use num_integer::Integer;
+use num_traits::{Signed, ToPrimitive, Zero};
 use rust_decimal::Decimal;
 
-use super::IndicatorError;
+use super::{IndicatorError, OUTPUT_DECIMAL_PLACES};
 
 pub(super) type Numeric<T = Decimal> = Result<T, IndicatorError>;
 
@@ -18,6 +21,49 @@ pub(super) fn mul(a: Decimal, b: Decimal) -> Numeric {
 
 pub(super) fn div(a: Decimal, b: Decimal) -> Numeric {
     a.checked_div(b).ok_or(IndicatorError::NumericOverflow)
+}
+
+/// Represent the entire Decimal input range in common, exact 10^-28 units.
+pub(super) fn scaled_mantissa(value: Decimal) -> BigInt {
+    BigInt::from(value.mantissa()) * 10_u128.pow(Decimal::MAX_SCALE - value.scale())
+}
+
+pub(super) fn rounded_ratio(numerator: &BigInt, denominator: &BigInt) -> Numeric {
+    rounded_output(numerator * 10_u64.pow(OUTPUT_DECIMAL_PLACES), denominator)
+}
+
+pub(super) fn rounded_scaled_ratio(numerator: &BigInt, denominator: &BigInt) -> Numeric {
+    let factor = 10_u128.pow(Decimal::MAX_SCALE - OUTPUT_DECIMAL_PLACES);
+    rounded_output(numerator.clone(), &(denominator * factor))
+}
+
+/// `numerator / denominator` is expressed in output quanta, with a positive denominator.
+fn rounded_output(numerator: BigInt, denominator: &BigInt) -> Numeric {
+    let (mut coefficient, remainder) = numerator.div_rem(denominator);
+    let twice_remainder = remainder.abs() * 2_u32;
+    if twice_remainder > *denominator || (twice_remainder == *denominator && coefficient.is_odd()) {
+        coefficient += if numerator.is_negative() { -1 } else { 1 };
+    }
+    let mut scale = OUTPUT_DECIMAL_PLACES;
+    let ten = BigInt::from(10);
+    loop {
+        if let Some(coefficient) = coefficient.to_i128()
+            && let Ok(value) = Decimal::try_from_i128_with_scale(coefficient, scale)
+        {
+            return Ok(value);
+        }
+        // Remove only trailing zeros. Reducing scale further would change
+        // the already rounded result instead of representing it exactly.
+        if scale == 0 {
+            return Err(IndicatorError::NumericOverflow);
+        }
+        let (shorter, remainder) = coefficient.div_rem(&ten);
+        if !remainder.is_zero() {
+            return Err(IndicatorError::NumericOverflow);
+        }
+        coefficient = shorter;
+        scale -= 1;
+    }
 }
 
 fn sqrt(value: Decimal) -> Numeric {

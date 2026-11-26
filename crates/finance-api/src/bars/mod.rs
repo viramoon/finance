@@ -32,7 +32,7 @@ const MAX_QUERY_BYTES: usize = 8 * 1024;
 const MAX_INDICATORS: usize = 16;
 const DEFAULT_LIMIT: usize = 500;
 const MAX_LIMIT: usize = 1_000;
-const MAX_OUTPUT_WORK: usize = 5_000_000;
+const MAX_INDICATOR_WORK: usize = 5_000_000;
 
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
@@ -406,20 +406,20 @@ fn calculate(source: &dyn BarsSource, query: ChartQuery) -> Result<ChartBars, Ap
         return Ok(ChartBars { context, rows });
     }
 
-    let visible_end_with_preview = page_end + usize::from(returned_provisional);
-    let output_work: usize = query
+    let bars_to_evaluate = page_end + usize::from(returned_provisional);
+    let indicator_work: usize = query
         .specs
         .iter()
         .map(|spec| {
-            let ready_start = visible_start.max(spec.prior_bars() as usize);
-            visible_end_with_preview.saturating_sub(ready_start) * spec.observations_per_update()
+            let warmup = bars_to_evaluate.min(spec.prior_bars() as usize);
+            warmup + (bars_to_evaluate - warmup) * spec.observations_per_update()
         })
         .sum();
-    if output_work > MAX_OUTPUT_WORK {
+    if indicator_work > MAX_INDICATOR_WORK {
         return Err(error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "indicator_work_limit",
-            "Indicator page is too large. Reduce limit or select fewer indicators",
+            "Indicator query requires too much work. Reduce limit or select fewer indicators",
         ));
     }
 

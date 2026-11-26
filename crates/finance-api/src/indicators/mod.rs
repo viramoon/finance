@@ -174,8 +174,8 @@ impl IndicatorEngine {
         self.commit(bar, EvaluationMode::Closed)
     }
 
-    /// Advance a closed observation while rebuilding a prefix with no output.
-    /// Pure window outputs are skipped, with their observations still retained.
+    /// Evaluate and commit a closed observation without materializing the output.
+    /// Performs the same calculations and checks as `push_closed`.
     pub fn advance_closed(&mut self, bar: &Bar) -> Result<(), IndicatorError> {
         self.commit(bar, EvaluationMode::Advance).map(|_| ())
     }
@@ -222,11 +222,9 @@ impl IndicatorEngine {
         // invalid observation cannot partially advance any indicator.
         for (spec, state) in &self.algorithms {
             let mut state = state.clone();
-            if mode.emits_value() || state.requires_state_update() {
-                let output = state.update(spec, &observation, &self.history)?;
-                if mode.emits_value() {
-                    values.push(IndicatorValue::new(output, mode == EvaluationMode::Preview));
-                }
+            let output = state.update(spec, &observation, &self.history)?;
+            if mode.emits_value() {
+                values.push(IndicatorValue::new(output, mode == EvaluationMode::Preview));
             }
             algorithms.push(state);
         }

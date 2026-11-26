@@ -60,8 +60,8 @@ POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /a
 | 400 | `invalid_bars_query`、`invalid_indicator` | 查询参数、范围、分页或指标声明非法。 |
 | 404 | `bars_not_found` | 未发布匹配序列。 |
 | 422 | `indicator_history_unavailable` | 匹配投影缺少从起点计算所需的历史。 |
-| 422 | `indicator_work_limit` | 本页的估算工作量超出 5,000,000 个观测。每个指标按通过预热的行数估算，布林带和实现波动率再乘以各自周期。减小 `limit` 后分页。 |
-| 500 | `bars_invalid`、`bars_unreadable`、`indicator_calculation_failed`、`bars_query_failed` | 投影无效、不可读，或计算失败。 |
+| 422 | `indicator_work_limit` | 从序列起点到本页末尾（含返回的预览）的估算工作量超出 5,000,000。每个指标每行至少计 1，已过预热的布林带和实现波动率按各自周期计。可减小 `limit` 或选择更少、周期更短的指标。 |
+| 500 | `bars_invalid`、`bars_unreadable`、`indicator_calculation_failed`、`bars_query_failed` | 投影无效、不可读，或计算失败。指标计算错误可来自本页或更早的回放前缀。 |
 
 ### 只读展示投影
 
