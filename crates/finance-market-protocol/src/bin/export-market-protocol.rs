@@ -1,8 +1,10 @@
-use finance_market_protocol::{Capability, Event, Instrument};
+use finance_market_protocol::{
+    Capability, Event, Instrument,
+    schema_export::{event_schema, json_schema},
+};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::{collections::HashMap, env, error::Error, fs, io, path::PathBuf};
-use utoipa::ToSchema;
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -56,74 +58,21 @@ impl Examples {
     }
 }
 
-fn use_local_refs(value: &mut Value) {
-    match value {
-        Value::Object(object) => {
-            if let Some(Value::String(reference)) = object.get_mut("$ref")
-                && let Some(name) = reference.strip_prefix("#/components/schemas/")
-            {
-                *reference = format!("#/$defs/{name}");
-            }
-            for item in object.values_mut() {
-                use_local_refs(item);
-            }
-        }
-        Value::Array(items) => items.iter_mut().for_each(use_local_refs),
-        _ => {}
-    }
-}
-
-fn schema<T: ToSchema>(id: &str) -> Result<Value, Box<dyn Error>> {
-    let mut root = serde_json::to_value(T::schema())?;
-    let object = root
-        .as_object_mut()
-        .ok_or("schema root must be an object")?;
-    let mut components = Vec::new();
-    T::schemas(&mut components);
-    let mut definitions = Map::new();
-    for (name, component) in components {
-        let component = serde_json::to_value(component)?;
-        if let Some(previous) = definitions.insert(name.clone(), component.clone())
-            && previous != component
-        {
-            return Err(format!("conflicting schema definition for {name}").into());
-        }
-    }
-    object.insert(
-        "$schema".into(),
-        "https://json-schema.org/draft/2020-12/schema".into(),
-    );
-    object.insert(
-        "$id".into(),
-        format!("urn:viramoon:finance:market-protocol:1.0:{id}").into(),
-    );
-    if !definitions.is_empty() {
-        object.insert("$defs".into(), Value::Object(definitions));
-    }
-    if id == "event" {
-        // Serde flattens the kind/payload pair into the envelope. Closing an
-        // individual allOf branch would reject fields owned by its sibling.
-        object.insert("unevaluatedProperties".into(), false.into());
-        root.pointer_mut("/$defs/MarketMessage")
-            .and_then(Value::as_object_mut)
-            .ok_or("event schema is missing the correction replacement union")?
-            .insert("unevaluatedProperties".into(), false.into());
-    }
-    if id == "capability" {
-        // Preserve the wire list order while enforcing the runtime uniqueness
-        // check as a structural rule on the array.
-        root.pointer_mut("/properties/message_kinds")
-            .and_then(Value::as_object_mut)
-            .ok_or("capability schema is missing message_kinds")?
-            .insert("uniqueItems".into(), true.into());
-        // Utoipa emits the signed int32 format for u32. The numeric range
-        // already captures the unsigned depth type without the format hint.
-        root.pointer_mut("/properties/max_depth")
-            .and_then(Value::as_object_mut)
-            .ok_or("capability schema is missing max_depth")?
-            .remove("format");
-    }
-    use_local_refs(&mut root);
+fn capability_schema() -> Result<Value, Box<dyn Error>> {
+    let mut root =
+        json_schema::<Capability>("urn:viramoon:finance:market-protocol:1.0:capability")?;
+    // Preserve the wire list order while enforcing the runtime uniqueness
+    // check as a structural rule on the array.
+    root.pointer_mut("/properties/message_kinds")
+        .and_then(Value::as_object_mut)
+        .ok_or("capability schema is missing message_kinds")?
+        .insert("uniqueItems".into(), true.into());
+    // Utoipa emits the signed int32 format for u32. The numeric range
+    // already captures the unsigned depth type without the format hint.
+    root.pointer_mut("/properties/max_depth")
+        .and_then(Value::as_object_mut)
+        .ok_or("capability schema is missing max_depth")?
+        .remove("format");
     Ok(root)
 }
 
@@ -136,13 +85,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let documents = [
         (
             "instrument.schema.json",
-            schema::<Instrument>("instrument")?,
+            json_schema::<Instrument>("urn:viramoon:finance:market-protocol:1.0:instrument")?,
         ),
+        ("capability.schema.json", capability_schema()?),
         (
-            "capability.schema.json",
-            schema::<Capability>("capability")?,
+            "event.schema.json",
+            event_schema("urn:viramoon:finance:market-protocol:1.0:event")?,
         ),
-        ("event.schema.json", schema::<Event>("event")?),
         (
             "examples.json",
             serde_json::to_value(Examples::validated()?)?,

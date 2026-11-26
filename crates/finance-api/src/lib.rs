@@ -1,9 +1,19 @@
 pub mod config;
+mod factor_read;
 pub mod jobs;
 pub mod market;
+mod market_read;
+pub mod read_stream;
 pub mod research;
 pub mod strategy_bundle;
-use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
+use axum::{
+    Json, Router,
+    extract::{Request, State},
+    http::{HeaderValue, StatusCode, header::CACHE_CONTROL},
+    middleware::{self, Next},
+    response::Response,
+    routing::get,
+};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -145,7 +155,19 @@ async fn sample(State(state): State<AppState>) -> Result<Json<BacktestSummary>, 
     }
     Ok(Json(summary))
 }
+
+async fn private_read(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+    response
+}
+
 pub fn router(state: AppState) -> Router {
+    let restricted_reads = market_read::routes()
+        .merge(factor_read::routes())
+        .layer(middleware::from_fn(private_read));
     Router::new()
         .route("/healthz/live", get(live))
         .route("/healthz/ready", get(ready))
@@ -153,6 +175,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/market/status", get(market::status))
         .route("/api/v1/backtests/datasets", get(research::datasets))
         .merge(jobs::routes())
+        .merge(restricted_reads)
         .with_state(state)
 }
 #[derive(OpenApi)]
@@ -166,7 +189,14 @@ pub fn router(state: AppState) -> Router {
         jobs::detail,
         jobs::list,
         jobs::by_key,
-        research::datasets
+        research::datasets,
+        market_read::products,
+        market_read::wal,
+        market_read::watermarks,
+        market_read::projected,
+        market_read::gaps,
+        factor_read::list,
+        factor_read::evaluations
     ),
     components(schemas(
         BacktestSummary,

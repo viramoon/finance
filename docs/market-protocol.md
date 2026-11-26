@@ -89,6 +89,18 @@ PYTHONPATH=python python -m unittest discover -s tests -p test_market_protocol.p
 
 跨仓消费方应从同一个 finance 提交取 schema 和样本，并在自身测试中核对识别的版本、消息分支以及精确字段。finance → web → frontend 的 HTTP OpenAPI 指针继续按原有流程更新。
 
+## 首批读契约的 WS 与 SSE 消息
+
+`finance-api export-read-stream DIRECTORY` 从代码导出以下 1.0 版文件。更新仓库产物时用同一命令指向 `protocol/v1`，同步样本来源和摘要。导出器只读已提交的合成事件种子与代码中的确定性状态样本。
+
+| 文件 | 内容 |
+| --- | --- |
+| [market-ws.schema.json](../protocol/v1/market-ws.schema.json) | 一帧 WS 文本消息承载一个完整 F1 `Event`。`snapshot`、`delta`、`reset`、分区和游标沿用 F1 约定。 |
+| [market-status-sse.schema.json](../protocol/v1/market-status-sse.schema.json) | `event: market_status`，`id` 为发布流内的无符号 64 位十进制字符串，`data` 为含 `schema_version` 和现有 `status` 对象的 JSON。Schema 的 `event`、`id`、`data` 分别对应三个 SSE 字段。 |
+| [read-stream-examples.json](../protocol/v1/read-stream-examples.json) | 固定合成 WS 事件与 SSE 状态，包括超过 JavaScript 安全整数范围的序号和事件 ID。 |
+
+首批交付消息格式和编码。实时订阅、过期游标重置、SSE 保留窗和 `Last-Event-ID` 的续接由传输集成方实现。WS 游标按 F1 分区解释，SSE 事件 ID 按发布流解释。web 应在握手、订阅及重连时重新授权，并遵循产品的展示、留存和导出许可。[首批 REST 查询](api.md#首批读契约)
+
 ## 解码与错误定位
 
 Rust 使用 `finance_market_protocol::decode_json::<T>(input)`，其中 `T` 为 `Instrument`、`Capability` 或 `Event`。通过错误的 `path()` 和 `kind().as_str()` 读取诊断。Python 使用 `fertile_finance.market_protocol` 的同名类型及 `from_json(input)`，通过 `ProtocolError.path` 和 `ProtocolError.kind` 读取诊断。

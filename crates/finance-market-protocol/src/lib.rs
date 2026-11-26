@@ -6,6 +6,7 @@ mod diagnostics;
 mod event;
 mod instrument;
 mod scalar;
+pub mod schema_export;
 
 pub use diagnostics::{DecodeError, ErrorKind, ProtocolJson, decode_json};
 pub use event::*;

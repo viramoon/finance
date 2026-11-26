@@ -54,6 +54,29 @@ net_return   = (1 + gross_return) × (1 - fee_fraction) - 1
 
 F7 的新选用入口可调用 `select_for_backtest(factor_id, version)`，只有 `backtest_selectable` 返回定义。目录随调用实例保存在内存中。需要跨进程保存记录的调用方持久化其版本、证据和迁移记录。历史复现继续读取原定义和报告引用。
 
+## 发布 API 读快照
+
+离线调用方用 `publish_factor_read_snapshot` 把已审核的版本和评价摘要发布到显式指定的 `data_root`。每次发布替换完整快照，API 读取 `finance-state/factor-research/read-v1.json`。首次发布前 API 返回空列表。快照上限 4 MiB，发布临时文件以 `0600` 创建并原子替换，API 进程需要可读权限。部署按产品许可安排文件可见范围。[REST 契约](api.md#首批读契约)
+
+```python
+from fertile_finance.factor_read import (
+    FactorReadEvaluation,
+    FactorReadPermission,
+    publish_factor_read_snapshot,
+)
+
+key = (definition.factor_id, definition.version)
+publish_factor_read_snapshot(
+    data_root,
+    as_of=publication_time,
+    permissions={key: FactorReadPermission(definition.license, True, True)},
+    factors=[catalog.get(*key)],
+    evaluations=[FactorReadEvaluation("fit-1", report)],
+)
+```
+
+调用方提供已有绝对路径、带时区的发布时间及其实际审核过的权限。每个因子版本和评价中的关联因子都需匹配许可，允许本地记录和非展示派生，项目禁止再分发。快照只包含因子定义、状态迁移、可见的证据引用与窗口汇总。逐标的研究输入和详细账本留在原研究环境中。使用 `historical_repo_root` 可纳入下方的已验证历史登记，权限表另需列入该登记的 `(id, version)`。
+
 ## 月频动量
 
 `fertile_finance.historical_research.load_factor_momentum_registration(repo_root)` 从指定仓库读取 `research.factor-momentum@1.0.0`，校验登记的原报告、来源说明和审计账本哈希，返回 `research_only`。登记不进入因子状态流转。Python 查询的 `selectable_for_backtest` 和 `tradable` 均为 `False`。F2 也保留该策略 ID，拒绝其进入现金权益编译与版本绑定。[历史登记](../strategies/registry/factor-momentum-v1.json)

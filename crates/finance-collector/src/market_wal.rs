@@ -12,6 +12,7 @@ use finance_market_protocol::{Event, Token, U64Text, decode_json};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
+use utoipa::ToSchema;
 
 mod restore;
 use restore::RestoreDirectory;
@@ -28,7 +29,7 @@ const PAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_REPLAY_RECORDS: usize = 4096;
 
 /// A committed event and its WAL-local position and writer generation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WalRecord {
     pub position: U64Text,
