@@ -59,6 +59,18 @@ processes:
       ready_path: /healthz/ready
       status_path: /status
     restart_policy: fertile deploy/
+  - name: finance-hyperliquid
+    command: finance-hyperliquid config/collector/hyperliquid.yaml
+    working_directory: finance
+    python_path: python
+    python_env: FINANCE_PYTHON
+    activation: fertile deploy/ 显式启用并提供已审核产品许可配置
+    dependencies: [data_root, nautilus_source_wheel]
+    product: hyperliquid/perp-public
+    output: finance-state/market-wal/hyperliquid/perp-public # 仅当 record_local 为 true
+    health: 记录模式通过 finance-market-wal watermarks 和 quality 核对
+    documentation: docs/integrations/hyperliquid.md
+    restart_policy: fertile deploy/
   - name: finance-projector
     command: 'python -m fertile_finance.market_projector --data-root "$FERTILE_DATA_ROOT" --wal-bin finance-market-wal'
     working_directory: finance
@@ -93,6 +105,16 @@ batch_jobs:
     command: bash scripts/backtest-sample.sh
     output: "${FERTILE_DATA_ROOT}/finance-state/backtests/sample/latest.json"
     mode: Backtest
+  - name: historical-pull
+    command: PYTHONPATH=python "${FINANCE_PYTHON}" -m fertile_finance.historical_pull
+    working_directory: finance
+    invocation: 按需运行，需 --allow-download，Binance 另需 --enable-binance
+    dependencies: [data_root, nautilus_source_wheel]
+    data_root: --data-root 或 FERTILE_DATA_ROOT，显式绝对路径且在 Git 工作树之外
+    output: "${FERTILE_DATA_ROOT}/catalog/historical"
+    state: "${FERTILE_DATA_ROOT}/finance-state/historical"
+    ibkr: 使用 paper 只读 Gateway 和 probe client ID
+    binance_enabled_by_default: false
 offline_research:
   factor_evaluation: fertile_finance.factor_evaluation.evaluate_factor
   factor_lifecycle: fertile_finance.research_catalog.FactorResearchCatalog
