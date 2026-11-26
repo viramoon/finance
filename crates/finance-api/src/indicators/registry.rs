@@ -129,6 +129,7 @@ static REGISTRY: &[IndicatorDefinition] = &[
         description: "Bollinger bands use the SMA of closes and two population standard deviations on either side.",
         outputs: &["middle", "upper", "lower"],
         ddof: Some(0),
+        rounding: "Round the middle to 12 places, ties to even. Round each band edge to the greatest Decimal-encodable scale up to 12 places, ties to even.",
         kind: Kind::Bollinger,
         ..COMMON
     },
@@ -175,6 +176,7 @@ static REGISTRY: &[IndicatorDefinition] = &[
         unit: "return_ratio",
         warmup: "period",
         ddof: Some(1),
+        rounding: "Round single-bar returns to 64 places, ties to even. Round the output to the greatest Decimal-encodable scale up to 12 places, ties to even.",
         kind: Kind::Volatility,
         ..COMMON
     },

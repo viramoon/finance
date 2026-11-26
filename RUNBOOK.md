@@ -62,6 +62,8 @@ Replay 可单独运行。paper 模式下 probe 用 client ID 91，collector 用 
 
 用 `GET /api/v1/indicators` 核对已注册的算法版本。请求 `GET /api/v1/market/bars` 时提供与展示投影一致的标的、源、产品、周期和复权口径。404 时检查同一数据根下是否已发布该序列。收到 `indicator_history_unavailable` 时核对 `history_complete` 和序列起点，补足前置历史后重新发布。收到 `indicator_work_limit` 时减小 `limit` 后分页，若前置历史已超预算，则选择更少或更短周期的指标。收到 `indicator_calculation_failed` 时按同一组件参数检查整个闭合前缀的数值和精度。其余投影 500 错误按文件权限、时间次序和 OHLCV 类型排查。旧数据的问题按快照覆盖、`as_of`、`first_available_ts` 和 `delay_tier` 排查。API 启动参数与健康检查沿用原接口，部署须在受控数据根发布合法展示投影。详细契约见 [主图 API](docs/api.md#主图行情与指标)。
 
+收到 `indicator_input_out_of_range` 时，核对进入指标内核的 OHLCV 小数位。收到 `bars_invalid` 时也应检查 F1 十进制文本的总位数。合法输入的计算结果仍受输出编码范围约束，详见 [数值域与舍入](docs/indicators.md#数值域与舍入)。
+
 ### 在盒子上验证 paper 行情恢复
 
 先用已登录的 Gateway 运行上方 probe。给 paper collector 配置独立的已挂载数据根目录，例如 /home/box/fertile/data-paper；finance-api 用同一数据根，回放继续使用自己的目录。使用实时市场数据订阅时将 FINANCE_COLLECTOR_CONFIG 指向 config/collector/ib-cloudbox.yaml；选择延迟数据时使用 config/collector/ib-delayed.yaml。确认 SPY 对应交易时段有行情，按 [IB 接入](docs/integrations/ib.md) 检查订阅权限与 pacing 日志。

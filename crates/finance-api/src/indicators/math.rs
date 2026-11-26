@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use num_bigint_dig::BigInt;
 use num_integer::Integer;
 use num_traits::{Signed, ToPrimitive, Zero};
@@ -7,43 +9,34 @@ use super::{IndicatorError, OUTPUT_DECIMAL_PLACES};
 
 pub(super) type Numeric<T = Decimal> = Result<T, IndicatorError>;
 
-pub(super) fn add(a: Decimal, b: Decimal) -> Numeric {
-    a.checked_add(b).ok_or(IndicatorError::NumericOverflow)
-}
-
-pub(super) fn sub(a: Decimal, b: Decimal) -> Numeric {
-    a.checked_sub(b).ok_or(IndicatorError::NumericOverflow)
-}
-
-pub(super) fn mul(a: Decimal, b: Decimal) -> Numeric {
-    a.checked_mul(b).ok_or(IndicatorError::NumericOverflow)
-}
-
-pub(super) fn div(a: Decimal, b: Decimal) -> Numeric {
-    a.checked_div(b).ok_or(IndicatorError::NumericOverflow)
-}
-
 /// Represent the entire Decimal input range in common, exact 10^-28 units.
 pub(super) fn scaled_mantissa(value: Decimal) -> BigInt {
     BigInt::from(value.mantissa()) * 10_u128.pow(Decimal::MAX_SCALE - value.scale())
 }
 
 pub(super) fn rounded_ratio(numerator: &BigInt, denominator: &BigInt) -> Numeric {
-    rounded_output(numerator * 10_u64.pow(OUTPUT_DECIMAL_PLACES), denominator)
+    output_from_coefficient(rounded_quotient(
+        &(numerator * 10_u64.pow(OUTPUT_DECIMAL_PLACES)),
+        denominator,
+    ))
 }
 
 pub(super) fn rounded_scaled_ratio(numerator: &BigInt, denominator: &BigInt) -> Numeric {
     let factor = 10_u128.pow(Decimal::MAX_SCALE - OUTPUT_DECIMAL_PLACES);
-    rounded_output(numerator.clone(), &(denominator * factor))
+    output_from_coefficient(rounded_quotient(numerator, &(denominator * factor)))
 }
 
-/// `numerator / denominator` is expressed in output quanta, with a positive denominator.
-fn rounded_output(numerator: BigInt, denominator: &BigInt) -> Numeric {
+/// Round a rational to an integer, with a positive denominator and ties to even.
+pub(super) fn rounded_quotient(numerator: &BigInt, denominator: &BigInt) -> BigInt {
     let (mut coefficient, remainder) = numerator.div_rem(denominator);
     let twice_remainder = remainder.abs() * 2_u32;
     if twice_remainder > *denominator || (twice_remainder == *denominator && coefficient.is_odd()) {
         coefficient += if numerator.is_negative() { -1 } else { 1 };
     }
+    coefficient
+}
+
+pub(super) fn output_from_coefficient(mut coefficient: BigInt) -> Numeric {
     let mut scale = OUTPUT_DECIMAL_PLACES;
     let ten = BigInt::from(10);
     loop {
@@ -66,90 +59,59 @@ fn rounded_output(numerator: BigInt, denominator: &BigInt) -> Numeric {
     }
 }
 
-fn sqrt(value: Decimal) -> Numeric {
-    if value.is_zero() {
-        return Ok(Decimal::ZERO);
-    }
-    // Start above the root. Stop at convergence or when Decimal rounding would
-    // make a final iteration larger. The divided difference avoids overflow.
-    let mut current = value.max(Decimal::ONE);
-    for _ in 0..128 {
-        let next = add(
-            current,
-            div(sub(div(value, current)?, current)?, Decimal::TWO)?,
-        )?;
-        if next >= current {
-            return Ok(current);
-        }
-        current = next;
-    }
-    Err(IndicatorError::NumericOverflow)
+pub(super) const INTERNAL_DECIMAL_PLACES: u32 = 64;
+
+/// Promote a Decimal to the internal grid without rounding.
+pub(super) fn internal_mantissa(value: Decimal) -> BigInt {
+    scaled_mantissa(value) * 10_u128.pow(INTERNAL_DECIMAL_PLACES - Decimal::MAX_SCALE)
 }
 
-pub(super) fn return_ratio(close: Decimal, previous: Decimal) -> Numeric<Option<Decimal>> {
-    if previous.is_zero() {
-        Ok(None)
-    } else {
-        Ok(Some(div(sub(close, previous)?, previous)?))
-    }
+/// Round an internal sample directly to the output grid.
+pub(super) fn internal_output(mantissa: &BigInt) -> Numeric {
+    static DIVISOR: LazyLock<BigInt> = LazyLock::new(|| {
+        num_traits::Pow::pow(
+            &BigInt::from(10_u8),
+            INTERNAL_DECIMAL_PLACES - OUTPUT_DECIMAL_PLACES,
+        )
+    });
+    output_from_coefficient(rounded_quotient(mantissa, &DIVISOR))
 }
 
-pub(super) fn deviation(
-    mut samples: impl Iterator<Item = Decimal> + Clone,
-    mean: Decimal,
-    divisor: usize,
-) -> Numeric {
-    // Center and scale before squaring so small differences around large
-    // prices retain precision, including differences near the output rounding.
-    let scale = samples.clone().try_fold(Decimal::ZERO, |scale, value| {
-        Ok(scale.max(sub(value, mean)?.abs()))
-    })?;
-    if scale.is_zero() {
-        return Ok(Decimal::ZERO);
-    }
-    let squared = samples.try_fold(Decimal::ZERO, |total, value| {
-        let delta = div(sub(value, mean)?, scale)?;
-        add(total, mul(delta, delta)?)
-    })?;
-    mul(scale, sqrt(div(squared, Decimal::from(divisor))?)?)
-}
-
-/// Seed an exponential or Wilder average with a whole window of samples.
+/// Hold a 64-place seed sum until the first complete window, then the running average.
 #[derive(Debug, Clone, Default)]
 pub(super) struct Average {
     count: usize,
-    total: Decimal,
-    value: Option<Decimal>,
+    value: BigInt,
 }
 
 impl Average {
-    pub(super) fn ema(&mut self, sample: Decimal, period: usize) -> Numeric<Option<Decimal>> {
-        self.update(sample, period, Decimal::TWO, period + 1)
+    pub(super) fn ema(&mut self, sample: &BigInt, period: usize) -> Option<&BigInt> {
+        self.update(sample, period, 2, period + 1)
     }
 
-    pub(super) fn wilder(&mut self, sample: Decimal, period: usize) -> Numeric<Option<Decimal>> {
-        self.update(sample, period, Decimal::ONE, period)
+    pub(super) fn wilder(&mut self, sample: &BigInt, period: usize) -> Option<&BigInt> {
+        self.update(sample, period, 1, period)
     }
 
     fn update(
         &mut self,
-        sample: Decimal,
+        sample: &BigInt,
         period: usize,
-        weight: Decimal,
+        weight: usize,
         denominator: usize,
-    ) -> Numeric<Option<Decimal>> {
-        if let Some(value) = self.value {
-            // value + alpha * (sample - value) preserves a repeated flat value
-            // and uses no rounded output as the next step's input.
-            let alpha = div(weight, Decimal::from(denominator))?;
-            self.value = Some(add(value, mul(alpha, sub(sample, value)?)?)?);
-        } else {
-            self.total = add(self.total, sample)?;
+    ) -> Option<&BigInt> {
+        if self.count < period {
+            self.value += sample;
             self.count += 1;
-            if self.count == period {
-                self.value = Some(div(self.total, Decimal::from(period))?);
+            if self.count < period {
+                return None;
             }
+            self.value = rounded_quotient(&self.value, &BigInt::from(period));
+        } else {
+            // Combine both weighted terms before quantizing to the internal grid.
+            let numerator = &self.value * (denominator - weight) + sample * weight;
+            self.value = rounded_quotient(&numerator, &BigInt::from(denominator));
         }
-        Ok(self.value)
+        Some(&self.value)
     }
 }

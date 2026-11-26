@@ -69,7 +69,7 @@ impl ProjectedBar {
         } else {
             self.end_ts
         };
-        self.indicator_bar().validate().is_ok()
+        self.indicator_bar().validate_structure().is_ok()
             && available_after <= self.first_available_ts
             && self.first_available_ts <= as_of
             && previous

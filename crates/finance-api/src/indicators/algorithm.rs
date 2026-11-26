@@ -8,16 +8,17 @@ use rust_decimal::Decimal;
 use super::{
     Bar, IndicatorSpec,
     math::{
-        Average, Numeric, add, deviation, div, mul, return_ratio, rounded_ratio,
-        rounded_scaled_ratio, scaled_mantissa, sub,
+        Average, INTERNAL_DECIMAL_PLACES, Numeric, internal_mantissa, internal_output,
+        rounded_ratio, rounded_scaled_ratio, scaled_mantissa,
     },
     registry::Kind,
+    statistics,
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub(super) struct Observation {
     pub(super) bar: Bar,
-    pub(super) single_return: Option<Decimal>,
+    pub(super) single_return: Option<BigInt>,
 }
 
 pub(super) enum Output {
@@ -102,16 +103,19 @@ impl Algorithm {
                 history.len(),
                 period,
             )?),
-            Self::Ema(average) => scalar(average.ema(bar.close, period)?),
+            Self::Ema(average) => {
+                let value = average.ema(&internal_mantissa(bar.close), period);
+                scalar(value.map(internal_output).transpose()?)
+            }
             Self::Rsi(state) => state.update(previous, bar.close, period)?,
             Self::Bollinger => bollinger(history, bar.close, period)?,
             Self::Macd { fast, slow, signal } => macd(fast, slow, signal, bar.close, spec)?,
             Self::Atr(average) => {
-                let true_range = sub(
-                    bar.high.max(previous.unwrap_or(bar.high)),
-                    bar.low.min(previous.unwrap_or(bar.low)),
-                )?;
-                scalar(average.wilder(true_range, period)?)
+                let high = bar.high.max(previous.unwrap_or(bar.high));
+                let low = bar.low.min(previous.unwrap_or(bar.low));
+                let true_range = internal_mantissa(high) - internal_mantissa(low);
+                let value = average.wilder(&true_range, period);
+                scalar(value.map(internal_output).transpose()?)
             }
             Self::Vwap {
                 day,
@@ -119,11 +123,11 @@ impl Algorithm {
                 volume,
             } => vwap(day, weighted_prices, volume, bar)?,
             Self::Return => match lagged {
-                Some(base) => return_ratio(bar.close, base.bar.close)?
+                Some(base) => statistics::close_return(bar.close, base.bar.close)?
                     .map_or(Output::Undefined, Output::Scalar),
                 None => Output::Warmup,
             },
-            Self::Volatility => realized_volatility(history, next.single_return, period)?,
+            Self::Volatility => realized_volatility(history, next.single_return.as_ref(), period)?,
             Self::VolumeSma(total) => scalar(moving_mean(
                 total,
                 bar.volume,
@@ -187,7 +191,7 @@ impl Rsi {
             }
         }
         if !flat {
-            const RSI_INPUT_SCALE: i128 = 10_i128.pow(64 - Decimal::MAX_SCALE);
+            const RSI_INPUT_SCALE: u128 = 10_u128.pow(INTERNAL_DECIMAL_PLACES - Decimal::MAX_SCALE);
             let change =
                 (scaled_mantissa(close) - scaled_mantissa(previous_close)) * RSI_INPUT_SCALE;
             match change.sign() {
@@ -218,12 +222,11 @@ fn bollinger(history: &VecDeque<Observation>, close: Decimal, period: usize) -> 
         .skip(history.len() + 1 - period)
         .map(|row| row.bar.close)
         .chain(iter::once(close));
-    let mean = mean(closes.clone(), period)?;
-    let width = mul(deviation(closes, mean, period)?, Decimal::TWO)?;
+    let [middle, upper, lower] = statistics::bollinger(closes, period)?;
     Ok(Output::Channels([
-        ("middle", mean),
-        ("upper", add(mean, width)?),
-        ("lower", sub(mean, width)?),
+        ("middle", middle),
+        ("upper", upper),
+        ("lower", lower),
     ]))
 }
 
@@ -234,20 +237,21 @@ fn macd(
     close: Decimal,
     spec: &IndicatorSpec,
 ) -> Numeric<Output> {
+    let close = internal_mantissa(close);
     let (Some(fast), Some(slow)) = (
-        fast.ema(close, spec.fast_period)?,
-        slow.ema(close, spec.period)?,
+        fast.ema(&close, spec.fast_period),
+        slow.ema(&close, spec.period),
     ) else {
         return Ok(Output::Warmup);
     };
-    let line = sub(fast, slow)?;
-    let Some(signal) = signal.ema(line, spec.signal_period)? else {
+    let line = fast - slow;
+    let Some(signal) = signal.ema(&line, spec.signal_period) else {
         return Ok(Output::Warmup);
     };
     Ok(Output::Channels([
-        ("macd", line),
-        ("signal", signal),
-        ("histogram", sub(line, signal)?),
+        ("macd", internal_output(&line)?),
+        ("signal", internal_output(signal)?),
+        ("histogram", internal_output(&(&line - signal))?),
     ]))
 }
 
@@ -280,7 +284,7 @@ fn vwap(
 
 fn realized_volatility(
     history: &VecDeque<Observation>,
-    current_return: Option<Decimal>,
+    current_return: Option<&BigInt>,
     period: usize,
 ) -> Numeric<Output> {
     if history.len() < period {
@@ -289,16 +293,7 @@ fn realized_volatility(
     let returns = history
         .iter()
         .skip(history.len() + 1 - period)
-        .map(|row| row.single_return)
+        .map(|row| row.single_return.as_ref())
         .chain(iter::once(current_return));
-    if returns.clone().any(|value| value.is_none()) {
-        return Ok(Output::Undefined);
-    }
-    let returns = returns.flatten();
-    let mean = mean(returns.clone(), period)?;
-    Ok(Output::Scalar(deviation(returns, mean, period - 1)?))
-}
-
-fn mean(mut samples: impl Iterator<Item = Decimal>, count: usize) -> Numeric {
-    div(samples.try_fold(Decimal::ZERO, add)?, Decimal::from(count))
+    Ok(statistics::sample_deviation(returns, period)?.map_or(Output::Undefined, Output::Scalar))
 }

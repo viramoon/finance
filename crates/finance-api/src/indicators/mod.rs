@@ -7,6 +7,7 @@
 mod algorithm;
 mod math;
 mod registry;
+mod statistics;
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -20,12 +21,16 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 use algorithm::{Algorithm, Observation, Output};
-use math::{Numeric, return_ratio};
+use math::Numeric;
 use registry::Kind;
 pub use registry::{
     IndicatorDefinition, IndicatorParameter, IndicatorSpec, MAX_PERIOD, OUTPUT_DECIMAL_PLACES,
     ParameterRule, RSI_ID, registry,
 };
+use statistics::single_return;
+
+/// Maximum input scale after removing trailing zeros. This includes all F1 decimal values.
+pub const INPUT_MAX_DECIMAL_PLACES: u32 = 27;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bar {
@@ -42,6 +47,18 @@ pub struct Bar {
 
 impl Bar {
     pub fn validate(&self) -> Result<(), IndicatorError> {
+        self.validate_structure()?;
+        let fields = [self.open, self.high, self.low, self.close, self.volume];
+        if fields.into_iter().any(|value| {
+            value.scale() > INPUT_MAX_DECIMAL_PLACES
+                && value.normalize().scale() > INPUT_MAX_DECIMAL_PLACES
+        }) {
+            return Err(IndicatorError::NumericInputOutOfRange);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_structure(&self) -> Result<(), IndicatorError> {
         if self.open_ts >= self.end_ts
             || self.low > self.open.min(self.close)
             || self.high < self.open.max(self.close)
@@ -119,6 +136,7 @@ pub enum IndicatorError {
     InvalidParameters,
     MacdPeriodOrder,
     InvalidBar,
+    NumericInputOutOfRange,
     OutOfOrder,
     NumericOverflow,
 }
@@ -130,6 +148,7 @@ impl fmt::Display for IndicatorError {
             Self::InvalidParameters => "invalid indicator parameters",
             Self::MacdPeriodOrder => "fast_period must be smaller than slow_period",
             Self::InvalidBar => "invalid bar time bounds, OHLC or volume",
+            Self::NumericInputOutOfRange => "bar price or volume exceeds the supported input scale",
             Self::OutOfOrder => "bar overlaps the previous bar or its trading day regressed",
             Self::NumericOverflow => "indicator arithmetic exceeded the supported Decimal range",
         })
@@ -206,7 +225,7 @@ impl IndicatorEngine {
             return Err(IndicatorError::OutOfOrder);
         }
         let single_return = match previous {
-            Some(previous) if self.needs_returns => return_ratio(bar.close, previous.bar.close)?,
+            Some(previous) if self.needs_returns => single_return(bar.close, previous.bar.close)?,
             _ => None,
         };
         let observation = Observation {

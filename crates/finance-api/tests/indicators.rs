@@ -443,6 +443,97 @@ fn window_overflows_fail_atomically_during_batch_incremental_and_restart() {
 }
 
 #[test]
+fn supported_input_scale_accepts_boundaries_and_trailing_zeros() {
+    let smallest = Decimal::new(1, 27);
+    let padded = Decimal::new(10, 28);
+    assert_eq!(padded.scale(), 28);
+    let bars = [
+        Bar {
+            open: -smallest,
+            high: smallest,
+            low: -padded,
+            close: padded,
+            volume: smallest,
+            ..bar(0, 0, 0)
+        },
+        Bar {
+            open: Decimal::MAX,
+            high: Decimal::MAX,
+            low: Decimal::MAX,
+            close: Decimal::MAX,
+            volume: Decimal::MAX,
+            ..bar(1, 0, 0)
+        },
+    ];
+    let specs = [
+        spec("sma", json!({"period": 1})),
+        spec("volume_sma", json!({"period": 1})),
+    ];
+    let values = batch(&specs, &bars).unwrap();
+    assert_values(&values[0][0], &[("value", "0")]);
+    assert_eq!(values[1][0].values["value"], Decimal::MAX);
+    assert_eq!(values[1][1].values["value"], Decimal::MAX);
+    let mut live = IndicatorEngine::new(&specs);
+    for (bar, expected) in bars.iter().zip(&values) {
+        assert_eq!(bar.validate(), Ok(()));
+        assert_eq!(live.push_closed(bar).unwrap(), *expected);
+    }
+    let mut replay = IndicatorEngine::new(&specs);
+    replay.advance_closed(&bars[0]).unwrap();
+    assert_eq!(replay.push_closed(&bars[1]).unwrap(), values[1]);
+}
+
+#[test]
+fn rejects_outside_input_scale_before_calculation_on_every_path() {
+    let too_fine = Decimal::new(1, 28);
+    let wide = bar(1, 0, 1);
+    let flat = Bar {
+        high: Decimal::ZERO,
+        low: Decimal::ZERO,
+        ..wide
+    };
+    let outside = [
+        Bar {
+            open: too_fine,
+            ..wide
+        },
+        Bar {
+            high: too_fine,
+            ..flat
+        },
+        Bar {
+            low: -too_fine,
+            ..flat
+        },
+        Bar {
+            close: too_fine,
+            ..wide
+        },
+        Bar {
+            volume: too_fine,
+            ..wide
+        },
+    ];
+    let specs = [spec("sma", json!({"period": 2}))];
+    let first = bar(0, 8, 1);
+    let expected = batch(&specs, &[first, wide]).unwrap();
+    for invalid in outside {
+        let error = IndicatorError::NumericInputOutOfRange;
+        assert_eq!(invalid.validate(), Err(error));
+        assert_eq!(batch(&specs, &[first, invalid]), Err(error));
+        let mut live = IndicatorEngine::new(&specs);
+        let mut replay = IndicatorEngine::new(&specs);
+        live.push_closed(&first).unwrap();
+        replay.advance_closed(&first).unwrap();
+        assert_eq!(live.push_closed(&invalid), Err(error));
+        assert_eq!(replay.advance_closed(&invalid), Err(error));
+        assert_eq!(replay.preview(&invalid), Err(error));
+        assert_eq!(live.push_closed(&wide).unwrap(), expected[1]);
+        assert_eq!(replay.push_closed(&wide).unwrap(), expected[1]);
+    }
+}
+
+#[test]
 fn registry_rejects_unknown_versions_and_invalid_parameter_shapes() {
     let invalid = [
         (

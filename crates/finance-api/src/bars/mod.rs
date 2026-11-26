@@ -10,7 +10,8 @@ pub use source::{
 use crate::{
     ApiError, ErrorBody, error,
     indicators::{
-        IndicatorDefinition, IndicatorEngine, IndicatorSpec, IndicatorValue, ValueStatus, registry,
+        IndicatorDefinition, IndicatorEngine, IndicatorError, IndicatorSpec, IndicatorValue,
+        ValueStatus, registry,
     },
 };
 use axum::{
@@ -428,7 +429,7 @@ fn calculate(source: &dyn BarsSource, query: ChartQuery) -> Result<ChartBars, Ap
         for bar in &snapshot.closed[..visible_start] {
             engine
                 .advance_closed(&bar.indicator_bar())
-                .map_err(|_| calculation_error())?;
+                .map_err(calculation_error)?;
         }
     }
     for bar in snapshot
@@ -441,7 +442,7 @@ fn calculate(source: &dyn BarsSource, query: ChartQuery) -> Result<ChartBars, Ap
             .as_mut()
             .map(|engine| engine.push_closed(&bar.indicator_bar()))
             .transpose()
-            .map_err(|_| calculation_error())?
+            .map_err(calculation_error)?
             .unwrap_or_default();
         rows.push(chart_row(bar, false, output));
     }
@@ -450,7 +451,7 @@ fn calculate(source: &dyn BarsSource, query: ChartQuery) -> Result<ChartBars, Ap
             .as_ref()
             .map(|engine| engine.preview(&bar.indicator_bar()))
             .transpose()
-            .map_err(|_| calculation_error())?
+            .map_err(calculation_error)?
             .unwrap_or_default();
         rows.push(chart_row(bar, true, output));
     }
@@ -465,12 +466,19 @@ fn chart_row(bar: ProjectedBar, provisional: bool, output: Vec<IndicatorValue>) 
     }
 }
 
-fn calculation_error() -> ApiError {
-    error(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "indicator_calculation_failed",
-        "Cannot calculate indicators for this projection",
-    )
+fn calculation_error(cause: IndicatorError) -> ApiError {
+    match cause {
+        IndicatorError::NumericInputOutOfRange => error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "indicator_input_out_of_range",
+            "Bar price or volume exceeds the supported indicator input scale",
+        ),
+        _ => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "indicator_calculation_failed",
+            "Cannot calculate indicators for this projection",
+        ),
+    }
 }
 
 fn invalid_query() -> ApiError {

@@ -247,6 +247,33 @@ async fn chart_indicators_propagate_overflow_from_visible_and_replayed_bars() {
 }
 
 #[tokio::test]
+async fn chart_preserves_finest_f1_price_and_rejects_overprecise_wire_price() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = projection();
+    let inside = "0.000000000000000000000000001";
+    for field in ["open", "high", "low", "close"] {
+        snapshot["closed"][0][field] = json!(inside);
+    }
+    store(dir.path(), &snapshot);
+    let app = app(dir.path());
+    let indicator = encoded(r#"[{"use":"indicator.ema@1.0.0","params":{"period":1}}]"#);
+    let uri = format!("{CHART}?{SCOPE}&{WINDOW}&indicators={indicator}&limit=1");
+    let (status, page) = call(&app, &uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page["rows"][0]["bar"]["close"], inside);
+    assert_eq!(
+        page["rows"][0]["indicator_values"][0]["values"]["value"],
+        "0"
+    );
+
+    snapshot["closed"][0]["close"] = json!("0.0000000000000000000000000001");
+    store(dir.path(), &snapshot);
+    let (status, error) = call(&app, &uri).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(error["error"]["code"], "bars_invalid");
+}
+
+#[tokio::test]
 async fn chart_rejects_unapproved_mismatched_invalid_or_incomplete_indicator_input() {
     let dir = tempfile::tempdir().unwrap();
     let app = app(dir.path());
