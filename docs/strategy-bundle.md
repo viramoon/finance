@@ -188,6 +188,8 @@ initial_cash = Decimal(plan["bundle"]["spec"]["portfolio"]["initial_cash"]["amou
 
 配置回测将编译计划、点时成分和数据快照、引擎版本、成本与运行区间锁入 `run_manifest`。执行数据、归因和复验见 [配置策略作业](backtest-jobs.md#配置策略作业)。
 
-配置回测 worker 的默认 Python 求值器在当时可见的闭合日线上支持 `factor.close_return@1.0.0` 和 `indicator.rsi_wilder@1.0.0`，`run_manifest.indicator_evaluator` 记录其版本。已通过编译的其他指标需要在运行器中注入适配器，默认求值器遇到这些指标时返回 `unsupported_strategy_component`。接入 [Rust 指标内核](indicators.md) 时，适配器需传入相同的版本、参数、点时闭合序列与精确十进制值，并按编译计划的 `output` 选取多列指标的指定输出。
+配置回测 worker 的默认 Python 求值器在当时可见的闭合日线上支持 `factor.close_return@1.0.0` 和 `indicator.rsi_wilder@1.0.0`，成功作业的 `run_manifest.indicator_evaluator` 记录其版本。策略执行到其他指标时，默认求值器在内部抛出 `unsupported_strategy_component`。子进程将它映射为 `strategy_runtime_invalid`，作业详情返回 `status: "failed"` 和 `error: "strategy_runtime_invalid"`。
+
+Python 运行器的 `indicator_evaluator` 回调只接收点时闭合历史、组件版本 ID 和参数，返回一个 `Decimal` 值或缺值。编译计划保留 `output`，当前回调没有该参数。同一序列上使用相同参数的布林上轨和下轨会收到相同的回调实参。接入 [Rust 指标内核](indicators.md) 的多列指标需要扩展求值接口，把所选 `output` 连同点时闭合序列、组件版本和参数交给适配器。
 
 F8 提供离线评价及版本选用检查。接入研究因子时，调用方通过 `FactorResearchCatalog.select_for_backtest` 确认版本可选。[因子研究接口](factor-research.md)
