@@ -38,6 +38,7 @@ fertile 以 git submodule 引入 finance、web、frontend；agent 是独立仓�
 - [IBKR 接入](integrations/ib.md)
 - [HTTP 与代码导出](api.md)
 - [行情标的、事件与流协议](market-protocol.md)
+- [本地行情 WAL、投影与封段接口](market-wal.md)
 - [StrategyBundle v1 配置与编译](strategy-bundle.md)
 - [技术栈决策](adr/ADR-0001-tech-stack.md)
 - [依赖、许可与替换](adr/ADR-0002-nautilus-dependency.md)
