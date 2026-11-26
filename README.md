@@ -6,6 +6,8 @@ fertile 的主项目与 submodule，基于 NautilusTrader 的交易与数据系�
 
 `finance-ib` 提供 paper 只读的美股及 OPRA 顶档订阅接口，以及需显式启用的私有权限探针。真实账户各产品权限仍待验收。操作见 [IBKR 接入](docs/integrations/ib.md#美股-l1-和-opra-权限验收)。
 
+`finance_collector::line_budget` 为美股 L1 和 OPRA 提供进程内订阅调度、分批期权链轮询、共享读者和覆盖查询。使用方显式启动调度器，默认分配 9 个股票行、16 个热点期权行、45 个轮换行并预留 30 行。[IBKR 行情线预算](docs/integrations/ib-line-budget.md)
+
 本地行情链路支持 F1 事件追加、恢复和独立 Parquet 投影，Hyperliquid 公共永续行情已接入。[本地行情 WAL、投影与封段接口](docs/market-wal.md)
 
 ## 系统中的位置

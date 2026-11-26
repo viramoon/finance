@@ -89,6 +89,17 @@ Replay 可单独运行。paper 模式下 probe 用 client ID 91，collector 用 
 
 经授权后，在美股常规交易时段使用已登录的本机 paper Gateway，确认 Gateway 的 API 设置为只读。选择一份已知活跃的 SMART USD 美股期权，使用该合约的 `conId`，按 [产品权限验收](docs/integrations/ib.md#美股-l1-和-opra-权限验收) 运行 `scripts/check-ib-entitlements.sh`。权限探针占用现有 probe client ID 91，逐标的开一条流并在进入下一项前取消。`pending` 保留具体原因。遇到 `gateway_disconnected` 时，先恢复只读 paper 会话再重新运行探针。遇到 `cancel_failed` 时，本轮行数回收结果未知，探针关闭连接并保留已完成标的的证据。发现休市、无回调或报价不完整时，于常规交易时段复测。探针只输出脱敏摘要，原始行情和账户资料留在私有环境。
 
+### 离线验收 IBKR 行情线预算
+
+在仓库根执行下列测试。测试在进程内构造期权链和行情回调，并推进虚拟时间验证轮换、行数回收及恢复限速。
+
+```sh
+cargo test --locked --offline -p finance-collector --lib line_budget
+cargo test --locked --offline -p finance-ib --lib market::ib::chain
+```
+
+接入时由调用方显式运行 `LineScheduler::run_paper` 并持有专用行情 client ID。默认使用配置中的 probe client ID，同一 ID 需要在调度器和私有权限探针之间互斥使用。读取 `LineHandle::status()` 核对三类占用、预留和发现状态。重连时继续查询已观测窗口及缺口，等 `discovery_complete` 后再使用新的已确认合约分母。额度以账户实测为准，调低 `BudgetConfig` 并保留 TWS/深度余量即可按部署调整。行情正文和覆盖状态驻于本进程内存。[IBKR 行情线预算](docs/integrations/ib-line-budget.md)
+
 ### F1 行情 WAL 与投影
 
 生产者通过 [本地行情接口](docs/market-wal.md) 绑定产品许可，并在确认采集前提交 WAL。在独立数据根可使用已有源码构建的 Python 环境追平投影并检查水位。下列命令把 `$DATA_ROOT`、`$SOURCE` 和 `$PRODUCT` 设为目标数据根与已登记产品，`$WAL_BIN` 设为构建的 `finance-market-wal` 路径。

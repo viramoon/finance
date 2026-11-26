@@ -138,4 +138,12 @@ option_exposure:
   input: option_chain_snapshot
   persistence: disabled
   documentation: docs/option-exposure.md
+ib_line_budget:
+  invocation: in_process_rust_library
+  runner: finance_collector::line_budget::LineScheduler::run_paper
+  account: paper_read_only
+  l1_defaults: {account: 100, stock: 9, hot_options: 16, rotating_options: 45, reserve: 30}
+  depth_defaults: {pinned: 2, page_focus: 1}
+  coverage: memory_only
+  documentation: docs/integrations/ib-line-budget.md
 runbook: RUNBOOK.md
