@@ -76,21 +76,18 @@ fn ema_and_macd_keep_unrounded_state_between_weighted_updates() {
     ];
     let rows = all_paths(&specs, &bars);
     assert!(rows[0].iter().all(|value| value.values.is_empty()));
-    for (index, ema, line) in [
-        (
-            1,
-            "50000000000000000.000000000001",
-            "-49999999999999999.999999999999",
-        ),
-        (
-            2,
-            "16666666666666666.666666666668",
-            "-16666666666666666.666666666666",
-        ),
-    ] {
-        assert_eq!(rows[index][0].values["value"].to_string(), ema);
-        assert_eq!(rows[index][1].values["macd"].to_string(), line);
-        assert_eq!(rows[index][1].values["signal"].to_string(), line);
-        assert_eq!(rows[index][1].values["histogram"], Decimal::ZERO);
+    let seed_ema = "50000000000000000.000000000001";
+    let seed_macd = "-49999999999999999.999999999999";
+    let update_ema = "16666666666666666.666666666668";
+    let update_macd = "-16666666666666666.666666666666";
+    for (offset, (ema, line)) in [(seed_ema, seed_macd), (update_ema, update_macd)]
+        .into_iter()
+        .enumerate()
+    {
+        let row = &rows[offset + 1];
+        assert_eq!(row[0].values["value"].to_string(), ema);
+        assert_eq!(row[1].values["macd"].to_string(), line);
+        assert_eq!(row[1].values["signal"].to_string(), line);
+        assert_eq!(row[1].values["histogram"], Decimal::ZERO);
     }
 }

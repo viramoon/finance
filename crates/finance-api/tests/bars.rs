@@ -203,11 +203,14 @@ async fn chart_indicators_propagate_overflow_from_visible_and_replayed_bars() {
     let mut snapshot = projection();
     // Three synthetic prices. The second bar's one-bar return exceeds
     // Decimal's range; the third's would be 1% if the failed bar were accepted.
-    for (bar, close) in snapshot["closed"].as_array_mut().unwrap().iter_mut().zip([
-        "0.000000000000000000000000001",
-        "100",
-        "101",
-    ]) {
+    let smallest_f1_price = "0.000000000000000000000000001";
+    let closes = [smallest_f1_price, "100", "101"];
+    for (bar, close) in snapshot["closed"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .zip(closes)
+    {
         for field in ["open", "high", "low", "close"] {
             bar[field] = json!(close);
         }

@@ -732,26 +732,16 @@ mod tests {
     #[test]
     fn decimal_constraints_preserve_exact_scale_and_canonical_zero() {
         let pattern = TextFormat::Decimal.pattern();
-        for value in [
-            "0",
-            "-0.00",
-            "9999999999.999999999999999999",
-            "-0.000000000000000001",
-        ] {
+        let largest_value = "9999999999.999999999999999999";
+        let smallest_negative = "-0.000000000000000001";
+        for value in ["0", "-0.00", largest_value, smallest_negative] {
             assert!(pattern.regex.is_match(value), "{value}");
             let json = &mut json!(value);
             DECIMAL_STRING.normalize(json);
             assert!(pattern.regex.is_match(json.as_str().unwrap()), "{json}");
         }
-        for value in [
-            "00.15",
-            "2.",
-            ".1",
-            "1e-3",
-            "+1",
-            "0.0\n",
-            "0.0000000000000000001",
-        ] {
+        let excess_precision = "0.0000000000000000001";
+        for value in ["00.15", "2.", ".1", "1e-3", "+1", "0.0\n", excess_precision] {
             assert!(!pattern.regex.is_match(value), "{value}");
         }
         let mut value = json!("-0.000");

@@ -218,10 +218,8 @@ fn small_valid_quantities_and_price_changes_do_not_underflow_indicator_state() {
 fn provisional_revisions_do_not_commit_and_warmup_is_independent() {
     let specs = specs();
     let mut engine = IndicatorEngine::new(&specs);
-    let first = bar(0, 100, 2);
-    let second = bar(1, 101, 3);
-    let third = bar(2, 102, 4);
-    let fourth = bar(3, 103, 5);
+    let [first, second, third, fourth] =
+        std::array::from_fn(|index| bar(index as i64, 100 + index, 2 + index));
     let first_preview = engine.preview(&first).unwrap();
     assert_eq!(first_preview[0].status, ValueStatus::Warmup);
     assert_eq!(first_preview[6].status, ValueStatus::Ready);
@@ -251,14 +249,12 @@ fn zero_base_and_flat_series_are_undefined_without_poisoning_future_windows() {
         spec("close_return", json!({"period": 1})),
         spec("realized_volatility", json!({"period": 2})),
     ];
-    let bars = [
-        bar(0, 0, 1),
-        bar(1, 0, 1),
-        bar(2, 0, 1),
-        bar(3, 2, 1),
-        bar(4, 1, 1),
-        bar(5, 1, 1),
-    ];
+    let closes = [0, 0, 0, 2, 1, 1];
+    let bars: Vec<_> = closes
+        .into_iter()
+        .enumerate()
+        .map(|(index, close)| bar(index as i64, close, 1))
+        .collect();
     let rows = batch(&specs, &bars).unwrap();
     assert_eq!(rows[0][1].status, ValueStatus::Warmup);
     assert!(
@@ -281,14 +277,15 @@ fn vwap_uses_exchange_trading_day_and_missing_bars_are_skipped() {
         ..bar(0, 11, 2)
     };
     let second = bar(13, 23, 4);
-    let midnight_same_session = bar(1440, 77, 0);
+    let midnight = 24 * 60;
+    let midnight_same_session = bar(midnight, 77, 0);
     let next_session = Bar {
         trading_day: first.trading_day.succ_opt().unwrap(),
-        ..bar(1441, 70, 0)
+        ..bar(midnight + 1, 70, 0)
     };
     let last = Bar {
         trading_day: next_session.trading_day,
-        ..bar(1442, 41, 5)
+        ..bar(midnight + 2, 41, 5)
     };
     let rows = batch(
         &specs,
@@ -370,19 +367,22 @@ fn invalid_bars_and_overflow_leave_engine_at_the_last_commit() {
 fn window_overflows_fail_atomically_during_batch_incremental_and_restart() {
     let tiny = decimal("0.000000000000000000000000001");
     let cases = [
-        ("close_return", 1, vec![tiny, Decimal::ONE_HUNDRED]),
-        ("bollinger", 2, vec![Decimal::ZERO, Decimal::MAX]),
         (
-            "realized_volatility",
-            3,
+            spec("close_return", json!({"period": 1})),
+            vec![tiny, Decimal::ONE_HUNDRED],
+        ),
+        (
+            spec("bollinger", json!({"period": 2})),
+            vec![Decimal::ZERO, Decimal::MAX],
+        ),
+        (
+            spec("realized_volatility", json!({"period": 3})),
             vec![tiny, Decimal::from(70), tiny, Decimal::from(70)],
         ),
     ];
-    for (name, period, closes) in cases {
-        let specs = [
-            spec("sma", json!({"period": 1})),
-            spec(name, json!({"period": period})),
-        ];
+    for (overflow_spec, closes) in cases {
+        let name = overflow_spec.definition().id;
+        let specs = [spec("sma", json!({"period": 1})), overflow_spec];
         let mut bars: Vec<_> = closes
             .into_iter()
             .enumerate()
