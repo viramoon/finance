@@ -51,7 +51,7 @@ API 接受 SIGTERM 和 Ctrl-C 优雅停止；部署守护、日志收集和滚�
 用隔离数据根或直接运行进程内 HTTP 测试。出现 `market_product_not_found` 时核对 source/product 与 F3 的落盘策略。投影位置未知时查看 `local_durable` 和 `projected` 水位，必要时在同一隔离根运行一次投影。因子列表为空时核对离线快照是否已经发布。新查询读取已有 WAL 和投影，因子使用单独的可选快照文件。[查询与错误码](docs/api.md#首批读契约)
 
 ```sh
-cargo test --locked --offline -p finance-api --test read_contract --test market_read --test factor_read
+cargo test --locked --offline -p finance-api --test read_contract --test market_read --test factor_read --test read_stream
 cargo build --locked --offline -p finance-collector --bin finance-market-wal
 FINANCE_F3_TEST_PYTHON="$FINANCE_PYTHON" FINANCE_F3_TEST_WAL_BIN="$WAL_BIN" \
   cargo test --locked --offline -p finance-api --test market_read \

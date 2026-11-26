@@ -313,6 +313,7 @@ dependencies = [
  "chrono",
  "finance-collector",
  "finance-market-protocol",
+ "futures-util",
  "regex",
  "rusqlite",
  "rust_decimal",

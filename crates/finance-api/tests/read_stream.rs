@@ -1,8 +1,14 @@
+use axum::{
+    body::to_bytes,
+    http::header::CONTENT_TYPE,
+    response::{IntoResponse, Sse},
+};
 use finance_api::read_stream::{self, StatusSseMessage};
 use finance_market_protocol::{Event, decode_json};
+use futures_util::stream;
 use serde::Deserialize;
 use serde_json::{Value, from_value, json};
-use std::{fs, path::PathBuf};
+use std::{convert::Infallible, fs, path::PathBuf};
 
 fn protocol_directory() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../protocol/v1")
@@ -140,4 +146,46 @@ fn sse_status_frames_keep_existing_status_fields_and_resume_id() {
     bad["id"] = frames[1]["id"].clone();
     bad["data"]["schema_version"] = json!("2.0");
     assert!(from_value::<StatusSseMessage>(bad).is_err());
+}
+
+#[tokio::test]
+async fn sse_status_http_body_matches_the_compatibility_samples() {
+    let samples = protocol_json("read-stream-examples.json");
+    let expected_frames = samples["market_status_sse"].as_array().unwrap();
+    let events: Vec<_> = expected_frames
+        .iter()
+        .map(|frame| {
+            let message: StatusSseMessage = from_value(frame.clone()).unwrap();
+            Ok::<_, Infallible>(message.to_sse_event().unwrap())
+        })
+        .collect();
+    let response = Sse::new(stream::iter(events)).into_response();
+    assert_eq!(response.headers()[CONTENT_TYPE], "text/event-stream");
+    let body = to_bytes(response.into_body(), 8192).await.unwrap();
+    let wire = std::str::from_utf8(&body).unwrap();
+    let encoded_frames: Vec<_> = wire
+        .strip_suffix("\n\n")
+        .expect("SSE stream must end with a blank line")
+        .split("\n\n")
+        .collect();
+    assert_eq!(encoded_frames.len(), expected_frames.len());
+
+    for (encoded, expected) in encoded_frames.into_iter().zip(expected_frames) {
+        let fields: Vec<_> = encoded
+            .lines()
+            .map(|line| line.split_once(':').expect("SSE field without a colon"))
+            .collect();
+        assert_eq!(fields.len(), 3, "expected event, id and data fields");
+        let field = |name| {
+            let (_, value) = fields
+                .iter()
+                .find(|(key, _)| *key == name)
+                .unwrap_or_else(|| panic!("missing SSE {name} field"));
+            value.strip_prefix(' ').unwrap_or(value)
+        };
+        assert_eq!(field("event"), expected["event"].as_str().unwrap());
+        assert_eq!(field("id"), expected["id"].as_str().unwrap());
+        let data: Value = serde_json::from_str(field("data")).unwrap();
+        assert_eq!(data, expected["data"]);
+    }
 }
