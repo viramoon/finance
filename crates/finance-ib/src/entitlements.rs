@@ -371,11 +371,9 @@ pub(crate) async fn probe_open_market(
     options: ProbeOptions,
     read_timeout: Duration,
 ) -> ProbeReport {
-    let report = tokio::select! {
-        biased;
-        error = market.disconnected() => ProbeReport::unavailable(options, error.into()),
-        report = probe_products(market, options, read_timeout) => report,
-    };
+    // Each paper operation observes session loss. Finish the current row and
+    // retain earlier evidence even when a global connectivity notice wins.
+    let report = probe_products(market, options, read_timeout).await;
     market.close().await;
     report
 }
@@ -487,15 +485,12 @@ async fn probe_target(
     } else {
         MarketSession::Open
     };
-    let cancelled = matches!(
-        timeout(read_timeout, subscription.cancel()).await,
-        Ok(Ok(()))
-    );
-    let stop = match (failure, cancelled) {
-        // Cleanup can also fail after the subscription detects a disconnect.
-        (Some(Reason::GatewayDisconnected), _) => failure,
-        (_, true) => None,
-        (_, false) => Some(Reason::CancelFailed),
+    let stop = match (failure, timeout(read_timeout, subscription.cancel()).await) {
+        (Some(Reason::GatewayDisconnected), _) | (_, Ok(Err(MarketError::Disconnected))) => {
+            Some(Reason::GatewayDisconnected)
+        }
+        (_, Ok(Ok(()))) => None,
+        (_, Ok(Err(_)) | Err(_)) => Some(Reason::CancelFailed),
     };
     (
         ProbeEvidence::from_observation(
@@ -521,11 +516,13 @@ fn target_failure(
     let mut evidence = ProbeEvidence::pending(target, reason);
     evidence.contract_confirmed = session.is_some();
     evidence.market_session = session;
-    let stop = matches!(
-        reason,
-        Reason::SubscriptionTimeout | Reason::GatewayDisconnected
-    )
-    .then_some(reason);
+    // A transport error starting a line leaves its allocation unknown. A
+    // contract lookup has no line to release.
+    let stop = match reason {
+        Reason::SubscriptionTimeout | Reason::GatewayDisconnected => Some(reason),
+        Reason::TransportFailure if session.is_some() => Some(reason),
+        _ => None,
+    };
     (evidence, stop)
 }
 

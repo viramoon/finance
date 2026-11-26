@@ -10,7 +10,7 @@ finance-ib 使用 Rust ibapi 3.2.0 的本地源码补丁，保留 Nautilus 锁�
 | heartbeat_ms、read_timeout_ms | IB_HEARTBEAT_MS、IB_READ_TIMEOUT_MS | 毫秒，应用层请求 server time |
 | backoff_initial_ms、backoff_max_ms、jitter_ms | IB_BACKOFF_INITIAL_MS、IB_BACKOFF_MAX_MS、IB_JITTER_MS | 毫秒，指数增长加随机抖动后的总间隔有上限 |
 
-Gateway 可能仍能响应 server time，但交易所行情连接已经中断。连接管理器从握手前订阅 IB 系统通知，收到 1100/1101/1102、1300、2103、2105 或 2110 就关闭旧会话并重走账户校验、订阅、补数与对账；正常的 2104 行情场连接成功通知不会触发重连。Finance 的 paper 客户端禁用 SDK 内部自动重连，TCP 断开即结束该连接的账户核验和订阅。collector 由连接管理器按退避策略新建连接，每次先重新校验受管账户。
+Gateway 可能仍能响应 server time，但交易所行情连接已经中断。连接管理器从握手前订阅 IB 系统通知，收到 1100/1101/1102、1300、2103、2105 或 2110 就关闭旧会话并重走账户校验、订阅、补数与对账；正常的 2104 行情场连接成功通知不会触发重连。Finance 的 paper 客户端禁用 SDK 内部自动重连，TCP 断开即结束该连接的账户核验和订阅。SDK 在握手和运行期分发时识别这些故障码，全局通知、带请求 ID 的通知以及空闲时到达的通知都能结束旧连接。collector 由连接管理器按退避策略新建连接，每次先重新校验受管账户。新连接返回空清单、混合账户或实盘账户时，管理器关闭连接并停止恢复。
 
 ## 手工核验
 
@@ -38,7 +38,15 @@ IB_LIVE_TEST=1 scripts/check-ib-entitlements.sh \
 
 可省略各项人工确认标志。省略 `--opra-con-id` 时 OPRA 保持 `pending/option_not_selected`，启动失败仍记录于报告的 `failure` 和股票结果。脱敏 JSON 按产品给出结论和各目标原因，附实际档位、双边报价有效性、接收时间、交易时段和期权 OI/Greeks 是否收到。期权用固定目标标签。摘要省略账户、地址、合约 ID、行情值和供应商原始错误文本。双边时间取两个价格接收时间中较早者。可识别的权限、数据共享和限频通知映射为固定原因。退出码 0 表示扫测完成，产品是否通过由 JSON 判断。启动失败或因连接、订阅超时或取消失败中断时返回非零。若已有非空的 `IBAPI_RECORDING_DIR`，探针以 `invalid_configuration` 拒绝连接，以免 SDK 写出原始报文。
 
-检测到会话断线后，探针停止扫测，并在结束 SDK 分发任务后输出 `failure=gateway_disconnected`。活动订阅先发现断线时，后续取消失败或超时仍保留该断线原因。
+探针在关闭连接并等待 SDK 分发任务退出后输出报告。扫测中断时，已完成标的保留原结论，当前标的保留已收到的证据，未开始的标的记为 `sweep_stopped`。未选择的 OPRA 合约始终记为 `option_not_selected`。当前请求已收到明确无许可通知时，标的保留 `not_entitled`，顶层 `failure` 另记中断原因。
+
+| 扫测中观察到的故障 | 顶层 `failure` 与后续动作 |
+| --- | --- |
+| 合约确认、订阅、读取或取消首次检测到断线，或收到使会话失效的 IB 通知 | `gateway_disconnected`，停止扫测。取消报文已写出后发现断线也适用。读取已发现断线时，后续取消结果保留该原因。 |
+| 开始订阅时超时，或出现其他传输错误 | 分别为 `subscription_timeout` 或 `transport_failure`。订阅行的分配结果未知，停止扫测。 |
+| 取消写入遇到其他错误或超过时限 | `cancel_failed`，停止扫测。 |
+| 单个合约确认超时，连接仍可用 | 当前标的记为 `request_timeout`。此阶段尚未分配行情行，继续下一项。 |
+| 读取遇到请求级错误或流结束，取消成功且会话可用 | 当前标的保留请求原因，继续下一项。 |
 
 | 结论 | 判断依据 |
 | --- | --- |
@@ -55,7 +63,7 @@ IB_LIVE_TEST=1 cargo test --locked -p finance-ib --test paper opt_in_paper_entit
 
 ### 行情请求接口
 
-`finance_ib::market` 提供 `MarketDataSource::confirm` 和 `subscribe`。实时实现通过 `ConnectionManager::open_market` 打开已验证的专用 paper 会话，并固定该会话的请求档位以允许 IB 回退。订阅只接受本会话内已确认的合约。`MarketRequest::key()` 提供 `(con_id, product, parameters)`，其中参数包含是否请求期权 OI。`MarketSubscription` 提供请求 ID、事件读取和显式取消。取消返回本地写入结果，仍没有 Gateway 确认回执。写入失败或被中断时，会话失效并拒绝后续订阅。会话拥有者通过 `PaperMarket::disconnected` 监测会话失效，通过 `close` 结束会话。断线后须重新调用 `open_market` 核验账户，再在新会话中确认合约。F9b 接管限速、并发预算、排队、去重和期权链发现。
+`finance_ib::market` 提供 `MarketDataSource::confirm` 和 `subscribe`。实时实现通过 `ConnectionManager::open_market` 打开已验证的专用 paper 会话，并固定该会话的请求档位以允许 IB 回退。订阅只接受本会话内已确认的合约。`MarketRequest::key()` 提供 `(con_id, product, parameters)`，其中参数包含是否请求期权 OI。`MarketSubscription` 提供请求 ID、事件读取和显式取消。取消成功表示报文已在本地写完且返回时会话仍可用，Gateway 不提供取消回执。成功后可重复取消，读取返回流结束。订阅或取消写入失败、超时、被调用方中断，或调用方直接释放活动订阅，都会使整个会话失效，唤醒等待中的读取并拒绝新请求。要继续复用会话，调用方须显式等待 `cancel` 成功。会话拥有者可通过 `PaperMarket::disconnected` 等待失效，通过 `close` 结束分发并释放底层连接。断线后须重新调用 `open_market` 核验账户，再在新会话中确认合约。F9b 接管限速、并发预算、排队、去重和期权链发现。
 
 行情流提供实际类型、L1 bid/ask/last 价格与数量、期权 OI、带来源的 Greeks 和脱敏通知。顶档 Protobuf 数量和 `TickSize` 传来的 OI 用原十进制字符串构造 F1 `DecimalText`，保留有效范围内的全部位数及小数位。期权 OI 使用 streaming generic tick `101`，显式零值与缺失分别处理。`TickGeneric` 的数值在供应商报文中为 binary64，OI 只接受能精确转成整数的值。顶档价格和期权计算字段由 Protobuf 传输 binary64，在进入 finance 时转成可往返的 `DecimalText`。Greeks 区分 bid、ask、last 和 model，无法表示或缺失的字段留空。事件保留本地 UTC 接收时间。last 更新为顶档采样。期权实时异动线索、历史逐笔核验和场所深度由后续任务处理。
 

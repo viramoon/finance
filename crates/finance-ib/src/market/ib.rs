@@ -21,26 +21,15 @@ use ibapi::{
     prelude::StreamExt,
     subscriptions::{Subscription, SubscriptionItem},
 };
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 use time::{Date, PrimitiveDateTime, Time, macros::format_description};
 use time_tz::{OffsetDateTimeExt, PrimitiveDateTimeExt, Tz, timezones};
-use tokio::{
-    sync::Mutex,
-    time::{sleep, timeout},
-};
+use tokio::{sync::Mutex, time::timeout};
 
 /// A verified paper session with streaming L1 access. Obtain it from the
 /// connection manager so account verification precedes market requests.
 pub struct PaperMarket {
     peer: Arc<PaperPeer>,
-    invalidated: Arc<AtomicBool>,
     timeout: Duration,
     confirmed: Mutex<HashMap<i32, ConfirmedContract>>,
 }
@@ -49,57 +38,64 @@ impl PaperMarket {
     pub(crate) async fn new(peer: Arc<PaperPeer>, bound: Duration) -> Result<Self, MarketError> {
         let market = Self {
             peer,
-            invalidated: Arc::new(AtomicBool::new(false)),
             timeout: bound,
             confirmed: Mutex::new(HashMap::new()),
         };
-        check_session(&market.peer, &market.invalidated)?;
         // This is a session-wide preference. Gateway can still return type 1
         // for an entitled request. Only callbacks identify the actual type.
-        timeout(
-            bound,
-            market
-                .peer
-                .client
-                .switch_market_data_type(IbDataType::Delayed),
-        )
-        .await
-        .map_err(|_| MarketError::Timeout)?
-        .map_err(transport_error)?;
-        check_session(&market.peer, &market.invalidated)?;
+        market
+            .peer
+            .while_connected(bounded_request(
+                bound,
+                market
+                    .peer
+                    .client
+                    .switch_market_data_type(IbDataType::Delayed),
+            ))
+            .await?;
         Ok(market)
     }
 
     pub async fn close(&self) {
-        self.invalidated.store(true, Ordering::Relaxed);
         self.peer.close().await;
     }
 
     /// The session owner can select on this alongside its market requests.
     /// Global farm notices are separate from request-scoped data and notices.
     pub async fn disconnected(&self) -> MarketError {
-        let check_socket = async {
-            // A dropped socket ends this verified peer. The poll only detects
-            // that terminal state and other latched market invalidations.
-            while check_session(&self.peer, &self.invalidated).is_ok() {
-                sleep(Duration::from_millis(100)).await;
-            }
-        };
-        tokio::select! {
-            _ = self.peer.disconnected() => {},
-            _ = check_socket => {},
-        }
-        self.invalidated.store(true, Ordering::Relaxed);
+        self.peer.disconnected().await;
         MarketError::Disconnected
     }
 }
 
-fn check_session(peer: &PaperPeer, invalidated: &AtomicBool) -> Result<(), MarketError> {
-    if invalidated.load(Ordering::Relaxed) || !peer.client.is_connected() {
-        invalidated.store(true, Ordering::Relaxed);
-        return Err(MarketError::Disconnected);
+impl PaperPeer {
+    // Observe queued notices before starting IO, interrupt pending IO, and
+    // latch a disconnect reported by the operation even on a writable socket.
+    async fn while_connected<T>(
+        &self,
+        operation: impl Future<Output = Result<T, MarketError>>,
+    ) -> Result<T, MarketError> {
+        let result = tokio::select! {
+            biased;
+            _ = self.disconnected() => return Err(MarketError::Disconnected),
+            result = operation => result,
+        };
+        if matches!(result, Err(MarketError::Disconnected)) || !self.is_active() {
+            self.invalidate();
+            return Err(MarketError::Disconnected);
+        }
+        result
     }
-    Ok(())
+}
+
+async fn bounded_request<T>(
+    bound: Duration,
+    request: impl Future<Output = Result<T, ibapi::Error>>,
+) -> Result<T, MarketError> {
+    timeout(bound, request)
+        .await
+        .map_err(|_| MarketError::Timeout)?
+        .map_err(transport_error)
 }
 
 fn sdk_query(query: &ContractQuery) -> Result<Contract, MarketError> {
@@ -132,16 +128,19 @@ fn sdk_query(query: &ContractQuery) -> Result<Contract, MarketError> {
 
 fn transport_error(error: ibapi::Error) -> MarketError {
     match error {
+        error if crate::is_disconnect(&error) => MarketError::Disconnected,
+        ibapi::Error::Io(io)
+            if matches!(
+                io.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            ) =>
+        {
+            MarketError::Timeout
+        }
         ibapi::Error::Notice(notice) if notice_kind(notice.code) == MarketNotice::NotEntitled => {
             MarketError::NotEntitled
         }
-        ibapi::Error::Io(_)
-        | ibapi::Error::ConnectionFailed
-        | ibapi::Error::ConnectionReset
-        | ibapi::Error::ConnectionRejected(_)
-        | ibapi::Error::EndOfStream
-        | ibapi::Error::UnexpectedEndOfStream
-        | ibapi::Error::Shutdown => MarketError::Disconnected,
+        ibapi::Error::Notice(notice) if notice.code == 200 => MarketError::UnconfirmedContract,
         _ => MarketError::Transport,
     }
 }
@@ -162,28 +161,26 @@ impl MarketDataSource for PaperMarket {
     type Subscription = PaperSubscription;
 
     async fn confirm(&self, query: &ContractQuery) -> Result<ConfirmedContract, MarketError> {
-        check_session(&self.peer, &self.invalidated)?;
-        let contract = sdk_query(query)?;
-        let details = timeout(self.timeout, self.peer.client.contract_details(&contract))
+        self.peer
+            .while_connected(async {
+                let contract = sdk_query(query)?;
+                let details =
+                    bounded_request(self.timeout, self.peer.client.contract_details(&contract))
+                        .await?;
+                let confirmation = confirm_details(query, details, Utc::now())?;
+                self.confirmed
+                    .lock()
+                    .await
+                    .insert(confirmation.con_id, confirmation.clone());
+                Ok(confirmation)
+            })
             .await
-            .map_err(|_| MarketError::Timeout)?
-            .map_err(|error| match error {
-                ibapi::Error::Notice(notice) if notice.code == 200 => {
-                    MarketError::UnconfirmedContract
-                }
-                error => transport_error(error),
-            })?;
-        check_session(&self.peer, &self.invalidated)?;
-        let confirmation = confirm_details(query, details, Utc::now())?;
-        self.confirmed
-            .lock()
-            .await
-            .insert(confirmation.con_id, confirmation.clone());
-        Ok(confirmation)
     }
 
     async fn subscribe(&self, request: &MarketRequest) -> Result<Self::Subscription, MarketError> {
-        check_session(&self.peer, &self.invalidated)?;
+        if !self.peer.is_active() {
+            return Err(MarketError::Disconnected);
+        }
         let confirmed = request.contract();
         if self.confirmed.lock().await.get(&confirmed.con_id) != Some(confirmed) {
             return Err(MarketError::UnconfirmedContract);
@@ -201,20 +198,17 @@ impl MarketDataSource for PaperMarket {
         if interest_right.is_some() {
             builder = builder.generic_ticks(&[generic_tick::OPTION_OPEN_INTEREST]);
         }
-        let subscription = timeout(self.timeout, builder.subscribe_exact())
-            .await
-            .map_err(|_| {
-                // The SDK may have sent the request before yielding a handle.
-                self.invalidated.store(true, Ordering::Relaxed);
-                MarketError::Timeout
-            })?
-            .map_err(transport_error)?;
-        check_session(&self.peer, &self.invalidated)?;
+        let mut write = LineWrite::new(&self.peer);
+        let subscription = self
+            .peer
+            .while_connected(bounded_request(self.timeout, builder.subscribe_exact()))
+            .await?;
         let request_id = subscription.request_id().ok_or(MarketError::Transport)?;
+        write.completed = true;
         Ok(PaperSubscription {
             subscription: Some(subscription),
             peer: self.peer.clone(),
-            invalidated: self.invalidated.clone(),
+            timeout: self.timeout,
             request_id,
             interest_right,
             pending: None,
@@ -447,21 +441,41 @@ fn liquid_hours_row(row: &str, tz: &Tz) -> Option<Vec<LiquidHours>> {
 pub struct PaperSubscription {
     subscription: Option<Subscription<ExactTickTypes>>,
     peer: Arc<PaperPeer>,
-    invalidated: Arc<AtomicBool>,
+    timeout: Duration,
     request_id: i32,
     interest_right: Option<OptionRight>,
     pending: Option<MarketEvent>,
 }
 
-struct CancelWrite<'a> {
-    invalidated: &'a AtomicBool,
-    sent: bool,
+// An interrupted stream request or cancellation may already be on the wire.
+// No other line can rely on this session's allocation until it is reopened.
+struct LineWrite<'a> {
+    peer: &'a PaperPeer,
+    completed: bool,
 }
 
-impl Drop for CancelWrite<'_> {
+impl<'a> LineWrite<'a> {
+    fn new(peer: &'a PaperPeer) -> Self {
+        Self {
+            peer,
+            completed: false,
+        }
+    }
+}
+
+impl Drop for LineWrite<'_> {
     fn drop(&mut self) {
-        if !self.sent {
-            self.invalidated.store(true, Ordering::Relaxed);
+        if !self.completed {
+            self.peer.invalidate();
+        }
+    }
+}
+
+impl Drop for PaperSubscription {
+    fn drop(&mut self) {
+        if self.subscription.is_some() {
+            // The SDK makes a best-effort cancel on drop, without a write result.
+            self.peer.invalidate();
         }
     }
 }
@@ -473,55 +487,50 @@ impl MarketSubscription for PaperSubscription {
     }
 
     async fn next(&mut self) -> Result<Option<MarketEvent>, MarketError> {
-        check_session(&self.peer, &self.invalidated)?;
-        if let Some(event) = self.pending.take() {
-            return Ok(Some(event));
-        }
-        let Some(subscription) = &mut self.subscription else {
-            return Ok(None);
-        };
-        while let Some(item) = subscription.next().await {
-            check_session(&self.peer, &self.invalidated)?;
-            match item {
-                Ok(SubscriptionItem::Data(tick)) => {
-                    let (event, pending) = tick_events(tick, self.interest_right, Utc::now());
-                    if let Some(event) = event {
-                        self.pending = pending;
-                        return Ok(Some(event));
+        self.peer
+            .while_connected(async {
+                if let Some(event) = self.pending.take() {
+                    return Ok(Some(event));
+                }
+                let Some(subscription) = &mut self.subscription else {
+                    return Ok(None);
+                };
+                while let Some(item) = subscription.next().await {
+                    match item {
+                        Ok(SubscriptionItem::Data(tick)) => {
+                            let (event, pending) =
+                                tick_events(tick, self.interest_right, Utc::now());
+                            if let Some(event) = event {
+                                self.pending = pending;
+                                return Ok(Some(event));
+                            }
+                        }
+                        Ok(SubscriptionItem::Notice(notice))
+                        | Err(ibapi::Error::Notice(notice)) => {
+                            if crate::invalidates_market_session(notice.code) {
+                                return Err(MarketError::Disconnected);
+                            }
+                            return Ok(Some(MarketEvent::Notice(notice_kind(notice.code))));
+                        }
+                        Err(error) => return Err(transport_error(error)),
                     }
                 }
-                Ok(SubscriptionItem::Notice(notice)) | Err(ibapi::Error::Notice(notice)) => {
-                    if crate::invalidates_market_session(notice.code) {
-                        self.invalidated.store(true, Ordering::Relaxed);
-                        return Err(MarketError::Disconnected);
-                    }
-                    return Ok(Some(MarketEvent::Notice(notice_kind(notice.code))));
-                }
-                Err(error) => {
-                    let error = transport_error(error);
-                    if error == MarketError::Disconnected {
-                        self.invalidated.store(true, Ordering::Relaxed);
-                    }
-                    return Err(error);
-                }
-            }
-        }
-        check_session(&self.peer, &self.invalidated)?;
-        Ok(None)
+                Ok(None)
+            })
+            .await
     }
 
     async fn cancel(&mut self) -> Result<(), MarketError> {
         self.pending = None;
-        if let Some(subscription) = self.subscription.take() {
-            // A failed or interrupted write leaves the line allocation uncertain.
-            let mut write = CancelWrite {
-                invalidated: &self.invalidated,
-                sent: false,
-            };
-            subscription.try_cancel().await.map_err(transport_error)?;
-            write.sent = true;
-        }
-        check_session(&self.peer, &self.invalidated)
+        let Some(subscription) = self.subscription.take() else {
+            return self.peer.while_connected(async { Ok(()) }).await;
+        };
+        let mut write = LineWrite::new(&self.peer);
+        self.peer
+            .while_connected(bounded_request(self.timeout, subscription.try_cancel()))
+            .await?;
+        write.completed = true;
+        Ok(())
     }
 }
 

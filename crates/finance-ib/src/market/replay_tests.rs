@@ -2,6 +2,7 @@ use super::*;
 use crate::entitlements::{ProbeOptions, probe_open_market};
 use crate::market::RequestParameters;
 use ibapi::replay::{MarketReplay, MarketWrite};
+use tokio::time::sleep;
 
 const WAIT: Duration = Duration::from_secs(1);
 const COMBINED_SIZE: &str = "9007199254740993";
@@ -12,8 +13,8 @@ const STANDALONE_SIZE: &str = "0.01234567890123456789012345";
 // decoding and the finance subscription are the production implementations.
 async fn paper_market() -> (MarketReplay, PaperMarket) {
     let (replay, client) = MarketReplay::open().unwrap();
-    let notices = Mutex::new(client.notice_stream().unwrap());
-    let peer = Arc::new(PaperPeer { client, notices });
+    let notices = client.notice_stream().unwrap();
+    let peer = Arc::new(PaperPeer::new(client, notices));
     let market = PaperMarket::new(peer, WAIT).await.unwrap();
     assert_eq!(replay.writes(), [MarketWrite::SelectType(Some(3))]);
     (replay, market)
@@ -181,8 +182,8 @@ async fn sdk_cancel_write_failure_invalidates_session_before_another_request() {
 async fn entitlement_probe_reports_disconnection_during_stalled_sdk_reconnect() {
     let read_timeout = Duration::from_secs(5);
     let (replay, client) = MarketReplay::open_with_dispatcher().unwrap();
-    let notices = Mutex::new(client.notice_stream().unwrap());
-    let peer = Arc::new(PaperPeer { client, notices });
+    let notices = client.notice_stream().unwrap();
+    let peer = Arc::new(PaperPeer::new(client, notices));
     let market = PaperMarket::new(peer, read_timeout).await.unwrap();
 
     let stall_reconnect = async {
@@ -250,8 +251,8 @@ async fn paper_market_rejects_old_requests_without_reconnecting() {
 
     let (replay, client) =
         MarketReplay::open_with_builder(crate::IbTransport::paper_client_builder()).unwrap();
-    let notices = Mutex::new(client.notice_stream().unwrap());
-    let market = PaperMarket::new(Arc::new(PaperPeer { client, notices }), WAIT)
+    let notices = client.notice_stream().unwrap();
+    let market = PaperMarket::new(Arc::new(PaperPeer::new(client, notices)), WAIT)
         .await
         .unwrap();
     let cached = request(&market, 91001, ContractKind::Equity).await;
@@ -282,8 +283,8 @@ async fn paper_market_rejects_old_requests_without_reconnecting() {
 async fn active_probe_reports_disconnection_before_session_poll() {
     let (replay, client) =
         MarketReplay::open_with_builder(crate::IbTransport::paper_client_builder()).unwrap();
-    let notices = Mutex::new(client.notice_stream().unwrap());
-    let market = PaperMarket::new(Arc::new(PaperPeer { client, notices }), WAIT)
+    let notices = client.notice_stream().unwrap();
+    let market = PaperMarket::new(Arc::new(PaperPeer::new(client, notices)), WAIT)
         .await
         .unwrap();
 
@@ -334,3 +335,6 @@ async fn active_probe_reports_disconnection_before_session_poll() {
     );
     assert_eq!(replay.reconnect_attempts(), 0);
 }
+
+#[path = "lifecycle_tests.rs"]
+mod lifecycle;

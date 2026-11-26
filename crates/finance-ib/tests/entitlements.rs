@@ -34,14 +34,16 @@ enum Fault {
     #[default]
     None,
     Cancel,
+    CancelOnly(CancelOutcome),
     ConfirmTimeout,
     SubscribeTimeout,
     SubscribeReportedTimeout,
-    ActiveDisconnect(CancelAfterDisconnect),
+    ActiveDisconnect(CancelOutcome),
+    ReadError(MarketError, CancelOutcome),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CancelAfterDisconnect {
+enum CancelOutcome {
     Success,
     Disconnected,
     Transport,
@@ -55,6 +57,7 @@ struct SyntheticSource {
     cancellations: Arc<AtomicUsize>,
     fault: Fault,
     uniform_data_types: Option<[MarketDataType; 2]>,
+    line_fault_target: Option<&'static str>,
 }
 
 struct SyntheticLine {
@@ -191,7 +194,11 @@ impl MarketDataSource for SyntheticSource {
             events: events.into(),
             active: self.active.clone(),
             cancellations: self.cancellations.clone(),
-            fault: self.fault,
+            fault: if self.line_fault_target.is_none_or(|target| target == symbol) {
+                self.fault
+            } else {
+                Fault::None
+            },
             ends: self.uniform_data_types.is_none() && symbol == "TSLA",
         })
     }
@@ -208,6 +215,9 @@ impl MarketSubscription for SyntheticLine {
             if matches!(self.fault, Fault::ActiveDisconnect(_)) {
                 return Err(MarketError::Disconnected);
             }
+            if let Fault::ReadError(error, _) = self.fault {
+                return Err(error);
+            }
             return if self.ends { Ok(None) } else { pending().await };
         };
         if !delay.is_zero() {
@@ -218,15 +228,18 @@ impl MarketSubscription for SyntheticLine {
 
     async fn cancel(&mut self) -> Result<(), MarketError> {
         self.cancellations.fetch_add(1, Ordering::SeqCst);
-        match self.fault {
-            Fault::ActiveDisconnect(CancelAfterDisconnect::Disconnected) => {
-                return Err(MarketError::Disconnected);
-            }
-            Fault::Cancel | Fault::ActiveDisconnect(CancelAfterDisconnect::Transport) => {
-                return Err(MarketError::Transport);
-            }
-            Fault::ActiveDisconnect(CancelAfterDisconnect::Timeout) => return pending().await,
-            _ => {}
+        let outcome = match self.fault {
+            Fault::CancelOnly(outcome)
+            | Fault::ActiveDisconnect(outcome)
+            | Fault::ReadError(_, outcome) => outcome,
+            Fault::Cancel => CancelOutcome::Transport,
+            _ => CancelOutcome::Success,
+        };
+        match outcome {
+            CancelOutcome::Disconnected => return Err(MarketError::Disconnected),
+            CancelOutcome::Transport => return Err(MarketError::Transport),
+            CancelOutcome::Timeout => return pending().await,
+            CancelOutcome::Success => {}
         }
         assert!(self.active.swap(false, Ordering::SeqCst));
         Ok(())
@@ -512,10 +525,10 @@ async fn uncertain_subscribe_or_failed_cancel_stops_opening_lines() {
 #[tokio::test(start_paused = true)]
 async fn active_subscription_disconnect_remains_the_failure_after_cancellation() {
     for outcome in [
-        CancelAfterDisconnect::Success,
-        CancelAfterDisconnect::Disconnected,
-        CancelAfterDisconnect::Transport,
-        CancelAfterDisconnect::Timeout,
+        CancelOutcome::Success,
+        CancelOutcome::Disconnected,
+        CancelOutcome::Transport,
+        CancelOutcome::Timeout,
     ] {
         let source = SyntheticSource {
             fault: Fault::ActiveDisconnect(outcome),
@@ -557,6 +570,44 @@ async fn active_subscription_disconnect_remains_the_failure_after_cancellation()
             json["products"][0]["probes"][0]["reason"],
             "gateway_disconnected"
         );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancellation_can_be_the_first_failure_after_valid_quotes() {
+    for (outcome, reason) in [
+        (CancelOutcome::Disconnected, Reason::GatewayDisconnected),
+        (CancelOutcome::Transport, Reason::CancelFailed),
+        (CancelOutcome::Timeout, Reason::CancelFailed),
+    ] {
+        let source = SyntheticSource {
+            fault: Fault::CancelOnly(outcome),
+            ..SyntheticSource::default()
+        };
+        let report = probe_products(
+            &source,
+            ProbeOptions {
+                opra_con_id: Some(OPRA_CON_ID),
+                equity_l1_permission_confirmed: true,
+                ..ProbeOptions::default()
+            },
+            REQUEST_TIME,
+        )
+        .await;
+        assert_eq!(report.failure, Some(reason), "{outcome:?}");
+        let [equity, opra] = &report.products;
+        let first = &equity.probes[0];
+        assert!(first.contract_confirmed && first.bid_ask_valid);
+        assert_eq!(first.market_data_type, Some(1));
+        assert_eq!((first.verdict, first.reason), (Verdict::Pending, reason));
+        assert!(
+            equity.probes[1..]
+                .iter()
+                .all(|p| p.reason == Reason::SweepStopped)
+        );
+        assert_eq!(opra.probes[0].reason, Reason::SweepStopped);
+        assert_eq!(source.confirmed.lock().unwrap().len(), 1);
+        assert_eq!(source.cancellations.load(Ordering::SeqCst), 1);
     }
 }
 
@@ -671,4 +722,85 @@ fn entitlements_cli_rejects_sdk_recording_before_connect() {
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["failure"], "invalid_configuration");
     assert!(!Path::new(&recording_path).exists());
+}
+
+#[tokio::test(start_paused = true)]
+async fn read_errors_and_cleanup_have_distinct_target_and_sweep_results() {
+    for (read, cleanup, failure, target) in [
+        (
+            MarketError::Transport,
+            CancelOutcome::Success,
+            None,
+            Reason::TransportFailure,
+        ),
+        (
+            MarketError::Transport,
+            CancelOutcome::Transport,
+            Some(Reason::CancelFailed),
+            Reason::CancelFailed,
+        ),
+        (
+            MarketError::Transport,
+            CancelOutcome::Disconnected,
+            Some(Reason::GatewayDisconnected),
+            Reason::GatewayDisconnected,
+        ),
+        (
+            MarketError::NotEntitled,
+            CancelOutcome::Disconnected,
+            Some(Reason::GatewayDisconnected),
+            Reason::NotEntitled,
+        ),
+    ] {
+        for symbol in ["QQQ", PRIVATE_OPTION] {
+            let source = SyntheticSource {
+                fault: Fault::ReadError(read, cleanup),
+                line_fault_target: Some(symbol),
+                uniform_data_types: Some([MarketDataType::Realtime; 2]),
+                ..SyntheticSource::default()
+            };
+            let report = probe_products(
+                &source,
+                ProbeOptions {
+                    opra_con_id: Some(OPRA_CON_ID),
+                    equity_l1_permission_confirmed: true,
+                    opra_permission_confirmed: true,
+                },
+                REQUEST_TIME,
+            )
+            .await;
+            assert_eq!(report.failure, failure);
+            let [equity, opra] = &report.products;
+            let row = if symbol == PRIVATE_OPTION {
+                assert!(equity.probes.iter().all(|p| p.verdict == Verdict::Passed));
+                &opra.probes[0]
+            } else {
+                let scanned = failure.is_none();
+                assert_eq!(opra.verdict == Verdict::Passed, scanned);
+                assert!(equity.probes[1..].iter().all(|p| if scanned {
+                    p.verdict == Verdict::Passed
+                } else {
+                    p.reason == Reason::SweepStopped
+                }));
+                &equity.probes[0]
+            };
+            assert_eq!(row.reason, target);
+            assert_eq!(
+                row.verdict,
+                if read == MarketError::NotEntitled {
+                    Verdict::NotEntitled
+                } else {
+                    Verdict::Pending
+                }
+            );
+            assert!(row.contract_confirmed && row.bid_ask_valid);
+            let attempted = if symbol == "QQQ" && failure.is_some() {
+                1
+            } else {
+                10
+            };
+            assert_eq!(source.confirmed.lock().unwrap().len(), attempted);
+            assert_eq!(source.cancellations.load(Ordering::SeqCst), attempted);
+        }
+    }
 }
