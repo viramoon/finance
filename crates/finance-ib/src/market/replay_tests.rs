@@ -1,4 +1,5 @@
 use super::*;
+use crate::entitlements::{ProbeOptions, probe_open_market};
 use crate::market::RequestParameters;
 use ibapi::replay::{MarketReplay, MarketWrite};
 
@@ -174,4 +175,58 @@ async fn sdk_cancel_write_failure_invalidates_session_before_another_request() {
     ));
     assert_eq!(replay.writes(), before_failure);
     market.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn entitlement_probe_reports_disconnection_during_stalled_sdk_reconnect() {
+    let read_timeout = Duration::from_secs(5);
+    let (replay, client) = MarketReplay::open_with_dispatcher().unwrap();
+    let notices = Mutex::new(client.notice_stream().unwrap());
+    let peer = Arc::new(PaperPeer { client, notices });
+    let market = PaperMarket::new(peer, read_timeout).await.unwrap();
+
+    let stall_reconnect = async {
+        replay.wait_for_writes(2).await;
+        assert!(matches!(
+            replay.writes().last(),
+            Some(MarketWrite::Confirm(Some(_)))
+        ));
+        replay.disconnect_and_stall_reconnect();
+        replay.wait_for_stalled_handshake().await;
+        assert!(replay.handshake_is_pending());
+    };
+    let (report, ()) = timeout(WAIT, async {
+        tokio::join!(
+            probe_open_market(&market, ProbeOptions::default(), read_timeout),
+            stall_reconnect
+        )
+    })
+    .await
+    .expect("the probe did not close its disconnected SDK session");
+
+    let report = serde_json::to_value(report).unwrap();
+    assert_eq!(report["failure"], "gateway_disconnected");
+    assert_eq!(report["products"][0]["verdict"], "pending");
+    assert_eq!(
+        report["products"][1]["probes"][0]["reason"],
+        "option_not_selected"
+    );
+    // Keep the market and replay alive to detect background IO surviving close.
+    assert!(!replay.handshake_is_pending());
+    assert_eq!(replay.reconnect_attempts(), 1);
+    assert_eq!(replay.writes().len(), 2);
+    assert!(!market.peer.client.is_connected());
+}
+
+#[tokio::test(start_paused = true)]
+async fn immediate_sdk_close_joins_dispatcher_without_reconnect() {
+    let (replay, client) = MarketReplay::open_with_dispatcher().unwrap();
+    replay.disconnect_and_stall_reconnect();
+    timeout(WAIT, client.disconnect())
+        .await
+        .expect("the SDK did not stop its newly started dispatcher");
+    sleep(Duration::from_millis(1)).await;
+    assert!(!client.is_connected());
+    assert_eq!(replay.reconnect_attempts(), 0);
+    assert!(!replay.handshake_is_pending());
 }

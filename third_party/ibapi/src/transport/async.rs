@@ -13,7 +13,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::StreamExt;
 use log::{debug, error, info, warn};
-use tokio::sync::{broadcast, mpsc, Notify, RwLock};
+use tokio::sync::{broadcast, mpsc, watch, Mutex, RwLock};
 use tokio::task;
 use tokio::time::Duration;
 use tokio_stream::wrappers::BroadcastStream;
@@ -219,20 +219,16 @@ pub struct AsyncTcpMessageBus<S: AsyncStream = AsyncTcpSocket> {
     /// Channel for cleanup signals
     cleanup_sender: mpsc::UnboundedSender<CleanupSignal>,
     /// Handle to the message processing task
-    process_task: Arc<RwLock<Option<task::JoinHandle<()>>>>,
-    /// Shutdown flag
-    shutdown_requested: Arc<AtomicBool>,
-    /// Notification to wake the message loop on shutdown
-    shutdown_notify: Arc<Notify>,
+    process_task: Mutex<Option<task::JoinHandle<()>>>,
+    /// Latched shutdown signal for the entire message loop, including reconnect.
+    shutdown_requested: watch::Sender<bool>,
     connected: Arc<AtomicBool>,
 }
 
 impl<S: AsyncStream> Drop for AsyncTcpMessageBus<S> {
     fn drop(&mut self) {
         debug!("dropping async tcp message bus");
-        // Set the shutdown flag and notify the message loop to exit
-        self.shutdown_requested.store(true, Ordering::Relaxed);
-        self.shutdown_notify.notify_waiters();
+        self.request_shutdown_sync();
     }
 }
 
@@ -264,9 +260,8 @@ impl<S: AsyncStream> AsyncTcpMessageBus<S> {
             execution_channels: Arc::new(RwLock::new(HashMap::new())),
             order_update_stream: Arc::new(RwLock::new(None)),
             cleanup_sender,
-            process_task: Arc::new(RwLock::new(None)),
-            shutdown_requested: Arc::new(AtomicBool::new(false)),
-            shutdown_notify: Arc::new(Notify::new()),
+            process_task: Mutex::new(None),
+            shutdown_requested: watch::Sender::new(false),
             connected: Arc::new(AtomicBool::new(true)),
         };
 
@@ -308,72 +303,64 @@ impl<S: AsyncStream> AsyncTcpMessageBus<S> {
 
     /// Start processing messages from TWS
     pub fn process_messages(self: Arc<Self>, _server_version: i32, _reconnect_delay: Duration) -> Result<(), Error> {
+        // Publish the handle before returning the client. An immediate disconnect
+        // must be able to join the task even before its first poll.
+        let mut process_task = self.process_task.try_lock().map_err(|_| Error::Shutdown)?;
+        if *self.shutdown_requested.borrow() {
+            return Err(Error::Shutdown);
+        }
+        if process_task.is_some() {
+            return Err(Error::InvalidArgument("message processing already started".into()));
+        }
         let message_bus = self.clone();
-        let shutdown_notify = self.shutdown_notify.clone();
+        let mut shutdown = self.shutdown_requested.subscribe();
+        *process_task = Some(task::spawn(async move {
+            // Shutdown permanently discards this session, so it can interrupt
+            // a frame read as well as reconnect backoff, dial, or handshake.
+            tokio::select! {
+                biased;
+                _ = shutdown.wait_for(|requested| *requested) => {
+                    debug!("Shutdown requested, stopping message processing");
+                }
+                _ = message_bus.dispatch_messages() => {}
+            }
+            message_bus.request_shutdown_sync();
+            message_bus.close_subscription_channels().await;
+        }));
 
-        let handle = task::spawn(async move {
-            loop {
-                // Use select with shutdown notification instead of a polling sleep.
-                // This prevents cancelling read_and_route_message mid-read, which
-                // would corrupt the TCP stream (read_exact is not cancellation-safe).
-                tokio::select! {
-                    _ = shutdown_notify.notified() => {
-                        debug!("Shutdown notification received, stopping message processing");
-                        break;
-                    }
-                    result = message_bus.read_and_route_message() => {
-                        use crate::client::error_handler::{is_connection_error, is_timeout_error};
+        Ok(())
+    }
 
-                        match result {
-                            Ok(_) => continue,
-                            Err(ref err) if is_timeout_error(err) => {
-                                if message_bus.shutdown_requested.load(Ordering::Relaxed) {
-                                    debug!("dispatcher task exiting");
-                                    break;
-                                }
-                                continue;
-                            }
-                            Err(ref err) if is_connection_error(err) => {
-                                error!("Connection error detected, attempting to reconnect: {err:?}");
-                                message_bus.connected.store(false, Ordering::Relaxed);
+    async fn dispatch_messages(&self) {
+        use crate::client::error_handler::{is_connection_error, is_timeout_error};
 
-                                match message_bus.connection.reconnect().await {
-                                    Ok(_) => {
-                                        info!("Successfully reconnected to TWS/Gateway");
-                                        message_bus.connected.store(true, Ordering::Relaxed);
-                                        message_bus.reset_channels().await;
-                                    }
-                                    Err(e) => {
-                                        error!("Failed to reconnect to TWS/Gateway: {e:?}");
-                                        message_bus.request_shutdown().await;
-                                        break;
-                                    }
-                                }
-                                continue;
-                            }
-                            Err(Error::Shutdown) => {
-                                error!("Received shutdown signal, stopping message processing.");
-                                break;
-                            }
-                            Err(err) => {
-                                error!("Error processing message (shutting down): {err:?}");
-                                message_bus.request_shutdown().await;
-                                break;
-                            }
+        loop {
+            match self.read_and_route_message().await {
+                Ok(()) => {}
+                Err(err) if is_timeout_error(&err) => {}
+                Err(err) if is_connection_error(&err) => {
+                    error!("Connection error detected, attempting to reconnect: {err:?}");
+                    self.connected.store(false, Ordering::Relaxed);
+
+                    match self.connection.reconnect().await {
+                        Ok(()) => {
+                            info!("Successfully reconnected to TWS/Gateway");
+                            self.connected.store(true, Ordering::Relaxed);
+                            self.reset_channels().await;
+                        }
+                        Err(err) => {
+                            error!("Failed to reconnect to TWS/Gateway: {err:?}");
+                            break;
                         }
                     }
                 }
+                Err(Error::Shutdown) => break,
+                Err(err) => {
+                    error!("Error processing message (shutting down): {err:?}");
+                    break;
+                }
             }
-        });
-
-        // Store the task handle
-        let process_task = self.process_task.clone();
-        tokio::spawn(async move {
-            let mut task_guard = process_task.write().await;
-            *task_guard = Some(handle);
-        });
-
-        Ok(())
+        }
     }
 
     /// Read a message and route it to the appropriate channel
@@ -387,11 +374,7 @@ impl<S: AsyncStream> AsyncTcpMessageBus<S> {
             RoutingDecision::ByMessageType(message_type) => self.route_to_shared_channel(message_type, message).await,
             RoutingDecision::SharedMessage(message_type) => self.route_to_shared_channel(message_type, message).await,
             RoutingDecision::Error(payload) => self.route_error_message(message, payload).await,
-            RoutingDecision::Shutdown => {
-                debug!("Received shutdown message, calling request_shutdown");
-                self.request_shutdown().await;
-                Err(Error::Shutdown)
-            }
+            RoutingDecision::Shutdown => Err(Error::Shutdown),
         }
     }
 
@@ -429,17 +412,8 @@ impl<S: AsyncStream> AsyncTcpMessageBus<S> {
         }
     }
 
-    /// Notify all waiting subscriptions about shutdown
-    async fn request_shutdown(&self) {
-        debug!("shutdown requested");
-
-        // Set the shutdown flag and mark as disconnected
-        self.connected.store(false, Ordering::Relaxed);
-        self.shutdown_requested.store(true, Ordering::Relaxed);
-        self.shutdown_notify.notify_waiters();
-
-        // Clear all channels - dropping the senders will close the channels
-        // and cause all receivers to get RecvError::Closed
+    /// Drop the senders so that outstanding subscriptions terminate.
+    async fn close_subscription_channels(&self) {
         {
             let mut channels = self.request_channels.write().await;
             channels.clear();
@@ -447,6 +421,11 @@ impl<S: AsyncStream> AsyncTcpMessageBus<S> {
 
         {
             let mut channels = self.order_channels.write().await;
+            channels.clear();
+        }
+
+        {
+            let mut channels = self.execution_channels.write().await;
             channels.clear();
         }
 
@@ -786,34 +765,30 @@ impl<S: AsyncStream> AsyncMessageBus for AsyncTcpMessageBus<S> {
 
     async fn ensure_shutdown(&self) {
         debug!("ensure_shutdown called");
+        self.request_shutdown_sync();
 
-        // Request shutdown
-        self.request_shutdown().await;
-
-        // Wait for the processing task to finish
-        let task_handle = {
-            let mut task_guard = self.process_task.write().await;
-            task_guard.take()
-        };
-
-        if let Some(handle) = task_handle {
-            debug!("Waiting for processing task to finish");
-            if let Err(e) = handle.await {
-                warn!("Error joining processing task: {e}");
+        let mut process_task = self.process_task.lock().await;
+        if let Some(handle) = process_task.as_mut() {
+            // Keep the handle registered while joining. Another close can still
+            // wait for the driver if this caller abandons its close future.
+            let result = handle.await;
+            *process_task = None;
+            match result {
+                Ok(()) => return,
+                Err(err) => warn!("Error joining processing task: {err}"),
             }
-            debug!("Processing task finished");
         }
+        self.close_subscription_channels().await;
     }
 
     fn request_shutdown_sync(&self) {
         debug!("sync shutdown requested");
         self.connected.store(false, Ordering::Relaxed);
-        self.shutdown_requested.store(true, Ordering::Relaxed);
-        self.shutdown_notify.notify_waiters();
+        self.shutdown_requested.send_replace(true);
     }
 
     fn is_connected(&self) -> bool {
-        self.connected.load(Ordering::Relaxed) && !self.shutdown_requested.load(Ordering::Relaxed)
+        self.connected.load(Ordering::Relaxed) && !*self.shutdown_requested.borrow()
     }
 }
 

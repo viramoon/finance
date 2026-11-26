@@ -363,10 +363,18 @@ pub async fn probe_paper(options: ProbeOptions) -> ProbeReport {
         Ok(market) => market,
         Err(error) => return ProbeReport::unavailable(options, error.into()),
     };
+    probe_open_market(&market, options, read_timeout).await
+}
+
+pub(crate) async fn probe_open_market(
+    market: &crate::market::PaperMarket,
+    options: ProbeOptions,
+    read_timeout: Duration,
+) -> ProbeReport {
     let report = tokio::select! {
         biased;
         error = market.disconnected() => ProbeReport::unavailable(options, error.into()),
-        report = probe_products(&market, options, read_timeout) => report,
+        report = probe_products(market, options, read_timeout) => report,
     };
     market.close().await;
     report

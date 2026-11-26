@@ -38,6 +38,8 @@ IB_LIVE_TEST=1 scripts/check-ib-entitlements.sh \
 
 可省略各项人工确认标志。省略 `--opra-con-id` 时 OPRA 保持 `pending/option_not_selected`，启动失败仍记录于报告的 `failure` 和股票结果。脱敏 JSON 按产品给出结论和各目标原因，附实际档位、双边报价有效性、接收时间、交易时段和期权 OI/Greeks 是否收到。期权用固定目标标签。摘要省略账户、地址、合约 ID、行情值和供应商原始错误文本。双边时间取两个价格接收时间中较早者。可识别的权限、数据共享和限频通知映射为固定原因。退出码 0 表示扫测完成，产品是否通过由 JSON 判断。启动失败或因连接、订阅超时或取消失败中断时返回非零。若已有非空的 `IBAPI_RECORDING_DIR`，探针以 `invalid_configuration` 拒绝连接，以免 SDK 写出原始报文。
 
+检测到会话断线后，探针停止扫测，并在结束 SDK 分发任务后输出 `failure=gateway_disconnected`。关闭信号会中断 SDK 正在等待的重连退避、TCP 连接或握手，即使对端没有响应。
+
 | 结论 | 判断依据 |
 | --- | --- |
 | `passed`（通过） | 常规交易时段的实际类型 `1`、同请求的有效双边报价、已独立核实的账户产品权限。 |
