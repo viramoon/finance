@@ -1,0 +1,584 @@
+{
+  "apiVersion": "fertile.finance/strategy/v1",
+  "components": [
+    {
+      "assets": [
+        "cash_equity"
+      ],
+      "availability": "session_close",
+      "description": "Rank eligible members by descending FactorValue and allocate equal TargetWeights to up to N members. Break equal scores by stable instrument ID.",
+      "engines": [
+        "nautilus_cash_equity"
+      ],
+      "factor_parameters": [
+        "factor"
+      ],
+      "id": "allocator.top_n@1.0.0",
+      "inputs": [
+        {
+          "series": "factor",
+          "unit": "referenced_factor_output_unit"
+        }
+      ],
+      "kind": "allocator",
+      "output": {
+        "kind": "target_weights",
+        "unit": "portfolio_weight"
+      },
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "factor": {
+            "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+            "type": "string"
+          },
+          "top_n": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "factor",
+          "top_n"
+        ],
+        "type": "object"
+      },
+      "position_state": [],
+      "supports_short": false,
+      "trigger": null,
+      "warmup": {
+        "sessions": 0,
+        "type": "fixed"
+      }
+    },
+    {
+      "assets": [
+        "cash_equity"
+      ],
+      "availability": "session_close",
+      "description": "Enter long when the position is flat and the observed factor is above the threshold.",
+      "engines": [
+        "nautilus_cash_equity"
+      ],
+      "factor_parameters": [
+        "factor"
+      ],
+      "id": "entry.above_when_flat@1.0.0",
+      "inputs": [
+        {
+          "series": "factor",
+          "unit": "referenced_factor_output_unit"
+        },
+        {
+          "series": "filled_position",
+          "unit": "shares"
+        }
+      ],
+      "kind": "entry",
+      "output": {
+        "kind": "enter_long_intent",
+        "unit": "none"
+      },
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "factor": {
+            "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+            "type": "string"
+          },
+          "threshold": {
+            "pattern": "^(?:-?(0|[1-9][0-9]{0,9})(\\.[0-9]{1,18})?)(?![\\s\\S])",
+            "type": "string"
+          }
+        },
+        "required": [
+          "factor",
+          "threshold"
+        ],
+        "type": "object"
+      },
+      "position_state": [
+        "filled_quantity"
+      ],
+      "supports_short": false,
+      "trigger": "level",
+      "warmup": {
+        "sessions": 0,
+        "type": "fixed"
+      }
+    },
+    {
+      "assets": [
+        "cash_equity"
+      ],
+      "availability": "session_close",
+      "description": "Enter long when the position is flat and the observed factor is below the threshold.",
+      "engines": [
+        "nautilus_cash_equity"
+      ],
+      "factor_parameters": [
+        "factor"
+      ],
+      "id": "entry.below_when_flat@1.0.0",
+      "inputs": [
+        {
+          "series": "factor",
+          "unit": "referenced_factor_output_unit"
+        },
+        {
+          "series": "filled_position",
+          "unit": "shares"
+        }
+      ],
+      "kind": "entry",
+      "output": {
+        "kind": "enter_long_intent",
+        "unit": "none"
+      },
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "factor": {
+            "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+            "type": "string"
+          },
+          "threshold": {
+            "pattern": "^(?:-?(0|[1-9][0-9]{0,9})(\\.[0-9]{1,18})?)(?![\\s\\S])",
+            "type": "string"
+          }
+        },
+        "required": [
+          "factor",
+          "threshold"
+        ],
+        "type": "object"
+      },
+      "position_state": [
+        "filled_quantity"
+      ],
+      "supports_short": false,
+      "trigger": "level",
+      "warmup": {
+        "sessions": 0,
+        "type": "fixed"
+      }
+    },
+    {
+      "assets": [
+        "cash_equity"
+      ],
+      "availability": "next_session_close",
+      "description": "Use the next session close for cash-equity simulation with instrument-master lot sizes.",
+      "engines": [
+        "nautilus_cash_equity"
+      ],
+      "factor_parameters": [],
+      "id": "execution.next_close_cash_equity@1.0.0",
+      "inputs": [
+        {
+          "series": "portfolio_target",
+          "unit": "portfolio_weight"
+        },
+        {
+          "series": "filled_position",
+          "unit": "shares"
+        },
+        {
+          "series": "available_cash",
+          "unit": "quote_currency"
+        },
+        {
+          "series": "next_session.daily_bar.close",
+          "unit": "quote_currency_per_share"
+        }
+      ],
+      "kind": "execution",
+      "output": {
+        "kind": "simulated_fills",
+        "unit": "shares"
+      },
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "commission_bps": {
+            "pattern": "^(?:-?(0|[1-9][0-9]{0,9})(\\.[0-9]{1,18})?)(?![\\s\\S])",
+            "type": "string"
+          },
+          "lot_size_policy": {
+            "const": "instrument_master"
+          },
+          "slippage_bps": {
+            "pattern": "^(?:-?(0|[1-9][0-9]{0,9})(\\.[0-9]{1,18})?)(?![\\s\\S])",
+            "type": "string"
+          }
+        },
+        "required": [
+          "lot_size_policy",
+          "commission_bps",
+          "slippage_bps"
+        ],
+        "type": "object"
+      },
+      "position_state": [
+        "filled_quantity"
+      ],
+      "supports_short": false,
+      "trigger": null,
+      "warmup": {
+        "sessions": 0,
+        "type": "fixed"
+      }
+    },
+    {
+      "assets": [
+        "cash_equity"
+      ],
+      "availability": "session_close",
+      "description": "Exit a long position when the observed factor falls below the threshold.",
+      "engines": [
+        "nautilus_cash_equity"
+      ],
+      "factor_parameters": [
+        "factor"
+      ],
+      "id": "exit.below_when_long@1.0.0",
+      "inputs": [
+        {
+          "series": "factor",
+          "unit": "referenced_factor_output_unit"
+        },
+        {
+          "series": "filled_position",
+          "unit": "shares"
+        }
+      ],
+      "kind": "exit",
+      "output": {
+        "kind": "exit_long_intent",
+        "unit": "none"
+      },
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "factor": {
+            "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+            "type": "string"
+          },
+          "threshold": {
+            "pattern": "^(?:-?(0|[1-9][0-9]{0,9})(\\.[0-9]{1,18})?)(?![\\s\\S])",
+            "type": "string"
+          }
+        },
+        "required": [
+          "factor",
+          "threshold"
+        ],
+        "type": "object"
+      },
+      "position_state": [
+        "filled_quantity"
+      ],
+      "supports_short": false,
+      "trigger": "level",
+      "warmup": {
+        "sessions": 0,
+        "type": "fixed"
+      }
+    },
+    {
+      "assets": [
+        "cash_equity"
+      ],
+      "availability": "session_close",
+      "description": "Exit a long position after the configured holding period measured from the first actual fill.",
+      "engines": [
+        "nautilus_cash_equity"
+      ],
+      "factor_parameters": [],
+      "id": "exit.holding_sessions@1.0.0",
+      "inputs": [
+        {
+          "series": "filled_position",
+          "unit": "shares"
+        },
+        {
+          "series": "first_fill_session",
+          "unit": "session"
+        }
+      ],
+      "kind": "exit",
+      "output": {
+        "kind": "exit_long_intent",
+        "unit": "none"
+      },
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "sessions": {
+            "maximum": 2520,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "start_at": {
+            "const": "first_fill"
+          }
+        },
+        "required": [
+          "sessions",
+          "start_at"
+        ],
+        "type": "object"
+      },
+      "position_state": [
+        "filled_quantity",
+        "first_fill_session"
+      ],
+      "supports_short": false,
+      "trigger": "level",
+      "warmup": {
+        "sessions": 0,
+        "type": "fixed"
+      }
+    },
+    {
+      "assets": [
+        "cash_equity"
+      ],
+      "availability": "session_close",
+      "description": "Close-to-close return over the configured number of completed sessions.",
+      "engines": [
+        "nautilus_cash_equity"
+      ],
+      "factor_parameters": [],
+      "id": "factor.close_return@1.0.0",
+      "inputs": [
+        {
+          "series": "daily_bar.close",
+          "unit": "quote_currency_per_share"
+        }
+      ],
+      "kind": "factor",
+      "output": {
+        "kind": "factor_value",
+        "unit": "return_ratio"
+      },
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "lookback_sessions": {
+            "maximum": 2520,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "lookback_sessions"
+        ],
+        "type": "object"
+      },
+      "position_state": [],
+      "supports_short": false,
+      "trigger": null,
+      "warmup": {
+        "name": "lookback_sessions",
+        "type": "parameter"
+      }
+    },
+    {
+      "assets": [
+        "cash_equity"
+      ],
+      "availability": "session_close",
+      "description": "Require a complete session bar and optionally positive volume before adding risk.",
+      "engines": [
+        "nautilus_cash_equity"
+      ],
+      "factor_parameters": [],
+      "id": "filter.complete_session_bar@1.0.0",
+      "inputs": [
+        {
+          "series": "daily_bar",
+          "unit": "ohlcv"
+        },
+        {
+          "series": "daily_bar.volume",
+          "unit": "shares"
+        }
+      ],
+      "kind": "filter",
+      "output": {
+        "kind": "eligible_for_new_risk",
+        "unit": "boolean"
+      },
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "require_positive_volume": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "require_positive_volume"
+        ],
+        "type": "object"
+      },
+      "position_state": [],
+      "supports_short": false,
+      "trigger": null,
+      "warmup": {
+        "sessions": 0,
+        "type": "fixed"
+      }
+    },
+    {
+      "assets": [
+        "cash_equity"
+      ],
+      "availability": "session_close",
+      "description": "Wilder RSI uses the close. An undefined flat-series value is missing.",
+      "engines": [
+        "nautilus_cash_equity"
+      ],
+      "factor_parameters": [],
+      "id": "indicator.rsi_wilder@1.0.0",
+      "inputs": [
+        {
+          "series": "daily_bar.close",
+          "unit": "quote_currency_per_share"
+        }
+      ],
+      "kind": "indicator",
+      "output": {
+        "kind": "factor_value",
+        "unit": "rsi_points_0_to_100"
+      },
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "const": "close"
+          },
+          "period": {
+            "maximum": 2520,
+            "minimum": 2,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "period",
+          "field"
+        ],
+        "type": "object"
+      },
+      "position_state": [],
+      "supports_short": false,
+      "trigger": null,
+      "warmup": {
+        "name": "period",
+        "type": "parameter"
+      }
+    },
+    {
+      "assets": [
+        "cash_equity"
+      ],
+      "availability": "session_close",
+      "description": "Restrict targets to nonnegative cash-equity positions within the gross cap, without borrowing.",
+      "engines": [
+        "nautilus_cash_equity"
+      ],
+      "factor_parameters": [],
+      "id": "risk.long_only_cash@1.0.0",
+      "inputs": [
+        {
+          "series": "portfolio_target",
+          "unit": "portfolio_weight"
+        },
+        {
+          "series": "filled_position",
+          "unit": "shares"
+        },
+        {
+          "series": "available_cash",
+          "unit": "quote_currency"
+        }
+      ],
+      "kind": "risk",
+      "output": {
+        "kind": "risk_limited_targets",
+        "unit": "portfolio_weight"
+      },
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_borrow": {
+            "type": "boolean"
+          },
+          "max_gross_weight": {
+            "pattern": "^(?:-?(0|[1-9][0-9]{0,9})(\\.[0-9]{1,18})?)(?![\\s\\S])",
+            "type": "string"
+          }
+        },
+        "required": [
+          "max_gross_weight",
+          "allow_borrow"
+        ],
+        "type": "object"
+      },
+      "position_state": [
+        "filled_quantity"
+      ],
+      "supports_short": false,
+      "trigger": null,
+      "warmup": {
+        "sessions": 0,
+        "type": "fixed"
+      }
+    },
+    {
+      "assets": [
+        "cash_equity"
+      ],
+      "availability": "session_close",
+      "description": "Equal weight eligible entries within the sleeve budget and per-asset cap.",
+      "engines": [
+        "nautilus_cash_equity"
+      ],
+      "factor_parameters": [],
+      "id": "sizing.equal_weight_capped@1.0.0",
+      "inputs": [
+        {
+          "series": "eligible_entry_intents",
+          "unit": "none"
+        }
+      ],
+      "kind": "sizing",
+      "output": {
+        "kind": "target_weights",
+        "unit": "portfolio_weight"
+      },
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "max_weight_per_asset": {
+            "pattern": "^(?:-?(0|[1-9][0-9]{0,9})(\\.[0-9]{1,18})?)(?![\\s\\S])",
+            "type": "string"
+          }
+        },
+        "required": [
+          "max_weight_per_asset"
+        ],
+        "type": "object"
+      },
+      "position_state": [],
+      "supports_short": false,
+      "trigger": null,
+      "warmup": {
+        "sessions": 0,
+        "type": "fixed"
+      }
+    }
+  ],
+  "kind": "ComponentRegistry"
+}

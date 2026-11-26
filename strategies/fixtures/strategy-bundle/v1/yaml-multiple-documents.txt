@@ -1,0 +1,4 @@
+apiVersion: fertile.finance/strategy/v1
+kind: StrategyBundle
+---
+kind: StrategyBundle

@@ -1,0 +1,729 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {
+      "const": "fertile.finance/strategy/v1"
+    },
+    "kind": {
+      "const": "StrategyBundle"
+    },
+    "metadata": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^(?:[a-z][a-z0-9_-]{0,62}(\\.[a-z][a-z0-9_-]{0,62}){0,7})(?![\\s\\S])",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "version": {
+          "pattern": "^(?:(0|[1-9][0-9]{0,9})(\\.(0|[1-9][0-9]{0,9})){2})(?![\\s\\S])",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "version",
+        "title"
+      ],
+      "type": "object"
+    },
+    "spec": {
+      "additionalProperties": false,
+      "properties": {
+        "clock": {
+          "additionalProperties": false,
+          "properties": {
+            "calendar": {
+              "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,127})(?![\\s\\S])",
+              "type": "string"
+            },
+            "decide_on": {
+              "const": "session_close"
+            },
+            "earliest_fill": {
+              "const": "next_session_close"
+            },
+            "missing_input": {
+              "const": "block_new_risk"
+            },
+            "warmup_sessions": {
+              "maximum": 2520,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "calendar",
+            "decide_on",
+            "earliest_fill",
+            "warmup_sessions",
+            "missing_input"
+          ],
+          "type": "object"
+        },
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "bars": {
+              "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9._@-]{0,255})(?![\\s\\S])",
+              "type": "string"
+            },
+            "currency": {
+              "pattern": "^(?:[A-Z]{3})(?![\\s\\S])",
+              "type": "string"
+            },
+            "price_basis": {
+              "const": "raw_split_free_reviewed"
+            },
+            "timeframe": {
+              "const": "1d"
+            }
+          },
+          "required": [
+            "bars",
+            "timeframe",
+            "price_basis",
+            "currency"
+          ],
+          "type": "object"
+        },
+        "engine": {
+          "const": "nautilus_cash_equity"
+        },
+        "execution": {
+          "additionalProperties": false,
+          "properties": {
+            "commission_bps": {
+              "pattern": "^(?:-?(0|[1-9][0-9]{0,9})(\\.[0-9]{1,18})?)(?![\\s\\S])",
+              "type": "string"
+            },
+            "lot_size_policy": {
+              "const": "instrument_master"
+            },
+            "model": {
+              "enum": [
+                "execution.next_close_cash_equity@1.0.0"
+              ]
+            },
+            "slippage_bps": {
+              "pattern": "^(?:-?(0|[1-9][0-9]{0,9})(\\.[0-9]{1,18})?)(?![\\s\\S])",
+              "type": "string"
+            }
+          },
+          "required": [
+            "model",
+            "lot_size_policy",
+            "commission_bps",
+            "slippage_bps"
+          ],
+          "type": "object"
+        },
+        "factors": {
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "depends_on": {
+                    "items": {
+                      "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+                      "type": "string"
+                    },
+                    "minItems": 0,
+                    "type": "array"
+                  },
+                  "params": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "lookback_sessions": {
+                        "maximum": 2520,
+                        "minimum": 1,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "lookback_sessions"
+                    ],
+                    "type": "object"
+                  },
+                  "use": {
+                    "const": "factor.close_return@1.0.0"
+                  }
+                },
+                "required": [
+                  "use",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "depends_on": {
+                    "items": {
+                      "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+                      "type": "string"
+                    },
+                    "minItems": 0,
+                    "type": "array"
+                  },
+                  "params": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "field": {
+                        "const": "close"
+                      },
+                      "period": {
+                        "maximum": 2520,
+                        "minimum": 2,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "period",
+                      "field"
+                    ],
+                    "type": "object"
+                  },
+                  "use": {
+                    "const": "indicator.rsi_wilder@1.0.0"
+                  }
+                },
+                "required": [
+                  "use",
+                  "params"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "minProperties": 0,
+          "propertyNames": {
+            "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])"
+          },
+          "type": "object"
+        },
+        "mode": {
+          "const": "backtest"
+        },
+        "modules": {
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "allocator"
+                  },
+                  "params": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "factor": {
+                        "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+                        "type": "string"
+                      },
+                      "top_n": {
+                        "maximum": 1000,
+                        "minimum": 1,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "factor",
+                      "top_n"
+                    ],
+                    "type": "object"
+                  },
+                  "use": {
+                    "const": "allocator.top_n@1.0.0"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "use",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "entry"
+                  },
+                  "params": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "factor": {
+                        "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+                        "type": "string"
+                      },
+                      "threshold": {
+                        "pattern": "^(?:-?(0|[1-9][0-9]{0,9})(\\.[0-9]{1,18})?)(?![\\s\\S])",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "factor",
+                      "threshold"
+                    ],
+                    "type": "object"
+                  },
+                  "use": {
+                    "const": "entry.above_when_flat@1.0.0"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "use",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "entry"
+                  },
+                  "params": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "factor": {
+                        "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+                        "type": "string"
+                      },
+                      "threshold": {
+                        "pattern": "^(?:-?(0|[1-9][0-9]{0,9})(\\.[0-9]{1,18})?)(?![\\s\\S])",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "factor",
+                      "threshold"
+                    ],
+                    "type": "object"
+                  },
+                  "use": {
+                    "const": "entry.below_when_flat@1.0.0"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "use",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "exit"
+                  },
+                  "params": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "factor": {
+                        "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+                        "type": "string"
+                      },
+                      "threshold": {
+                        "pattern": "^(?:-?(0|[1-9][0-9]{0,9})(\\.[0-9]{1,18})?)(?![\\s\\S])",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "factor",
+                      "threshold"
+                    ],
+                    "type": "object"
+                  },
+                  "use": {
+                    "const": "exit.below_when_long@1.0.0"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "use",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "exit"
+                  },
+                  "params": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "sessions": {
+                        "maximum": 2520,
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "start_at": {
+                        "const": "first_fill"
+                      }
+                    },
+                    "required": [
+                      "sessions",
+                      "start_at"
+                    ],
+                    "type": "object"
+                  },
+                  "use": {
+                    "const": "exit.holding_sessions@1.0.0"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "use",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "filter"
+                  },
+                  "params": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "require_positive_volume": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "require_positive_volume"
+                    ],
+                    "type": "object"
+                  },
+                  "use": {
+                    "const": "filter.complete_session_bar@1.0.0"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "use",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "risk"
+                  },
+                  "params": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "allow_borrow": {
+                        "type": "boolean"
+                      },
+                      "max_gross_weight": {
+                        "pattern": "^(?:-?(0|[1-9][0-9]{0,9})(\\.[0-9]{1,18})?)(?![\\s\\S])",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "max_gross_weight",
+                      "allow_borrow"
+                    ],
+                    "type": "object"
+                  },
+                  "use": {
+                    "const": "risk.long_only_cash@1.0.0"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "use",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "sizing"
+                  },
+                  "params": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "max_weight_per_asset": {
+                        "pattern": "^(?:-?(0|[1-9][0-9]{0,9})(\\.[0-9]{1,18})?)(?![\\s\\S])",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "max_weight_per_asset"
+                    ],
+                    "type": "object"
+                  },
+                  "use": {
+                    "const": "sizing.equal_weight_capped@1.0.0"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "use",
+                  "params"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "minProperties": 0,
+          "propertyNames": {
+            "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])"
+          },
+          "type": "object"
+        },
+        "policy": {
+          "additionalProperties": false,
+          "properties": {
+            "on_entry_exit_collision": {
+              "const": "exit_first"
+            },
+            "on_missing_execution_price": {
+              "const": "defer_and_report"
+            },
+            "same_session_reentry": {
+              "type": "boolean"
+            },
+            "tie_break": {
+              "const": "stable_instrument_id"
+            }
+          },
+          "required": [
+            "on_entry_exit_collision",
+            "same_session_reentry",
+            "on_missing_execution_price",
+            "tie_break"
+          ],
+          "type": "object"
+        },
+        "portfolio": {
+          "additionalProperties": false,
+          "properties": {
+            "allocation": {
+              "const": "fixed_budgets"
+            },
+            "initial_cash": {
+              "additionalProperties": false,
+              "properties": {
+                "amount": {
+                  "pattern": "^(?:-?(0|[1-9][0-9]{0,9})(\\.[0-9]{1,18})?)(?![\\s\\S])",
+                  "type": "string"
+                },
+                "currency": {
+                  "pattern": "^(?:[A-Z]{3})(?![\\s\\S])",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "currency",
+                "amount"
+              ],
+              "type": "object"
+            },
+            "max_gross_weight": {
+              "pattern": "^(?:-?(0|[1-9][0-9]{0,9})(\\.[0-9]{1,18})?)(?![\\s\\S])",
+              "type": "string"
+            },
+            "max_weight_per_asset": {
+              "pattern": "^(?:-?(0|[1-9][0-9]{0,9})(\\.[0-9]{1,18})?)(?![\\s\\S])",
+              "type": "string"
+            },
+            "netting": {
+              "const": "by_instrument"
+            },
+            "residual": {
+              "const": "cash"
+            },
+            "sleeves": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "budget_weight": {
+                    "pattern": "^(?:-?(0|[1-9][0-9]{0,9})(\\.[0-9]{1,18})?)(?![\\s\\S])",
+                    "type": "string"
+                  },
+                  "priority": {
+                    "maximum": 2147483647,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "recipe": {
+                    "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "recipe",
+                  "budget_weight",
+                  "priority"
+                ],
+                "type": "object"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "initial_cash",
+            "sleeves",
+            "allocation",
+            "residual",
+            "netting",
+            "max_gross_weight",
+            "max_weight_per_asset"
+          ],
+          "type": "object"
+        },
+        "recipes": {
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "entry": {
+                    "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+                    "type": "string"
+                  },
+                  "exit": {
+                    "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+                    "type": "string"
+                  },
+                  "filters": {
+                    "items": {
+                      "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+                      "type": "string"
+                    },
+                    "minItems": 0,
+                    "type": "array"
+                  },
+                  "risk": {
+                    "items": {
+                      "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+                      "type": "string"
+                    },
+                    "minItems": 0,
+                    "type": "array"
+                  },
+                  "sizing": {
+                    "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "entry_exit"
+                  }
+                },
+                "required": [
+                  "type",
+                  "entry",
+                  "exit",
+                  "filters",
+                  "sizing",
+                  "risk"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "allocator": {
+                    "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+                    "type": "string"
+                  },
+                  "filters": {
+                    "items": {
+                      "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+                      "type": "string"
+                    },
+                    "minItems": 0,
+                    "type": "array"
+                  },
+                  "risk": {
+                    "items": {
+                      "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+                      "type": "string"
+                    },
+                    "minItems": 0,
+                    "type": "array"
+                  },
+                  "type": {
+                    "const": "target_weights"
+                  }
+                },
+                "required": [
+                  "type",
+                  "allocator",
+                  "filters",
+                  "risk"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "minProperties": 1,
+          "propertyNames": {
+            "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])"
+          },
+          "type": "object"
+        },
+        "universe": {
+          "additionalProperties": false,
+          "properties": {
+            "membership": {
+              "const": "point_in_time"
+            },
+            "ref": {
+              "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9._@-]{0,255})(?![\\s\\S])",
+              "type": "string"
+            }
+          },
+          "required": [
+            "ref",
+            "membership"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "engine",
+        "mode",
+        "universe",
+        "data",
+        "clock",
+        "factors",
+        "modules",
+        "recipes",
+        "portfolio",
+        "policy",
+        "execution"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "title": "StrategyBundle v1",
+  "type": "object"
+}

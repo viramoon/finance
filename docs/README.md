@@ -37,6 +37,7 @@ fertile 以 git submodule 引入 finance、web、frontend；agent 是独立仓�
 - [连接恢复与熔断](connectivity.md)
 - [IBKR 接入](integrations/ib.md)
 - [HTTP 与代码导出](api.md)
+- [StrategyBundle v1 配置与编译](strategy-bundle.md)
 - [技术栈决策](adr/ADR-0001-tech-stack.md)
 - [依赖、许可与替换](adr/ADR-0002-nautilus-dependency.md)
 - [分层配置字段](../config/README.md)
