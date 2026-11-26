@@ -311,7 +311,9 @@ version = "0.0.0"
 dependencies = [
  "axum",
  "chrono",
+ "finance-collector",
  "finance-market-protocol",
+ "futures-util",
  "num-bigint-dig",
  "num-integer",
  "num-traits",
@@ -352,6 +354,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "utoipa",
 ]
 
 [[package]]
@@ -360,6 +363,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "finance-market-protocol",
  "ibapi",
  "rand 0.9.5",
  "rust_decimal",
@@ -370,6 +374,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "time",
+ "time-tz",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -664,8 +669,6 @@ dependencies = [
 [[package]]
 name = "ibapi"
 version = "3.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61cfb4b8eefd8dda23e2e327187a6ae837018c15d7ca6a79199c6cd475e5f169"
 dependencies = [
  "async-trait",
  "byteorder",

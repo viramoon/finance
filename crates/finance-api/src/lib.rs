@@ -1,12 +1,22 @@
 pub mod bars;
 mod bundle_jobs;
 pub mod config;
+mod factor_read;
 pub mod indicators;
 pub mod jobs;
 pub mod market;
+mod market_read;
+pub mod read_stream;
 pub mod research;
 pub mod strategy_bundle;
-use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
+use axum::{
+    Json, Router,
+    extract::{Request, State},
+    http::{HeaderValue, StatusCode, header::CACHE_CONTROL},
+    middleware::{self, Next},
+    response::Response,
+    routing::get,
+};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -163,12 +173,24 @@ async fn sample(State(state): State<AppState>) -> Result<Json<BacktestSummary>, 
     }
     Ok(Json(summary))
 }
+
+async fn private_read(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+    response
+}
+
 pub fn router(state: AppState) -> Router {
     let source = Arc::new(bars::LocalBarsSource::new(state.data_root.clone()));
     router_with_bars_source(state, source)
 }
 
 pub fn router_with_bars_source(state: AppState, source: Arc<dyn bars::BarsSource>) -> Router {
+    let restricted_reads = market_read::routes()
+        .merge(factor_read::routes())
+        .layer(middleware::from_fn(private_read));
     Router::new()
         .route("/healthz/live", get(live))
         .route("/healthz/ready", get(ready))
@@ -177,6 +199,7 @@ pub fn router_with_bars_source(state: AppState, source: Arc<dyn bars::BarsSource
         .route("/api/v1/backtests/datasets", get(research::datasets))
         .merge(bars::routes(source))
         .merge(jobs::routes())
+        .merge(restricted_reads)
         .with_state(state)
 }
 #[derive(OpenApi)]
@@ -194,7 +217,14 @@ pub fn router_with_bars_source(state: AppState, source: Arc<dyn bars::BarsSource
         jobs::list,
         jobs::by_key,
         bundle_jobs::register,
-        research::datasets
+        research::datasets,
+        market_read::products,
+        market_read::wal,
+        market_read::watermarks,
+        market_read::projected,
+        market_read::gaps,
+        factor_read::list,
+        factor_read::evaluations
     ),
     components(schemas(
         BacktestSummary,
