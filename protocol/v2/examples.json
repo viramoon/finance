@@ -1,0 +1,64 @@
+{
+  "capabilities": [
+    {
+      "can_backfill": false,
+      "delay_tier": "realtime",
+      "max_depth": 20,
+      "message_kinds": [
+        "trade",
+        "snapshot",
+        "perpetual_context"
+      ],
+      "product": "perp-public",
+      "schema_version": "2.0",
+      "source": "hyperliquid"
+    }
+  ],
+  "events": [
+    {
+      "asset_kind": "perpetual",
+      "channel": "perpetual_context",
+      "cursor": "1:1",
+      "epoch": "1",
+      "exchange_ts": null,
+      "first_available_ts": "1700000000000000000",
+      "instrument_id": "BTC-USD-PERP.HYPERLIQUID",
+      "kind": "perpetual_context",
+      "license": "synthetic",
+      "payload": {
+        "funding_rate": "-0.0000123400",
+        "mark_price": "123.456789",
+        "open_interest": "7.12345"
+      },
+      "product": "perp-public",
+      "receive_ts": "1700000000000000000",
+      "revision": "0",
+      "schema_version": "2.0",
+      "seq": "1",
+      "source": "hyperliquid",
+      "venue": "HYPERLIQUID"
+    }
+  ],
+  "instruments": [
+    {
+      "asset_kind": "perpetual",
+      "calendar_id": "24X7",
+      "contract_multiplier": "1",
+      "instrument_id": "BTC-USD-PERP.HYPERLIQUID",
+      "lot_size": "0.00001",
+      "quote_currency": "USD",
+      "schema_version": "1.0",
+      "settlement_currency": "USDC",
+      "settlement_kind": "cash",
+      "supplier_symbols": [
+        {
+          "product": "perp-public",
+          "source": "hyperliquid",
+          "symbol": "BTC"
+        }
+      ],
+      "tick_size": "0.1",
+      "venue": "HYPERLIQUID"
+    }
+  ]
+}

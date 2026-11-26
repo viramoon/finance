@@ -777,7 +777,8 @@ fn context_v2_exports_are_deterministic_and_version_scoped() {
             "gap",
             "reset",
             "heartbeat",
-            "status"
+            "status",
+            "perpetual_context"
         ])
     );
 }
@@ -824,5 +825,58 @@ fn funding_rate_next_time_is_required_nullable_in_event_and_export() {
             .as_array()
             .unwrap()
             .contains(&json!({"type": "null"}))
+    );
+}
+
+#[test]
+fn perpetual_context_schema_exports_and_keeps_v1_kind_boundaries() {
+    let directory = tempfile::tempdir().unwrap();
+    assert!(
+        Command::new(env!("CARGO_BIN_EXE_export-market-protocol"))
+            .arg(directory.path())
+            .arg("--v2")
+            .status()
+            .unwrap()
+            .success()
+    );
+    let committed = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../protocol/v2");
+    for name in [
+        "event.schema.json",
+        "capability.schema.json",
+        "examples.json",
+    ] {
+        let exported = fs::read(directory.path().join(name)).unwrap();
+        assert_eq!(exported, fs::read(committed.join(name)).unwrap(), "{name}");
+        let document: Value = serde_json::from_slice(&exported).unwrap();
+        assert_references_resolve(&document, &document);
+    }
+    let examples: Value =
+        serde_json::from_str(include_str!("../../../protocol/v2/examples.json")).unwrap();
+    assert_roundtrip::<Event>(&examples["events"]);
+    assert_roundtrip::<Capability>(&examples["capabilities"]);
+    let context = &examples["events"][0];
+    let mut invalid = context.clone();
+    invalid["schema_version"] = json!("1.0");
+    assert_rejected::<Event>(
+        &invalid,
+        "/schema_version",
+        "invalid_value",
+        "perpetual_context",
+    );
+    invalid = context.clone();
+    invalid["payload"]["open_interest"] = json!("-1");
+    assert_rejected::<Event>(
+        &invalid,
+        "/payload/open_interest",
+        "constraint_violation",
+        "nonnegative",
+    );
+    invalid = context.clone();
+    invalid["payload"]["mark_price"] = json!(123.5);
+    assert_rejected::<Event>(
+        &invalid,
+        "/payload/mark_price",
+        "invalid_type",
+        "expected a string",
     );
 }

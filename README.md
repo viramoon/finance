@@ -4,7 +4,7 @@ fertile 的主项目与 submodule，基于 NautilusTrader 的交易与数据系�
 
 本仓库按 [issue #1 方案 v2](https://github.com/viramoon/finance/issues/1#issuecomment-6834604073) 初始化。当前已实现 [Nautilus 源码构建](docs/build.md)、上游离线回测批任务及 [行情与回测 HTTP API](docs/api.md)，交易策略与交易服务仍未实现；TBD 项都需后续 issue 明确后再实施。开发从 [AGENTS.md](AGENTS.md) 开始。
 
-本地行情链路支持 F1 事件追加、恢复和独立 Parquet 投影。[Binance 公共行情适配](docs/integrations/binance.md)接入现货与 USDT 永续，所有内置 profile 默认关闭。[本地行情 WAL、投影与封段接口](docs/market-wal.md)
+本地行情链路支持 F1 事件追加、恢复和独立 Parquet 投影。已接入 [Hyperliquid 公共永续行情](docs/integrations/hyperliquid.md) 和 [Binance 现货与 USDT 永续](docs/integrations/binance.md)，Binance 内置 profile 默认关闭。[本地行情 WAL、投影与封段接口](docs/market-wal.md)
 
 ## 系统中的位置
 
@@ -44,8 +44,10 @@ finance/
 - [Nautilus 使用与升级](docs/nautilus.md)
 - [连接恢复与熔断](docs/connectivity.md)
 - [IBKR 接入](docs/integrations/ib.md)
+- [Hyperliquid 公共永续行情](docs/integrations/hyperliquid.md)
 - [HTTP 与代码导出](docs/api.md)
 - [行情标的、事件与流协议](docs/market-protocol.md)
+- [历史价量补拉与逐笔归档](docs/historical-pull.md)
 - [本地行情 WAL、投影与封段接口](docs/market-wal.md)
 - [StrategyBundle v1 配置与编译](docs/strategy-bundle.md)
 - [离线因子评价与研究登记](docs/factor-research.md)

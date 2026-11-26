@@ -9,10 +9,15 @@
       "type": "string"
     },
     "MarketKind": {
-      "description": "Perpetual context kinds.",
+      "description": "Market data kinds a source/product can advertise in version 2.0.",
       "enum": [
+        "bar_closed",
+        "trade",
+        "snapshot",
+        "delta",
         "funding_rate",
-        "open_interest"
+        "open_interest",
+        "perpetual_context"
       ],
       "type": "string"
     },
@@ -31,6 +36,42 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "Advertised market data capability of a source/product pair.",
+  "oneOf": [
+    {
+      "properties": {
+        "message_kinds": {
+          "contains": {
+            "const": "perpetual_context"
+          },
+          "items": {
+            "enum": [
+              "bar_closed",
+              "trade",
+              "snapshot",
+              "delta",
+              "perpetual_context"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "properties": {
+        "max_depth": {
+          "const": 0
+        },
+        "message_kinds": {
+          "items": {
+            "enum": [
+              "funding_rate",
+              "open_interest"
+            ]
+          },
+          "maxItems": 2
+        }
+      }
+    }
+  ],
   "properties": {
     "can_backfill": {
       "type": "boolean"
@@ -39,7 +80,7 @@
       "$ref": "#/$defs/DelayTier"
     },
     "max_depth": {
-      "maximum": 0,
+      "maximum": 4294967295,
       "minimum": 0,
       "type": "integer"
     },
@@ -47,7 +88,7 @@
       "items": {
         "$ref": "#/$defs/MarketKind"
       },
-      "maxItems": 2,
+      "maxItems": 5,
       "minItems": 1,
       "type": "array",
       "uniqueItems": true

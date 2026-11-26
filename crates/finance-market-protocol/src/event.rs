@@ -9,7 +9,7 @@ use crate::{
     decode_tagged_object,
     diagnostics::{Object, decode_at},
     instrument::validate_venue,
-    require, required_nullable, wire_enum, wire_object,
+    require, require_schema_version, required_nullable, wire_enum, wire_object,
 };
 
 wire_enum! {
@@ -146,7 +146,15 @@ wire_object! {
     }
 }
 
-/// The version 1.0 kind tag and its corresponding payload.
+wire_object! {
+    pub struct PerpetualContext {
+        pub funding_rate: DecimalText,
+        pub open_interest: DecimalText,
+        pub mark_price: DecimalText,
+    }
+}
+
+/// The event kind tag and its corresponding payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(
     tag = "kind",
@@ -166,6 +174,7 @@ pub enum Message {
     Reset(Reset),
     Heartbeat(Heartbeat),
     Status(Status),
+    PerpetualContext(PerpetualContext),
 }
 
 // Generate the wire fields once for the normal Serde type and for the decoder
@@ -279,28 +288,21 @@ impl Event {
 
     pub fn validate(&self) -> Result<(), ValidationError> {
         let v2 = self.schema_version == SchemaVersion::V2;
-        let context = matches!(
-            self.message,
-            Message::FundingRate(_) | Message::OpenInterest(_)
-        );
-        let original_market = matches!(
-            self.message,
-            Message::BarClosed(_)
-                | Message::Trade(_)
-                | Message::Snapshot(_)
-                | Message::Delta(_)
-                | Message::Correction(_)
-        );
-        if v2 && original_market {
-            let mut error =
-                ValidationError::new("schema_version", "2.0 does not support this message kind");
-            error.kind = ErrorKind::InvalidValue;
-            return Err(error);
-        }
-        if !v2 && context {
-            let mut error = ValidationError::new("kind", "perpetual context requires version 2.0");
-            error.kind = ErrorKind::InvalidValue;
-            return Err(error);
+        let context = self.message.context_kind();
+        if !v2 {
+            if context == Some(MarketKind::PerpetualContext) {
+                require_schema_version(false, "perpetual_context requires schema version 2.0")?;
+            } else if context.is_some() {
+                let mut error =
+                    ValidationError::new("kind", "perpetual context requires version 2.0");
+                error.kind = ErrorKind::InvalidValue;
+                return Err(error);
+            }
+        } else {
+            require_schema_version(
+                self.message.market_payload().is_none(),
+                "2.0 does not support this message kind",
+            )?;
         }
         require(
             !v2 || self.asset_kind == AssetKind::Perpetual,
@@ -362,6 +364,18 @@ impl Event {
                 "payload.to_ts",
                 "must be at or after payload.from_ts",
             )?,
+            Message::PerpetualContext(context) => {
+                require(
+                    context.open_interest.value() >= Decimal::ZERO,
+                    "payload.open_interest",
+                    "must be nonnegative",
+                )?;
+                require(
+                    context.mark_price.value() > Decimal::ZERO,
+                    "payload.mark_price",
+                    "must be greater than zero",
+                )?;
+            }
             _ => {}
         }
 
@@ -403,17 +417,14 @@ impl Event {
             "product",
             "does not match the supplied capability",
         )?;
-        require(
-            self.schema_version == capability.schema_version,
-            "schema_version",
-            "does not match the supplied capability",
-        )?;
-        let context_kind = match self.message {
-            Message::FundingRate(_) => Some(MarketKind::FundingRate),
-            Message::OpenInterest(_) => Some(MarketKind::OpenInterest),
-            _ => None,
-        };
-        if let Some(kind) = context_kind {
+        if self.message.context_kind().is_none() {
+            require(
+                (self.schema_version == SchemaVersion::V2) == capability.has_separate_context(),
+                "schema_version",
+                "does not match the supplied capability",
+            )?;
+        }
+        if let Some(kind) = self.message.context_kind() {
             require(
                 capability.message_kinds.contains(&kind),
                 "kind",
@@ -532,6 +543,15 @@ impl Correction {
 }
 
 impl Message {
+    fn context_kind(&self) -> Option<MarketKind> {
+        match self {
+            Self::FundingRate(_) => Some(MarketKind::FundingRate),
+            Self::OpenInterest(_) => Some(MarketKind::OpenInterest),
+            Self::PerpetualContext(_) => Some(MarketKind::PerpetualContext),
+            _ => None,
+        }
+    }
+
     fn decode_payload(kind: &str, payload: &str) -> Result<Self, DecodeError> {
         match kind {
             "funding_rate" => decode_at(payload, "/payload").map(Self::FundingRate),
@@ -541,6 +561,7 @@ impl Message {
             "reset" => decode_at(payload, "/payload").map(Self::Reset),
             "heartbeat" => decode_at(payload, "/payload").map(Self::Heartbeat),
             "status" => decode_at(payload, "/payload").map(Self::Status),
+            "perpetual_context" => decode_at(payload, "/payload").map(Self::PerpetualContext),
             _ => MarketMessage::decode_payload(kind, payload, "").map(Self::from),
         }
     }
@@ -562,7 +583,8 @@ impl Message {
             | Self::Gap(_)
             | Self::Reset(_)
             | Self::Heartbeat(_)
-            | Self::Status(_) => None,
+            | Self::Status(_)
+            | Self::PerpetualContext(_) => None,
         }
     }
 

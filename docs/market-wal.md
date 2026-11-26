@@ -1,6 +1,6 @@
 # 本地行情 WAL、投影与封段接口
 
-[F1 事件协议](market-protocol.md) 的生产者可以把已授权事件交给 `finance_collector::market_ingress::MarketIngress`。每个 source/product 有自己的 WAL 和投影游标。旧 `BarSource`、Nautilus bar catalog 和 [旧采集状态](../catalog/README.md) 继续使用原有路径。本接口供适配器、查询实现和 fertile 备份接入。[Binance 永续上下文](integrations/binance.md)使用独立 F3 产品记录 2.0 观测，Parquet 仍保留原始事件 JSON。
+[F1 事件协议](market-protocol.md) 的生产者可以把已授权事件交给 `finance_collector::market_ingress::MarketIngress`。每个 source/product 有自己的 WAL 和投影游标。旧 `BarSource`、Nautilus bar catalog 和 [旧采集状态](../catalog/README.md) 继续使用原有路径。本接口供适配器、查询实现和 fertile 备份接入。[Binance 永续上下文](integrations/binance.md)使用独立 F3 产品记录 2.0 观测，Parquet 仍保留原始事件 JSON。 [Hyperliquid 永续上下文](integrations/hyperliquid.md)也通过 F3 发布 2.0 观测，同一产品的盘口与控制消息沿用 1.0。
 
 ## 生产者与许可
 

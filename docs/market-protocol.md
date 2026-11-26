@@ -1,6 +1,6 @@
 # 行情标的、事件与流协议
 
-finance 定义行情流契约 v1.0，供采集适配器、投影、研究和 web 消费。传输格式为 UTF-8 JSON。当前交付包括类型、校验、独立 schema 和合成样本。接入与闭合 bar 写入继续使用现有 [BarSource 通路](../catalog/README.md)。HTTP 路由和 OpenAPI 见 [API 文档](api.md)。
+finance 定义行情流契约，供采集适配器、投影、研究和 web 消费。传输格式为 UTF-8 JSON。当前交付包括类型、校验、独立 schema 和合成样本。接入与闭合 bar 写入继续使用现有 [BarSource 通路](../catalog/README.md)。HTTP 路由和 OpenAPI 见 [API 文档](api.md)。
 
 ## 标的与产品
 
@@ -91,22 +91,27 @@ PYTHONPATH=python python -m unittest discover -s tests -p test_market_protocol.p
 
 ## 永续上下文 2.0
 
-`schema_version: "2.0"` 用于独立的永续上下文能力和事件。标的主数据继续使用 v1.0，事件的 `asset_kind` 必须是 `perpetual`。上下文产品 `max_depth` 固定为 0，保留原有 `gap`、`reset`、`heartbeat` 和 `status` 控制消息。上下文观测需要 `exchange_ts`。盘口、成交和 bar 仍使用 v1.0。读取端按产品协商版本，按完整版本选择 schema。
+`schema_version: "2.0"` 的永续观测适用于 `asset_kind: "perpetual"`。记录沿用原信封、位置和时钟定义，修订为 `"0"`，价量以十进制字符串保留源精度。
 
 | `kind` | `payload` |
 | --- | --- |
-| `funding_rate` | 有符号的十进制比率 `rate`，以及必填的 `next_funding_ts`。已知时为不早于 `exchange_ts` 的 UTC 纳秒字符串，未知时为 `null`。 |
+| `perpetual_context` | 同一时点的 `funding_rate`、非负 `open_interest` 和正数 `mark_price`。没有源端时钟时 `exchange_ts` 为 `null`。 |
+| `funding_rate` | 有符号的十进制比率 `rate` 和必填的 `next_funding_ts`。已知时为不早于 `exchange_ts` 的 UTC 纳秒字符串，未知时为 `null`。 |
 | `open_interest` | 非负十进制字符串 `quantity`，保留供应商的基础资产数量和有效位。 |
 
-使用与 v1.0 相同的导出器生成 [能力 schema](../protocol/v2/capability.schema.json) 和 [事件 schema](../protocol/v2/event.schema.json)：
+声明 `perpetual_context` 的能力使用 2.0，可同时声明 v1.0 市场消息。盘口、成交及该产品的控制消息沿用 1.0。分别声明 `funding_rate` 或 `open_interest` 的能力使用独立的 2.0 产品，`max_depth` 为 0，观测要求 `exchange_ts`，控制消息也使用 2.0。标的主数据使用 1.0。读取端按每条记录的版本选择 schema，跨版本控制消息仍参与同一分区的 epoch 和 seq 校验。
+
+生成 [事件 schema](../protocol/v2/event.schema.json)、[能力 schema](../protocol/v2/capability.schema.json) 和 [合成样本](../protocol/v2/examples.json)：
 
 ```sh
-cargo run --locked -q -p finance-market-protocol --bin export-market-protocol -- protocol/v2 --context-v2
+cargo run --locked --offline -q -p finance-market-protocol --bin export-market-protocol -- protocol/v2 --v2
 ```
+
+接口与恢复规则见 [Hyperliquid](integrations/hyperliquid.md)、[Binance](integrations/binance.md) 及 [ADR-0034](adr/ADR-0034-hyperliquid-context-stream.md)。
 
 ## 解码与错误定位
 
-Rust 使用 `finance_market_protocol::decode_json::<T>(input)`，其中 `T` 为 `Instrument`、`Capability` 或 `Event`。通过错误的 `path()` 和 `kind().as_str()` 读取诊断。Python 使用 `fertile_finance.market_protocol` 的同名类型及 `from_json(input)`，通过 `ProtocolError.path` 和 `ProtocolError.kind` 读取诊断。
+Rust 使用 `finance_market_protocol::decode_json::<T>(input)`，其中 `T` 为 `Instrument`、`Capability` 或 `Event`。通过错误的 `path()` 和 `kind().as_str()` 读取诊断。Python 使用 `fertile_finance.market_protocol` 的同名类型及 `from_json(input)`，通过 `ProtocolError.path` 和 `ProtocolError.kind` 读取诊断。Python 的 `Kind` 枚举对应 v1.0 消息种类，永续上下文使用 `ContextKind.PERPETUAL_CONTEXT`。
 
 路径使用相对于所读对象的 JSON Pointer，数组下标从零开始。语法错误等定位到整个输入的情况使用空路径。调用方可按错误种类分支，并用可读错误消息显示原因。
 

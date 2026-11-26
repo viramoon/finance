@@ -2,7 +2,8 @@ use std::collections::HashSet;
 
 use crate::{
     CalendarId, Currency, DecimalText, InstrumentId, NonEmptyText, SchemaVersion, Token,
-    ValidationError, Venue, require, required_nullable, wire_enum, wire_object,
+    ValidationError, Venue, require, require_schema_version, required_nullable, wire_enum,
+    wire_object,
 };
 
 wire_enum! {
@@ -56,10 +57,9 @@ wire_object! {
 
 impl Instrument {
     pub fn validate(&self) -> Result<(), ValidationError> {
-        require(
+        require_schema_version(
             self.schema_version == SchemaVersion::V1,
-            "schema_version",
-            "instrument metadata uses version 1.0",
+            "instrument uses version 1.0",
         )?;
         validate_venue(&self.instrument_id, &self.venue)?;
         for (field, value) in [
@@ -108,6 +108,7 @@ wire_enum! {
         Delta = "delta",
         FundingRate = "funding_rate",
         OpenInterest = "open_interest",
+        PerpetualContext = "perpetual_context",
     }
 }
 
@@ -125,7 +126,7 @@ wire_object! {
         pub schema_version: SchemaVersion,
         pub source: Token,
         pub product: Token,
-        #[schema(min_items = 1, max_items = 4)]
+        #[schema(min_items = 1, max_items = 5)]
         pub message_kinds: Vec<MarketKind>,
         #[schema(maximum = 4294967295u32)]
         pub max_depth: u32,
@@ -136,13 +137,25 @@ wire_object! {
 }
 
 impl MarketKind {
-    pub fn is_perpetual_context(self) -> bool {
+    fn is_separate_context(self) -> bool {
         matches!(self, Self::FundingRate | Self::OpenInterest)
     }
 }
 
 impl Capability {
+    pub(crate) fn has_separate_context(&self) -> bool {
+        self.message_kinds
+            .iter()
+            .any(|kind| kind.is_separate_context())
+    }
+
     pub fn validate(&self) -> Result<(), ValidationError> {
+        let separate = self.has_separate_context();
+        require_schema_version(
+            (self.schema_version == SchemaVersion::V2)
+                == (separate || self.message_kinds.contains(&MarketKind::PerpetualContext)),
+            "capability uses version 2.0 exactly when it supports perpetual context",
+        )?;
         require(
             !self.message_kinds.is_empty(),
             "message_kinds",
@@ -150,9 +163,9 @@ impl Capability {
         )?;
         for (index, kind) in self.message_kinds.iter().enumerate() {
             require(
-                kind.is_perpetual_context() == (self.schema_version == SchemaVersion::V2),
+                !separate || kind.is_separate_context(),
                 format!("message_kinds.{index}"),
-                "market kind does not match the capability version",
+                "separate funding and open interest cannot share a capability with other kinds",
             )?;
             require(
                 !self.message_kinds[..index].contains(kind),
