@@ -27,7 +27,10 @@ use ibapi::{
 use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 use time::{Date, PrimitiveDateTime, Time, macros::format_description};
 use time_tz::{OffsetDateTimeExt, PrimitiveDateTimeExt, Tz, timezones};
-use tokio::{sync::Mutex, time::timeout};
+use tokio::{
+    sync::{Mutex, watch},
+    time::{Instant, timeout},
+};
 
 /// A verified paper session with streaming L1 access. Obtain it from the
 /// connection manager so account verification precedes market requests.
@@ -68,6 +71,12 @@ impl PaperMarket {
     pub async fn disconnected(&self) -> MarketError {
         self.peer.disconnected().await;
         MarketError::Disconnected
+    }
+
+    /// The latest connection-wide pacing notice seen by the session observer.
+    /// Poll `disconnected` alongside session operations to drive that observer.
+    pub fn pacing_notices(&self) -> watch::Receiver<Option<Instant>> {
+        self.peer.market_pacing.subscribe()
     }
 }
 
@@ -132,6 +141,7 @@ fn sdk_query(query: &ContractQuery) -> Result<Contract, MarketError> {
 fn transport_error(error: ibapi::Error) -> MarketError {
     match error {
         error if crate::is_disconnect(&error) => MarketError::Disconnected,
+        ibapi::Error::ResponseLagged(_) => MarketError::IncompleteResponse,
         ibapi::Error::Io(io)
             if matches!(
                 io.kind(),
@@ -161,7 +171,7 @@ fn notice_kind(code: i32) -> MarketNotice {
     }
 }
 
-fn request_notice_kind(notice: &ibapi::Notice) -> MarketNotice {
+pub(crate) fn request_notice_kind(notice: &ibapi::Notice) -> MarketNotice {
     if notice.code == 162 && notice.message.to_ascii_lowercase().contains("pacing") {
         return MarketNotice::Pacing;
     }

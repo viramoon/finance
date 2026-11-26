@@ -5,7 +5,6 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::NaiveDate;
 use finance_ib::market::{
     ConfirmedContract, ContractKind, ContractQuery, MarketError, MarketRequest, OptionChainSource,
     OptionSeries, PaperMarket, Product, RequestKey, RequestParameters, option_market_date,
@@ -19,6 +18,7 @@ use tokio::{
 use super::{
     LinePool, LineScheduler, SchedulerPhase,
     policy::rank_options,
+    unexpired,
     worker::{Feed, Worker},
 };
 
@@ -28,6 +28,7 @@ mod tests;
 #[async_trait]
 trait Session: OptionChainSource {
     async fn disconnected(&self) -> MarketError;
+    fn pacing_notices(&self) -> watch::Receiver<Option<Instant>>;
     async fn close(&self);
 }
 
@@ -35,6 +36,10 @@ trait Session: OptionChainSource {
 impl Session for PaperMarket {
     async fn disconnected(&self) -> MarketError {
         PaperMarket::disconnected(self).await
+    }
+
+    fn pacing_notices(&self) -> watch::Receiver<Option<Instant>> {
+        PaperMarket::pacing_notices(self)
     }
 
     async fn close(&self) {
@@ -60,6 +65,13 @@ fn unavailable(error: MarketError) -> bool {
             | MarketError::ExpiredContract
             | MarketError::NotEntitled
             | MarketError::InvalidRequest
+    )
+}
+
+fn incomplete_metadata(error: MarketError) -> bool {
+    matches!(
+        error,
+        MarketError::Timeout | MarketError::IncompleteResponse
     )
 }
 
@@ -97,13 +109,17 @@ impl LineScheduler {
                 Ok(session) => {
                     let online_since = Instant::now();
                     let mut online = Online::new(&self);
+                    let mut pacing = session.pacing_notices();
                     self.shared.state.lock().expect("line state").phase = SchedulerPhase::Online;
                     let result = tokio::select! {
                         biased;
                         _ = stop_requested(&mut stop) => Ok(()),
                         error = session.disconnected() => Err(error),
-                        result = online.drive(&session, &mut next_request) => result,
+                        result = online.drive(&session, &mut next_request, &mut pacing) => result,
                     };
+                    if let Some(received) = *pacing.borrow() {
+                        next_request = next_request.max(received + config.pacing_cooldown);
+                    }
                     {
                         let mut state = self.shared.state.lock().expect("line state");
                         state.phase = SchedulerPhase::Reconnecting;
@@ -170,15 +186,21 @@ enum Discover {
 }
 
 enum Action {
-    ConfirmStock(ContractQuery),
+    ConfirmStock(usize),
     Discover(Discover),
     Start(ConfirmedContract, LinePool, bool),
     Cancel(RequestKey),
 }
 
+struct PendingStock {
+    query: ContractQuery,
+    retry_at: Instant,
+    retry_delay: Duration,
+}
+
 struct Online<'a> {
     owner: &'a LineScheduler,
-    watchlist: VecDeque<ContractQuery>,
+    watchlist: Vec<PendingStock>,
     stocks: Vec<ConfirmedContract>,
     stock_confirmation_failed: bool,
     active: HashMap<RequestKey, Worker>,
@@ -203,7 +225,16 @@ impl<'a> Online<'a> {
             .discovery_complete = false;
         Self {
             owner,
-            watchlist: owner.stocks.iter().cloned().collect(),
+            watchlist: owner
+                .stocks
+                .iter()
+                .cloned()
+                .map(|query| PendingStock {
+                    query,
+                    retry_at: Instant::now(),
+                    retry_delay: owner.shared.config.reconnect_initial,
+                })
+                .collect(),
             stocks: Vec::new(),
             stock_confirmation_failed: false,
             active: Default::default(),
@@ -219,10 +250,15 @@ impl<'a> Online<'a> {
         }
     }
 
+    fn next_stock_retry(&self) -> Option<Instant> {
+        self.watchlist.iter().map(|stock| stock.retry_at).min()
+    }
+
     async fn drive<S: Session>(
         &mut self,
         session: &S,
         next_request: &mut Instant,
+        pacing: &mut watch::Receiver<Option<Instant>>,
     ) -> Result<(), MarketError>
     where
         S::Subscription: 'static,
@@ -242,9 +278,13 @@ impl<'a> Online<'a> {
                 *next_request = (*next_request).max(cooldown);
             }
             let action = self.action(now)?;
+            if let Some(received) = *pacing.borrow_and_update() {
+                *next_request = (*next_request).max(received + config.pacing_cooldown);
+            }
             if let Some(action) = action {
                 if now >= *next_request {
                     *next_request = now + config.request_interval;
+                    // Complete in-flight IO before observing a new pacing deadline.
                     let result = self.execute(session, action).await;
                     *next_request = Instant::now() + config.request_interval;
                     match result {
@@ -257,6 +297,7 @@ impl<'a> Online<'a> {
                     continue;
                 }
                 tokio::select! {
+                    _ = pacing.changed() => {},
                     _ = shared.changed.notified() => {},
                     _ = sleep_until(*next_request) => {},
                 }
@@ -276,7 +317,9 @@ impl<'a> Online<'a> {
                     .unwrap_or(self.refresh)
                     .min(self.refresh)
                     .min(self.expiry_check);
+                let deadline = deadline.min(self.next_stock_retry().unwrap_or(deadline));
                 tokio::select! {
+                    _ = pacing.changed() => {},
                     _ = shared.changed.notified() => {},
                     _ = sleep_until(deadline) => {},
                 }
@@ -332,8 +375,12 @@ impl<'a> Online<'a> {
                 false,
             )));
         }
-        if let Some(query) = self.watchlist.front() {
-            return Ok(Some(Action::ConfirmStock(query.clone())));
+        if let Some(index) = self
+            .watchlist
+            .iter()
+            .position(|stock| stock.retry_at <= now)
+        {
+            return Ok(Some(Action::ConfirmStock(index)));
         }
         if let Some(contract) = hot.iter().find_map(|key| {
             (!self.active.contains_key(key)).then(|| state.options[&key.con_id].clone())
@@ -347,8 +394,8 @@ impl<'a> Online<'a> {
             self.discovery
                 .extend(equities.into_iter().map(Discover::Definitions));
             self.seen.clear();
-            self.discovery_failed = self.stock_confirmation_failed;
-            state.discovery_complete = self.discovery.is_empty() && !self.discovery_failed;
+            self.discovery_failed = false;
+            state.discovery_complete = self.discovery.is_empty() && self.discovery_succeeded();
             self.refresh = now + config.chain_refresh;
         }
         let discovery = self.discovery.front().cloned().map(Action::Discover);
@@ -411,14 +458,19 @@ impl<'a> Online<'a> {
             .map(|contract| (contract, true))
     }
 
+    fn discovery_succeeded(&self) -> bool {
+        !self.discovery_failed && !self.stock_confirmation_failed && self.watchlist.is_empty()
+    }
+
     async fn execute<S: Session>(&mut self, session: &S, action: Action) -> Result<(), MarketError>
     where
         S::Subscription: 'static,
     {
         let shared = &self.owner.shared;
         match action {
-            Action::ConfirmStock(query) => {
-                let result = session.confirm(&query).await;
+            Action::ConfirmStock(index) => {
+                let pending = &mut self.watchlist[index];
+                let result = session.confirm(&pending.query).await;
                 match result {
                     Ok(equity) if equity.product() == Product::EquityL1 && equity.con_id > 0 => {
                         if let Some(stock) = self
@@ -434,16 +486,28 @@ impl<'a> Online<'a> {
                                 .expect("line state")
                                 .coverage
                                 .track(stock_key(equity.con_id), shared.now());
+                            if self.discovery.is_empty() {
+                                self.refresh = Instant::now();
+                            } else {
+                                self.discovery
+                                    .push_back(Discover::Definitions(equity.clone()));
+                            }
                             self.stocks.push(equity);
                         }
                     }
                     Ok(_) => return Err(MarketError::InvalidConfiguration),
-                    Err(error) if unavailable(error) || error == MarketError::Timeout => {
-                        self.stock_confirmation_failed = true
+                    Err(error) if incomplete_metadata(error) => {
+                        pending.retry_at = Instant::now() + pending.retry_delay;
+                        pending.retry_delay = pending
+                            .retry_delay
+                            .saturating_mul(2)
+                            .min(shared.config.reconnect_max);
+                        return Ok(());
                     }
+                    Err(error) if unavailable(error) => self.stock_confirmation_failed = true,
                     Err(error) => return Err(error),
                 }
-                self.watchlist.pop_front();
+                self.watchlist.remove(index);
             }
             Action::Discover(discover) => {
                 self.discover(session, discover).await?;
@@ -507,7 +571,7 @@ impl<'a> Online<'a> {
                             .map(|series| Discover::Series(equity.clone(), series)),
                     );
                 }
-                Err(error) if unavailable(error) || error == MarketError::Timeout => {
+                Err(error) if unavailable(error) || incomplete_metadata(error) => {
                     self.discovery_failed = true
                 }
                 Err(error) => return Err(error),
@@ -529,7 +593,7 @@ impl<'a> Online<'a> {
                         state.options.insert(con_id, contract);
                     }
                     }
-                    Err(error) if unavailable(error) || error == MarketError::Timeout => {
+                    Err(error) if unavailable(error) || incomplete_metadata(error) => {
                         self.discovery_failed = true
                     }
                     Err(error) => return Err(error),
@@ -539,7 +603,7 @@ impl<'a> Online<'a> {
         self.discovery.pop_front();
         if self.discovery.is_empty() {
             let mut state = shared.state.lock().expect("line state");
-            state.discovery_complete = !self.discovery_failed;
+            state.discovery_complete = self.discovery_succeeded();
             if state.discovery_complete {
                 state.options.retain(|id, _| self.seen.contains(id));
                 self.eligible.retain(|id| self.seen.contains(id));
@@ -557,9 +621,4 @@ fn stock_key(con_id: i32) -> RequestKey {
         product: Product::EquityL1,
         parameters: RequestParameters::default(),
     }
-}
-
-fn unexpired(contract: &ConfirmedContract, today: NaiveDate) -> bool {
-    contract.con_id > 0
-        && matches!(&contract.kind, ContractKind::Option(option) if option.expiry >= today)
 }

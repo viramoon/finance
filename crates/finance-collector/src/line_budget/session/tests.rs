@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use chrono::{TimeDelta, Utc};
+use chrono::{NaiveDate, TimeDelta, Utc};
 use finance_ib::market::{
     MarketDataSource, MarketDataType, MarketEvent, MarketNotice, MarketSubscription,
     OptionContract, OptionRight, QuoteField,
@@ -42,9 +42,12 @@ struct GatewayState {
     peak: usize,
     current_session: usize,
     disconnect: Option<watch::Sender<bool>>,
+    global_pacing: Option<watch::Sender<Option<Instant>>>,
     failed_opens: usize,
     fail_next_cancel: bool,
     throttle_next_option: bool,
+    first_equity_timeouts: usize,
+    incomplete_next_series: bool,
 }
 
 #[derive(Clone)]
@@ -64,7 +67,7 @@ impl Gateway {
     }
 
     async fn open(self) -> Result<FakeSession, MarketError> {
-        let (session, disconnected) = {
+        let (session, disconnected, global_pacing) = {
             let mut state = self.state.lock().unwrap();
             let session = state.current_session + 1;
             state.record(session, Operation::Open);
@@ -74,14 +77,17 @@ impl Gateway {
             }
             assert!(state.active.is_empty());
             let (disconnect, disconnected) = watch::channel(false);
+            let (pacing, global_pacing) = watch::channel(None);
             state.current_session = session;
             state.disconnect = Some(disconnect);
-            (session, disconnected)
+            state.global_pacing = Some(pacing);
+            (session, disconnected, global_pacing)
         };
         Ok(FakeSession {
             gateway: self,
             session,
             disconnected,
+            global_pacing,
             confirmed: Mutex::default(),
         })
     }
@@ -90,6 +96,17 @@ impl Gateway {
         let mut state = self.state.lock().unwrap();
         state.failed_opens = failed_opens;
         state.disconnect.as_ref().unwrap().send(true).unwrap();
+    }
+
+    fn global_pacing(&self) -> Instant {
+        let now = Instant::now();
+        let state = self.state.lock().unwrap();
+        state
+            .global_pacing
+            .as_ref()
+            .unwrap()
+            .send_replace(Some(now));
+        now
     }
 
     fn calls(&self) -> Vec<Call> {
@@ -121,6 +138,7 @@ struct FakeSession {
     gateway: Gateway,
     session: usize,
     disconnected: watch::Receiver<bool>,
+    global_pacing: watch::Receiver<Option<Instant>>,
     confirmed: Mutex<HashSet<i32>>,
 }
 
@@ -131,11 +149,16 @@ impl Session for FakeSession {
         MarketError::Disconnected
     }
 
+    fn pacing_notices(&self) -> watch::Receiver<Option<Instant>> {
+        self.global_pacing.clone()
+    }
+
     async fn close(&self) {
         let mut state = self.gateway.state.lock().unwrap();
         state.record(self.session, Operation::Close);
         state.active.clear();
         state.disconnect = None;
+        state.global_pacing = None;
     }
 }
 
@@ -144,11 +167,6 @@ impl MarketDataSource for FakeSession {
     type Subscription = FakeSubscription;
 
     async fn confirm(&self, query: &ContractQuery) -> Result<ConfirmedContract, MarketError> {
-        self.gateway
-            .state
-            .lock()
-            .unwrap()
-            .record(self.session, Operation::Confirm);
         let ContractQuery::Equity {
             symbol,
             primary_exchange,
@@ -161,6 +179,14 @@ impl MarketDataSource for FakeSession {
             .position(|candidate| candidate == query)
             .unwrap();
         let con_id = i32::try_from(index).unwrap() + 1;
+        {
+            let mut state = self.gateway.state.lock().unwrap();
+            state.record(self.session, Operation::Confirm);
+            if con_id == 1 && state.first_equity_timeouts > 0 {
+                state.first_equity_timeouts -= 1;
+                return Err(MarketError::Timeout);
+            }
+        }
         self.confirmed.lock().unwrap().insert(con_id);
         Ok(ConfirmedContract {
             con_id,
@@ -241,11 +267,13 @@ impl OptionChainSource for FakeSession {
         equity: &ConfirmedContract,
         series: &OptionSeries,
     ) -> Result<Vec<ConfirmedContract>, MarketError> {
-        self.gateway
-            .state
-            .lock()
-            .unwrap()
-            .record(self.session, Operation::Resolve);
+        {
+            let mut state = self.gateway.state.lock().unwrap();
+            state.record(self.session, Operation::Resolve);
+            if std::mem::take(&mut state.incomplete_next_series) {
+                return Err(MarketError::IncompleteResponse);
+            }
+        }
         let mut confirmed = self.confirmed.lock().unwrap();
         // Fixed synthetic input: one expiry, integer strikes 100 upward, call
         // then put at each strike, and sequential conIds starting at 10000.
@@ -371,6 +399,75 @@ fn compact_config() -> BudgetConfig {
         reserve_lines: 2,
         ..BudgetConfig::default()
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn stock_confirmation_timeout_retries_in_session_and_recovers_chain() {
+    let config = BudgetConfig {
+        account_lines: 6,
+        stock_lines: 2,
+        ..compact_config()
+    };
+    let step = config.request_interval;
+    let initial_retry = config.reconnect_initial;
+    let (gateway, handle, stop, task) = start(config, 1);
+    gateway.state.lock().unwrap().first_equity_timeouts = 2;
+    let timed_out_stock = stock_key(1);
+    let other_stock = stock_key(2);
+    until(8, step, || {
+        gateway.count(1, Operation::Subscribe(other_stock)) == 1
+    })
+    .await;
+    assert_eq!(gateway.count(1, Operation::Confirm), 2);
+    assert_eq!(gateway.count(1, Operation::Subscribe(timed_out_stock)), 0);
+    assert!(!handle.status().discovery_complete);
+
+    until(40, step, || handle.status().discovery_complete).await;
+    let stock_attempts: Vec<_> = gateway
+        .calls()
+        .into_iter()
+        .filter(|call| call.operation == Operation::Confirm)
+        .collect();
+    assert_eq!(stock_attempts.len(), 4);
+    assert!(stock_attempts.iter().all(|call| call.session == 1));
+    assert!(stock_attempts[2].time >= stock_attempts[0].time + initial_retry);
+    assert!(stock_attempts[3].time >= stock_attempts[2].time + 2 * initial_retry);
+    assert_eq!(gateway.count(1, Operation::Subscribe(timed_out_stock)), 1);
+    assert_eq!(gateway.count(1, Operation::Subscribe(other_stock)), 1);
+    assert_eq!(gateway.count(1, Operation::Close), 0);
+    assert_eq!(handle.status().stock_lines, 2);
+    assert_eq!(handle.status().confirmed_options, 1);
+    assert_eq!(handle.option_contracts()[0].con_id, FIRST_OPTION);
+    check_request_spacing(&gateway, step);
+    stop.send(true).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn incomplete_series_cannot_complete_discovery_before_clean_refresh() {
+    let config = BudgetConfig {
+        chain_refresh: Duration::from_secs(3),
+        ..compact_config()
+    };
+    let step = config.request_interval;
+    let (gateway, handle, stop, task) = start(config, 1);
+    gateway.state.lock().unwrap().incomplete_next_series = true;
+    let key = option_key(FIRST_OPTION);
+    until(15, step, || gateway.count(1, Operation::Resolve) == 1).await;
+    for _ in 0..3 {
+        tick(step).await;
+        assert!(!handle.status().discovery_complete);
+        assert!(handle.option_contracts().is_empty());
+        assert_eq!(gateway.count(1, Operation::Subscribe(key)), 0);
+    }
+    until(20, step, || handle.status().discovery_complete).await;
+    assert_eq!(gateway.count(1, Operation::Resolve), 2);
+    assert_eq!(handle.status().confirmed_options, 1);
+    until(5, step, || gateway.count(1, Operation::Subscribe(key)) == 1).await;
+    assert_eq!(gateway.count(1, Operation::Close), 0);
+    check_request_spacing(&gateway, step);
+    stop.send(true).unwrap();
+    task.await.unwrap().unwrap();
 }
 
 #[tokio::test(start_paused = true)]
@@ -596,6 +693,80 @@ async fn pacing_notice_delays_writes_then_resumes_the_same_hot_contract() {
     assert!(writes[2].time >= writes[1].time + step);
     assert_eq!(gateway.count(2, Operation::Open), 0);
     assert_eq!(handle.status().hot_lines, 1);
+    stop.send(true).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn global_pacing_delays_rotation_without_closing_active_lines() {
+    let config = BudgetConfig {
+        rotation_dwell: Duration::from_secs(1),
+        pacing_cooldown: Duration::from_secs(2),
+        ..compact_config()
+    };
+    let cooldown = config.pacing_cooldown;
+    let step = config.request_interval;
+    let (gateway, handle, stop, task) = start(config, 2);
+    let key = option_key(FIRST_OPTION);
+    until(15, step, || {
+        gateway.count(1, Operation::Subscribe(key)) == 1
+    })
+    .await;
+
+    let first_notice = gateway.global_pacing();
+    let prior_writes = gateway.calls().len();
+    for _ in 0..4 {
+        tick(step).await;
+    }
+    let latest_notice = gateway.global_pacing();
+    for _ in 0..6 {
+        tick(step).await;
+    }
+    assert!(Instant::now() >= first_notice + cooldown);
+    assert!(Instant::now() < latest_notice + cooldown);
+    assert_eq!(gateway.calls().len(), prior_writes);
+    assert_eq!(handle.status().rotation_lines, 1);
+    assert_eq!(handle.status().phase, SchedulerPhase::Online);
+
+    until(8, step, || gateway.count(1, Operation::Cancel(key)) == 1).await;
+    let after_notice = gateway.calls()[prior_writes];
+    assert_eq!(after_notice.operation, Operation::Cancel(key));
+    assert!(after_notice.time >= latest_notice + cooldown);
+    assert_eq!(gateway.count(1, Operation::Close), 0);
+    stop.send(true).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn global_pacing_deadline_survives_disconnect_before_driver_sees_notice() {
+    let config = BudgetConfig {
+        reconnect_initial: Duration::from_millis(250),
+        pacing_cooldown: Duration::from_secs(2),
+        ..compact_config()
+    };
+    let cooldown = config.pacing_cooldown;
+    let step = config.request_interval;
+    let (gateway, _, stop, task) = start(config, 0);
+    until(15, step, || {
+        gateway.count(1, Operation::Subscribe(stock_key(1))) == 1
+    })
+    .await;
+
+    let paced_at = gateway.global_pacing();
+    gateway.disconnect(0);
+    for _ in 0..7 {
+        tick(step).await;
+    }
+    assert_eq!(gateway.count(1, Operation::Close), 1);
+    assert_eq!(gateway.count(2, Operation::Open), 0);
+
+    until(4, step, || gateway.count(2, Operation::Open) == 1).await;
+    let reopened = gateway
+        .calls()
+        .into_iter()
+        .find(|call| call.session == 2 && call.operation == Operation::Open)
+        .unwrap();
+    assert!(reopened.time >= paced_at + cooldown);
     stop.send(true).unwrap();
     task.await.unwrap().unwrap();
 }

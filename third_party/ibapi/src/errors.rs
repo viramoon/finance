@@ -102,6 +102,10 @@ pub enum Error {
     #[error("UnexpectedEndOfStream")]
     UnexpectedEndOfStream,
 
+    /// The response buffer overwrote messages before a complete request could consume them.
+    #[error("response buffer skipped {0} messages")]
+    ResponseLagged(u64),
+
     /// An IB notice frame (TWS error/warning/system message) received in
     /// response to a request. Carries the full typed [`Notice`] — code,
     /// message, optional timestamp, and advanced-order-reject JSON.
@@ -258,6 +262,7 @@ impl Clone for Error {
             Error::EndOfStream => Error::EndOfStream,
             Error::UnexpectedResponse(m) => Error::UnexpectedResponse(m.clone()),
             Error::UnexpectedEndOfStream => Error::UnexpectedEndOfStream,
+            Error::ResponseLagged(skipped) => Error::ResponseLagged(*skipped),
             Error::Notice(n) => Error::Notice(n.clone()),
             Error::AlreadySubscribed => Error::AlreadySubscribed,
             Error::HistoricalParseError(e) => Error::HistoricalParseError(e.clone()),

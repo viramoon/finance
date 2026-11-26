@@ -16,8 +16,10 @@ use std::{
 };
 
 use anyhow::{Result, ensure};
-use chrono::{DateTime, TimeDelta, Utc};
-use finance_ib::market::{ConfirmedContract, ContractQuery, MarketEvent, RequestKey};
+use chrono::{DateTime, NaiveDate, TimeDelta, Utc};
+use finance_ib::market::{
+    ConfirmedContract, ContractKind, ContractQuery, MarketEvent, RequestKey, option_market_date,
+};
 use finance_market_protocol::DecimalText;
 use tokio::{
     sync::{Notify, broadcast},
@@ -139,6 +141,17 @@ impl LineHandle {
                 LinePool::Rotation => rotation += 1,
             }
         }
+        let (mut confirmed_options, mut observed_options) = (0, 0);
+        for contract in state.current_options(as_of) {
+            confirmed_options += 1;
+            if state
+                .coverage
+                .last_observed_at(session::option_key(contract.con_id))
+                .is_some_and(|receipt| receipt >= oldest)
+            {
+                observed_options += 1;
+            }
+        }
         BudgetStatus {
             phase: state.phase,
             as_of,
@@ -147,17 +160,8 @@ impl LineHandle {
             stock_lines: stock,
             hot_lines: hot,
             rotation_lines: rotation,
-            confirmed_options: state.options.len(),
-            observed_options: state
-                .options
-                .keys()
-                .filter(|&&id| {
-                    state
-                        .coverage
-                        .last_observed_at(session::option_key(id))
-                        .is_some_and(|receipt| receipt >= oldest)
-                })
-                .count(),
+            confirmed_options,
+            observed_options,
             discovery_complete: state.discovery_complete,
         }
     }
@@ -169,8 +173,7 @@ impl LineHandle {
             .state
             .lock()
             .expect("line state")
-            .options
-            .values()
+            .current_options(self.0.now())
             .cloned()
             .collect()
     }
@@ -268,8 +271,107 @@ struct State {
     cooldown: Option<Instant>,
 }
 
+impl State {
+    fn current_options(&self, as_of: DateTime<Utc>) -> impl Iterator<Item = &ConfirmedContract> {
+        let today = option_market_date(as_of).ok();
+        self.options
+            .values()
+            .filter(move |contract| today.is_some_and(|today| unexpired(contract, today)))
+    }
+}
+
+fn unexpired(contract: &ConfirmedContract, today: NaiveDate) -> bool {
+    contract.con_id > 0
+        && matches!(&contract.kind, ContractKind::Option(option) if option.expiry >= today)
+}
+
 struct LiveLine {
     pool: LinePool,
     generation: u64,
     receiving: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use chrono::TimeZone;
+    use finance_ib::market::{OptionContract, OptionRight};
+
+    use super::*;
+
+    fn option(con_id: i32, expiry: NaiveDate) -> ConfirmedContract {
+        ConfirmedContract {
+            con_id,
+            symbol: "SYNTH".into(),
+            primary_exchange: None,
+            kind: ContractKind::Option(OptionContract {
+                expiry,
+                strike: "100".parse().unwrap(),
+                right: OptionRight::Call,
+                multiplier: "100".parse().unwrap(),
+                underlying_con_id: 1,
+            }),
+            liquid_hours: Vec::new(),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn disconnected_chain_excludes_prior_day_options_after_eastern_midnight() {
+        let mut scheduler = LineScheduler::new(BudgetConfig::default(), Vec::new()).unwrap();
+        // In July, 04:00 UTC is midnight Eastern. The initial UTC date is already July 9.
+        let before_midnight = Utc.with_ymd_and_hms(2025, 7, 9, 3, 59, 59).unwrap();
+        Arc::get_mut(&mut scheduler.shared).unwrap().start = before_midnight;
+        let handle = scheduler.handle();
+        let today = NaiveDate::from_ymd_opt(2025, 7, 8).unwrap();
+        let expiring = option(2, today);
+        let following = option(3, today.succ_opt().unwrap());
+        let key = session::option_key(expiring.con_id);
+        let observed_at = before_midnight - TimeDelta::seconds(4);
+        let closed_at = before_midnight - TimeDelta::seconds(1);
+        {
+            let mut state = scheduler.shared.state.lock().unwrap();
+            state.phase = SchedulerPhase::Reconnecting;
+            for contract in [&expiring, &following] {
+                state.options.insert(contract.con_id, contract.clone());
+            }
+            state.coverage.opened(key, observed_at);
+            state.coverage.observed(key, observed_at);
+            state.coverage.closed(key, closed_at);
+        }
+
+        assert_eq!(handle.option_contracts(), [expiring, following.clone()]);
+        assert_eq!(handle.status().confirmed_options, 2);
+        assert_eq!(handle.status().observed_options, 1);
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let status = handle.status();
+        assert_eq!(status.phase, SchedulerPhase::Reconnecting);
+        assert_eq!(status.confirmed_options, 1);
+        assert_eq!(status.observed_options, 0);
+        assert_eq!(
+            handle.option_contracts().as_slice(),
+            std::slice::from_ref(&following)
+        );
+        let report = handle.coverage(key, observed_at, status.as_of).unwrap();
+        assert_eq!(report.last_observed_at, Some(observed_at));
+        assert_eq!(
+            report.covered,
+            [CoverageInterval {
+                start: observed_at,
+                end: closed_at
+            }]
+        );
+        assert_eq!(
+            report.uncovered,
+            [CoverageInterval {
+                start: closed_at,
+                end: status.as_of
+            }]
+        );
+
+        scheduler.shared.state.lock().unwrap().phase = SchedulerPhase::Stopped;
+        assert_eq!(handle.option_contracts(), [following]);
+        assert_eq!(handle.status().confirmed_options, 1);
+    }
 }

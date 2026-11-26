@@ -372,6 +372,11 @@ impl MarketReplay {
         self.bus.request_channels.read().await.len()
     }
 
+    /// Capacity of each broadcast buffer for request-scoped response frames.
+    pub fn request_buffer_capacity(&self) -> usize {
+        super::BROADCAST_CHANNEL_CAPACITY
+    }
+
     /// Wait until the given number of requests has reached the replay transport.
     pub async fn wait_for_writes(&self, count: usize) {
         let signals = self.stream.dispatcher.as_ref().expect("requires background dispatcher");

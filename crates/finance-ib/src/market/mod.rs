@@ -7,6 +7,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use finance_market_protocol::DecimalText;
 use serde::Serialize;
 
+pub(crate) use ib::request_notice_kind as market_notice_kind;
 pub use ib::{PaperMarket, option_market_date};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
@@ -165,6 +166,8 @@ pub enum MarketError {
     NotEntitled,
     #[error("market request timed out")]
     Timeout,
+    #[error("market metadata response was incomplete")]
+    IncompleteResponse,
     #[error("market request pacing limit reached")]
     Pacing,
     #[error("market session disconnected")]

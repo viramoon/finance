@@ -308,3 +308,100 @@ async fn unfinished_series_does_not_confirm_partial_contract_details() {
     assert!(!market.confirmed.lock().await.contains_key(&91002));
     market.close().await;
 }
+
+// This global farm notice routes independently. Seeing it proves the real
+// dispatcher processed every queued response before the held write resumes.
+async fn wait_for_dispatcher(replay: &MarketReplay, market: &PaperMarket) {
+    let mut notices = market.peer.client.notice_stream().unwrap();
+    replay.notice(-1, 2104).await.unwrap();
+    assert_eq!(notices.next().await.unwrap().code, 2104);
+}
+
+#[tokio::test(start_paused = true)]
+async fn overflowed_contract_details_are_discarded_and_retry_cleanly() {
+    let (replay, market, equity) = market_with_equity().await;
+    let series = discovered_series(
+        EQUITY,
+        vec![definition()],
+        option_market_date(Utc::now()).unwrap(),
+    );
+    let release = replay.hold_next_write();
+    let answer = async {
+        replay.wait_for_writes(3).await;
+        let Some(MarketWrite::ConfirmOptionSeries {
+            request_id: Some(id),
+            ..
+        }) = replay.writes().pop()
+        else {
+            panic!("expected option series detail request");
+        };
+        let capacity = i32::try_from(replay.request_buffer_capacity()).unwrap();
+        for offset in 0..=capacity {
+            replay
+                .option_contract(id, &listed(92_001 + offset))
+                .await
+                .unwrap();
+        }
+        replay.contract_data_end(id).await.unwrap();
+        wait_for_dispatcher(&replay, &market).await;
+        release.send(()).unwrap();
+    };
+    let (failed, ()) = timeout(WAIT, async {
+        tokio::join!(market.confirm_series(&equity, &series[0]), answer)
+    })
+    .await
+    .unwrap();
+    assert_eq!(failed, Err(MarketError::IncompleteResponse));
+    assert_eq!(market.confirmed.lock().await.len(), 1);
+
+    let answer = async {
+        replay.wait_for_writes(4).await;
+        let Some(MarketWrite::ConfirmOptionSeries {
+            request_id: Some(id),
+            ..
+        }) = replay.writes().pop()
+        else {
+            panic!("expected option series retry");
+        };
+        replay.option_contract(id, &listed(92_001)).await.unwrap();
+        replay.contract_data_end(id).await.unwrap();
+    };
+    let (retried, ()) = timeout(WAIT, async {
+        tokio::join!(market.confirm_series(&equity, &series[0]), answer)
+    })
+    .await
+    .unwrap();
+    assert_eq!(retried.unwrap()[0].con_id, 92_001);
+    assert_eq!(market.confirmed.lock().await.len(), 2);
+    market.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn overflowed_chain_definitions_fail_even_with_an_end_marker() {
+    let (replay, market, equity) = market_with_equity().await;
+    let release = replay.hold_next_write();
+    let answer = async {
+        replay.wait_for_writes(3).await;
+        let Some(MarketWrite::DiscoverOptions {
+            request_id: Some(id),
+            ..
+        }) = replay.writes().pop()
+        else {
+            panic!("expected option-chain request");
+        };
+        let row = definition();
+        for _ in 0..=replay.request_buffer_capacity() {
+            replay.option_parameters(id, &row).await.unwrap();
+        }
+        replay.option_parameters_end(id).await.unwrap();
+        wait_for_dispatcher(&replay, &market).await;
+        release.send(()).unwrap();
+    };
+    let (failed, ()) = timeout(WAIT, async {
+        tokio::join!(market.option_series(&equity), answer)
+    })
+    .await
+    .unwrap();
+    assert_eq!(failed, Err(MarketError::IncompleteResponse));
+    market.close().await;
+}

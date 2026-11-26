@@ -68,6 +68,7 @@ pub struct PaperPeer {
     client: Client,
     notices: tokio::sync::Mutex<ibapi::subscriptions::NoticeStream>,
     invalidated: watch::Sender<bool>,
+    market_pacing: watch::Sender<Option<Instant>>,
 }
 impl PaperPeer {
     fn new(client: Client, notices: ibapi::subscriptions::NoticeStream) -> Self {
@@ -75,6 +76,7 @@ impl PaperPeer {
             client,
             notices: tokio::sync::Mutex::new(notices),
             invalidated: watch::Sender::new(false),
+            market_pacing: watch::Sender::new(None),
         }
     }
 
@@ -167,6 +169,9 @@ impl Session for PaperPeer {
             while let Some(notice) = notices.next().await {
                 if invalidates_market_session(notice.code) {
                     return format!("IB connectivity notice {}", notice.code);
+                }
+                if market::market_notice_kind(&notice) == market::MarketNotice::Pacing {
+                    self.market_pacing.send_replace(Some(Instant::now()));
                 }
             }
             "IB notice stream ended".into()

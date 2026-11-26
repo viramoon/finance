@@ -7,11 +7,7 @@ use crate::market::{OptionChainSource, OptionSeries};
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
 use finance_market_protocol::DecimalText;
-use ibapi::{
-    contracts::{Contract, ContractDetails, OptionChain, SecurityType},
-    prelude::StreamExt,
-    subscriptions::SubscriptionItem,
-};
+use ibapi::contracts::{Contract, ContractDetails, OptionChain, SecurityType};
 use rust_decimal::Decimal;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -24,24 +20,15 @@ impl OptionChainSource for PaperMarket {
         self.peer
             .while_connected(async {
                 self.require_confirmed_equity(equity).await?;
-                let rows = bounded_request(self.timeout, async {
-                    let mut response = self
-                        .peer
-                        .client
-                        .option_chain(&equity.symbol, "", SecurityType::Stock, equity.con_id)
-                        .await?;
-                    let mut rows = Vec::new();
-                    while let Some(item) = response.next().await {
-                        match item? {
-                            SubscriptionItem::Data(row) => rows.push(row),
-                            SubscriptionItem::Notice(notice) if notice.is_error() => {
-                                return Err(ibapi::Error::Notice(notice));
-                            }
-                            SubscriptionItem::Notice(_) => {}
-                        }
-                    }
-                    Ok(rows)
-                })
+                let rows = bounded_request(
+                    self.timeout,
+                    self.peer.client.option_chain_complete(
+                        &equity.symbol,
+                        "",
+                        SecurityType::Stock,
+                        equity.con_id,
+                    ),
+                )
                 .await?;
                 Ok(discovered_series(
                     equity.con_id,

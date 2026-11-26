@@ -15,7 +15,7 @@ use futures::StreamExt;
 use log::{debug, error, info, warn};
 use tokio::sync::{broadcast, mpsc, watch, Mutex, RwLock};
 use tokio::task;
-use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 
 use crate::connection::r#async::AsyncConnection;
 use crate::messages::{shared_channel_configuration, IncomingMessages, Notice, OutgoingMessages, ResponseMessage};
@@ -141,13 +141,23 @@ impl AsyncInternalSubscription {
 
     pub async fn next(&mut self) -> Option<Result<ResponseMessage, Error>> {
         loop {
+            match self.next_complete().await? {
+                Err(Error::ResponseLagged(_)) => continue,
+                result => return Some(result),
+            }
+        }
+    }
+
+    /// Read a finite response without silently skipping lost callbacks.
+    pub(crate) async fn next_complete(&mut self) -> Option<Result<ResponseMessage, Error>> {
+        loop {
             match self.stream.next().await? {
                 Ok(item) => {
                     if let Some(legacy) = item.into_legacy() {
                         return Some(legacy);
                     }
                 }
-                Err(_lagged) => continue,
+                Err(BroadcastStreamRecvError::Lagged(skipped)) => return Some(Err(Error::ResponseLagged(skipped))),
             }
         }
     }
