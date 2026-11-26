@@ -71,7 +71,7 @@ finance-api 读取现有 `FERTILE_DATA_ROOT` 下的 `finance-state/bars/v1/<sour
 
 每根 bar 包含 `open_ts`、`end_ts`、`first_available_ts`、`trading_day`（`YYYY-MM-DD`）和十进制 `open`、`high`、`low`、`close`、`volume`。同一序列的区间按时间递增且互不重叠。闭合 bar 要求 `end_ts ≤ first_available_ts ≤ as_of`，未闭合 bar 以 `open_ts ≤ first_available_ts ≤ as_of` 验证，允许延迟源在理论收盘后继续输出未闭合预览。`24X7` 序列的 `market_timezone` 为 `UTC`，单根 bar 的半开区间落在同一 UTC 交易日，允许在次日零点结束。`history_complete` 表示已包含声明序列起点以来的历史。缺少起点历史时仍可请求原始 bars，指标请求返回 422。交易日内缺 bar 的处理由 [指标口径](indicators.md) 定义。
 
-当前查询端提供 `BarsSource` 读取边界。F3 负责接入实际投影和重新发布更正。长期分钟历史需要向指标内核提供完整闭合前缀，或接入与同一组件版本对应的等价状态检查点。现有 collector Parquet 和研究目录使用各自管道。
+当前查询端提供 `BarsSource` 读取边界。[F3 投影](market-wal.md#parquet-与投影游标)发布获准落盘的 F1 事件 Parquet 和修订索引。受信的主图发布方可用该索引构建上述 `bars/v1` 快照，并在事件更正后重新发布。长期分钟历史需要向指标内核提供完整闭合前缀，或接入与同一组件版本对应的等价状态检查点。现有 collector 闭合 bar Parquet 和研究目录使用各自管道。
 
 ## 示例批任务
 
@@ -94,6 +94,8 @@ utoipa 从 handler 注解和实际响应类型导出，不需要数据目录、�
 权威集成快照是 fertile contracts/finance.openapi.json：改代码并验证 → 从同一 commit 导出 artifact → 后续 fertile 集成 PR 同步快照和子模块指针、比对差异 → web 生成客户端。禁止手改生成文件；当前 issue 不跨仓库更新快照或实现比对脚本。破坏性接口变更须有兼容迁移计划，见 [fertile contracts](https://github.com/viramoon/fertile/tree/main/contracts)。
 
 行情流使用独立版本化 schema 和样本，见 [行情标的、事件与流协议](market-protocol.md)。
+
+离线因子评价和历史研究登记使用 Python 接口。F10 接入对外读契约时可引用报告的十进制字符串和研究状态。[离线接口](factor-research.md)
 
 ## 历史回测与提交确认
 

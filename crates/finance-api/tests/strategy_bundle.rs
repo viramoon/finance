@@ -247,6 +247,33 @@ fn compiles_target_weights_from_registered_factor_allocator() {
 }
 
 #[test]
+fn rejects_historical_research_strategy_id_before_binding() {
+    const HISTORICAL_ID: &str = "research.factor-momentum";
+    let mut bindings = MemoryBindings::default();
+    for version in ["1.0.0", "2.0.0"] {
+        let source = ENTRY_EXIT
+            .replace("example.equity-momentum", HISTORICAL_ID)
+            .replace("version: \"1.0.0\"", &format!("version: \"{version}\""));
+        assert_diagnostic(
+            compile(
+                source.as_bytes(),
+                InputFormat::Yaml,
+                &example_catalog(),
+                &mut bindings,
+            ),
+            &source,
+            "RESEARCH_ONLY_STRATEGY",
+            "/metadata/id",
+            HISTORICAL_ID,
+        );
+        assert_eq!(
+            bindings.bind(HISTORICAL_ID, version, "unused").unwrap(),
+            Binding::Bound
+        );
+    }
+}
+
+#[test]
 fn reports_closed_structure_types_and_parameter_bounds_at_yaml_values() {
     for (from, to, code, path, at) in [
         (

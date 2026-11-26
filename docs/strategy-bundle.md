@@ -147,6 +147,8 @@ spec:
 
 第二遍解析已登记引用并检查槽位、依赖图、币种、交易日历、预热和时间可见性。交易用数据和因子必须在决策时刻或之前可见。样例中延迟日线在收盘决策后才发布，因此 [future-data.yaml](../strategies/fixtures/strategy-bundle/v1/future-data.yaml) 无法编译。现金引擎禁止借贷和空头，预算为非负且总和最多为 1。实际区间的样本覆盖、成分和数据快照留给配置回测运行时再检查。
 
+历史策略 ID `research.factor-momentum` 保留给 `research_only` 目录项。以该 ID 上传 StrategyBundle 会在版本绑定前返回 `RESEARCH_ONLY_STRATEGY`，诊断指向 `/metadata/id`。[历史登记证据](factor-research.md#月频动量)
+
 编译在首个错误处停止，错误 JSON 提供 `path`、`code`、`message` 和 `location`。`path` 沿用 JSON Pointer 的路径形状，`""` 指根节点。公开 schema 中的固定字段名和实际数组索引会保留。其余映射键（包括局部 ID 和未知字段名）用 `<key>` 占位，例如 `/spec/factors/<key>/use`。出现占位符时按 `location` 定位原文，行列从 1 起算，缺失字段指向最近的已有位置。公开诊断用固定文本解释原因，省略输入原值、原文片段、配置哈希和底层存储错误文本。
 
 [duplicate-key.txt](../strategies/fixtures/strategy-bundle/v1/duplicate-key.txt) 在 `/metadata/id` 报 `DUPLICATE_KEY`。其他错误码包括 `FUTURE_DATA`、`UNKNOWN_COMPONENT`、`SLOT_MISMATCH`、`DEPENDENCY_CYCLE`、`BUDGET_EXCEEDED`、`VERSION_CONFLICT`。用于验证严格解析的纯文本文件含预期被拒绝的 YAML。
@@ -184,4 +186,4 @@ initial_cash = Decimal(plan["bundle"]["spec"]["portfolio"]["initial_cash"]["amou
 
 `spec.clock.calendar` 与标的主数据的 `calendar_id` 共用日历代码。跨契约接入时采用 1–32 位 ASCII 大写字母或数字，首位之后也允许下划线和连字符。当前示例目录只登记 `XNYS`，编译器要求股票池和日线目录的日历与决策日历一致。`metadata.id` 中的 `example.*` 是策略 ID，`spec.universe.ref` 和 `spec.data.bars` 中的 `example.*@1.0.0` 是各自目录的引用。后续解析股票池成分和日线记录时，实际标的使用 `<LOCAL>.<VENUE>`，例如 `SPY.ARCA`。标的和日历的完整规则见 [行情标的、事件与流协议](market-protocol.md)。
 
-F7 接入持久版本绑定、数据与成分的快照哈希、引擎提交、成本和运行区间，并将编译计划归入不可变 `run_manifest`。运行期指标读取已解析的版本和参数，使用 [共享指标内核](indicators.md) 计算闭合且可见的 bar。因子评价由 F8 接入。
+F7 接入持久版本绑定、数据与成分的快照哈希、引擎提交、成本和运行区间，并将编译计划归入不可变 `run_manifest`。运行期指标读取已解析的版本和参数，使用 [共享指标内核](indicators.md) 计算闭合且可见的 bar。F8 提供离线评价及版本选用检查，F7 接入研究因子时调用 `FactorResearchCatalog.select_for_backtest`。[因子研究接口](factor-research.md)
