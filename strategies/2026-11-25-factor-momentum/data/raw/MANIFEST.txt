@@ -1,0 +1,16 @@
+# Ken French raw downloads (by coordinator outside sandbox)
+downloaded_at_utc: 2026-11-26T03:02:31Z (2026-11-25 19:02 PST)
+base_url: https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/
+landing: https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/data_library.html
+tool: curl -L, HTTP 200 for all
+files (sha256  bytes  name  url):
+baad3163e4c0a72ea124a83248f2a7518f95d50418bac6167e0a903ce1881624  5339  F-F_LT_Reversal_Factor_CSV.zip  https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_LT_Reversal_Factor_CSV.zip
+fb26b5a0707dba2b76d2e9247f6ceddbd2f65b8122a87b13ba5402e630e85f0d  80486  F-F_LT_Reversal_Factor_daily_CSV.zip  https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_LT_Reversal_Factor_daily_CSV.zip
+27ed60e5b2caa9ea334a261cddfa864a9926f6bf45e9677c95dfd835c5abb315  5603  F-F_Momentum_Factor_CSV.zip  https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Momentum_Factor_CSV.zip
+e56d5bc845544e2993e77353b12c611cfce3149ef754f9b59fc67904ddadd369  85338  F-F_Momentum_Factor_daily_CSV.zip  https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Momentum_Factor_daily_CSV.zip
+17d7a575e71d6764a70ddec3f8d887756c0eebf3a60f64d6ba95d2adde3fed26  11971  F-F_Research_Data_5_Factors_2x3_CSV.zip  https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_5_Factors_2x3_CSV.zip
+e58577223032aa45071a46686f7068900c371b516c9eb04e28e974c34264f84f  150489  F-F_Research_Data_5_Factors_2x3_daily_CSV.zip  https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_5_Factors_2x3_daily_CSV.zip
+b03d39e4bb253dda0f14893db3b78e64b40b8d6549a0fc0fd4111dae84c98618  13078  F-F_Research_Data_Factors_CSV.zip  https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_Factors_CSV.zip
+96c23b88e651cbfff3740a53f8225e59ee39893371e96385a1d8125ec2cd9c89  178326  F-F_Research_Data_Factors_daily_CSV.zip  https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_Factors_daily_CSV.zip
+7ddb68bbaa507ec0b298ceaecf99e719ef051367d93de3d1f89150e3fbb61740  5576  F-F_ST_Reversal_Factor_CSV.zip  https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_ST_Reversal_Factor_CSV.zip
+00b2781636ebcbcfc5072844d11bedf1cdaed5e0635fc3c8f36159f26e01fa41  86110  F-F_ST_Reversal_Factor_daily_CSV.zip  https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_ST_Reversal_Factor_daily_CSV.zip

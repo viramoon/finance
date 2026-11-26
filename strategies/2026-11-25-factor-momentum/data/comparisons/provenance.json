@@ -1,0 +1,112 @@
+{
+  "aggregation": "product(1 + daily strategy_ret) - 1, complete XNYS calendar months",
+  "decimal_precision": 34,
+  "monthly_snapshot_sha256": "d37fe823d286d7e15129efb1f27f82a2862c7a271c63e71c5553e3d7dcc70960",
+  "sources": {
+    "TSMOM12": {
+      "bytes": 910248,
+      "daily_returns": {
+        "first": "1970-12-31",
+        "last": "2026-09-30",
+        "observations": 14055
+      },
+      "daily_rows": {
+        "first": "1970-12-30",
+        "last": "2026-09-30",
+        "observations": 14056
+      },
+      "excluded_months": [
+        "1970-12-31"
+      ],
+      "missing_session_labels": [
+        "1970-12-01",
+        "1970-12-02",
+        "1970-12-03",
+        "1970-12-04",
+        "1970-12-07",
+        "1970-12-08",
+        "1970-12-09",
+        "1970-12-10",
+        "1970-12-11",
+        "1970-12-14",
+        "1970-12-15",
+        "1970-12-16",
+        "1970-12-17",
+        "1970-12-18",
+        "1970-12-21",
+        "1970-12-22",
+        "1970-12-23",
+        "1970-12-24",
+        "1970-12-28",
+        "1970-12-29"
+      ],
+      "missing_strategy_returns": [
+        "1970-12-30"
+      ],
+      "monthly_returns": {
+        "first": "1971-01-31",
+        "last": "2026-09-30",
+        "observations": 669
+      },
+      "sha256": "40300f04d86fe0a9939f048a1116405db2c4fff217bf27f9aa18ff0c2207e3a0",
+      "source_bar_time": "21:00 UTC",
+      "source_file": "2026-11-23-tsmom-mkt/results/performance_returns.csv"
+    },
+    "faber_sma10": {
+      "bytes": 915036,
+      "daily_returns": {
+        "first": "1970-11-03",
+        "last": "2026-09-30",
+        "observations": 14095
+      },
+      "daily_rows": {
+        "first": "1970-11-02",
+        "last": "2026-09-30",
+        "observations": 14096
+      },
+      "excluded_months": [
+        "1970-11-30"
+      ],
+      "missing_session_labels": [],
+      "missing_strategy_returns": [
+        "1970-11-02"
+      ],
+      "monthly_returns": {
+        "first": "1970-12-31",
+        "last": "2026-09-30",
+        "observations": 670
+      },
+      "sha256": "4c772c1463976936d6b8f655b9e2deb099f596f282471cc581688c48742ea7ae",
+      "source_bar_time": "21:00 UTC",
+      "source_file": "2026-11-25-faber-sma10-mkt/results/performance_returns.csv"
+    },
+    "vol_managed": {
+      "bytes": 986003,
+      "daily_returns": {
+        "first": "1970-02-03",
+        "last": "2026-09-30",
+        "observations": 14286
+      },
+      "daily_rows": {
+        "first": "1970-02-02",
+        "last": "2026-09-30",
+        "observations": 14287
+      },
+      "excluded_months": [
+        "1970-02-28"
+      ],
+      "missing_session_labels": [],
+      "missing_strategy_returns": [
+        "1970-02-02"
+      ],
+      "monthly_returns": {
+        "first": "1970-03-31",
+        "last": "2026-09-30",
+        "observations": 679
+      },
+      "sha256": "62d5519c86d1d43ff5a7c7be21175b617b634887d6f8a2035d04b58881279a77",
+      "source_bar_time": "21:00 UTC",
+      "source_file": "2026-11-24-vol-managed-mkt/results/performance_returns.csv"
+    }
+  }
+}
