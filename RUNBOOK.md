@@ -42,6 +42,17 @@ FERTILE_PROFILE=cloudbox cargo run --locked -p finance-api
 
 API 接受 SIGTERM 和 Ctrl-C 优雅停止；部署守护、日志收集和滚动重启以 fertile deploy/ 为准，本 PR 不部署。默认 loopback / 8081，无账户配置和 Gateway 依赖；不能把当前 ready 当成交易 ready。
 
+## 离线因子研究验收
+
+在仓库根目录用含研究依赖的现有 Python 环境执行。定向测试在内存生成截面和收盘价，月频登记读取仓库内原报告并核对证据哈希。
+
+```sh
+PYTHONPATH=python /path/to/research/venv/bin/python -m unittest discover -s tests -p 'test_factor_*.py' -v
+PYTHONPATH=python /path/to/research/venv/bin/python -m unittest discover -s tests -p 'test_historical_research.py' -v
+```
+
+报告复算时固定因子版、数据版、交易会话、各段区间、分位数和成本档。用逐期参考权重及目标权重复算换手、费用及费前费后收益，再核对复利汇总。遇到未来披露诊断时核对数据源的真实发布时间和该版修订的可见区间。停止新回测选择时将相应因子版本退回 `observe_only`，记录理由并保留原报告引用。入参、状态和历史证据见 [因子研究接口](docs/factor-research.md)。
+
 ## 行情与作业
 
 从 finance 仓库根运行。先按源码构建文档准备虚拟环境，设置各进程共用的 FERTILE_DATA_ROOT，然后构建三个 Rust 程序。
