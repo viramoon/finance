@@ -1,4 +1,4 @@
-"""Types and strict codecs for the finance market stream protocol 1.0.
+"""Types and strict codecs for the finance market stream protocol.
 
 Use from_json or from_dict to decode and validate untrusted data. Dataclass
 constructors accept values supplied by typed callers.
@@ -13,6 +13,7 @@ from typing import Self
 
 
 SCHEMA_VERSION = "1.0"
+CONTEXT_SCHEMA_VERSION = "2.0"
 _MAX_U64 = 2**64 - 1
 _MAX_U32 = 2**32 - 1
 _U64 = re.compile(r"0|[1-9][0-9]*")
@@ -136,6 +137,10 @@ class Kind(StrEnum):
     STATUS = "status"
 
 
+class ContextKind(StrEnum):
+    PERPETUAL_CONTEXT = "perpetual_context"
+
+
 _MARKET_KINDS = frozenset((Kind.BAR_CLOSED, Kind.TRADE, Kind.SNAPSHOT, Kind.DELTA))
 _BOOK_KINDS = frozenset((Kind.SNAPSHOT, Kind.DELTA))
 
@@ -197,17 +202,29 @@ def _choice[T: StrEnum](enum: type[T], value: object, path: str) -> T:
         raise ProtocolError(path, "invalid_value", f"unknown value {text!r}, expected {choices}") from None
 
 
+def _event_kind(value: object, path: str) -> Kind | ContextKind:
+    if value == ContextKind.PERPETUAL_CONTEXT:
+        return _choice(ContextKind, value, path)
+    return _choice(Kind, value, path)
+
+
 def _market_kind(value: object, path: str) -> Kind:
     kind = _choice(Kind, value, path)
     _require(kind in _MARKET_KINDS, path, "expected a market message kind", kind="invalid_value")
     return kind
 
 
-def _version(record: dict[str, object]) -> str:
+def _capability_kind(value: object, path: str) -> Kind | ContextKind:
+    if value == ContextKind.PERPETUAL_CONTEXT:
+        return _choice(ContextKind, value, path)
+    return _market_kind(value, path)
+
+
+def _version(record: dict[str, object], expected: str = SCHEMA_VERSION) -> str:
     path = "/schema_version"
     value = _string(record["schema_version"], path)
-    _require(value == SCHEMA_VERSION, path, f"expected {SCHEMA_VERSION!r}", kind="invalid_value")
-    return SCHEMA_VERSION
+    _require(value == expected, path, f"expected {expected!r}", kind="invalid_value")
+    return value
 
 
 def _instrument_id(value: object, venue: str, path: str) -> str:
@@ -403,7 +420,7 @@ class Capability(_WireObject):
     schema_version: str
     source: str
     product: str
-    message_kinds: tuple[Kind, ...]
+    message_kinds: tuple[Kind | ContextKind, ...]
     max_depth: int
     can_backfill: bool
     delay_tier: DelayTier
@@ -417,9 +434,10 @@ class Capability(_WireObject):
         ))
         kinds_path = f"{path}/message_kinds"
         kinds = tuple(
-            _market_kind(item, f"{kinds_path}/{index}")
+            _capability_kind(item, f"{kinds_path}/{index}")
             for index, item in enumerate(_array(data["message_kinds"], kinds_path))
         )
+        version = CONTEXT_SCHEMA_VERSION if ContextKind.PERPETUAL_CONTEXT in kinds else SCHEMA_VERSION
         _require(bool(kinds), kinds_path, "expected at least one market message kind")
         _require(len(set(kinds)) == len(kinds), kinds_path, "duplicate message kind")
         max_depth = _depth(data["max_depth"], f"{path}/max_depth")
@@ -432,7 +450,7 @@ class Capability(_WireObject):
         if type(can_backfill) is not bool:
             raise ProtocolError("/can_backfill", "invalid_type", "expected a boolean")
         return cls(
-            schema_version=_version(data),
+            schema_version=_version(data, version),
             source=_pattern(data["source"], _TOKEN, f"{path}/source"),
             product=_pattern(data["product"], _TOKEN, f"{path}/product"),
             message_kinds=kinds,
@@ -521,7 +539,14 @@ class Status:
     state: SourceState
 
 
-type Payload = MarketPayload | Correction | Gap | Reset | Heartbeat | Status
+@dataclass(frozen=True, slots=True)
+class PerpetualContext:
+    funding_rate: DecimalText
+    open_interest: DecimalText
+    mark_price: DecimalText
+
+
+type Payload = MarketPayload | Correction | Gap | Reset | Heartbeat | Status | PerpetualContext
 
 
 def _quantity(value: object, path: str, *, positive: bool = False) -> DecimalText:
@@ -611,7 +636,7 @@ def _market_payload(
             raise ProtocolError(path, "invalid_value", "expected a market payload")
 
 
-def _payload(kind: Kind, value: object, exchange_ts: U64Text | None) -> Payload:
+def _payload(kind: Kind | ContextKind, value: object, exchange_ts: U64Text | None) -> Payload:
     path = "/payload"
     if kind in _MARKET_KINDS or kind == Kind.CORRECTION:
         if exchange_ts is None:
@@ -647,6 +672,13 @@ def _payload(kind: Kind, value: object, exchange_ts: U64Text | None) -> Payload:
         case Kind.STATUS:
             data = _object(value, path, ("state",))
             return Status(_choice(SourceState, data["state"], f"{path}/state"))
+        case ContextKind.PERPETUAL_CONTEXT:
+            data = _object(value, path, ("funding_rate", "open_interest", "mark_price"))
+            return PerpetualContext(
+                funding_rate=DecimalText(data["funding_rate"], field=f"{path}/funding_rate"),
+                open_interest=_quantity(data["open_interest"], f"{path}/open_interest"),
+                mark_price=_quantity(data["mark_price"], f"{path}/mark_price", positive=True),
+            )
         case _:
             raise ProtocolError("/kind", "invalid_value", "unknown message kind")
 
@@ -677,7 +709,7 @@ class Event(_WireObject):
     cursor: str
     revision: U64Text
     license: str
-    kind: Kind
+    kind: Kind | ContextKind
     payload: Payload
     native_id: str | None = None
 
@@ -690,7 +722,11 @@ class Event(_WireObject):
             "cursor", "revision", "license", "kind", "payload",
         ), ("native_id",))
         venue = _pattern(data["venue"], _VENUE_OR_CALENDAR, f"{path}/venue")
-        kind = _choice(Kind, data["kind"], f"{path}/kind")
+        kind = _event_kind(data["kind"], f"{path}/kind")
+        is_context = kind == ContextKind.PERPETUAL_CONTEXT
+        version = _version(data, CONTEXT_SCHEMA_VERSION if is_context else SCHEMA_VERSION)
+        asset_kind = _choice(AssetKind, data["asset_kind"], f"{path}/asset_kind")
+        _require(not is_context or asset_kind == AssetKind.PERPETUAL, "/asset_kind", "context requires a perpetual instrument")
         exchange_ts = (
             None if data["exchange_ts"] is None
             else U64Text(data["exchange_ts"], field=f"{path}/exchange_ts")
@@ -714,12 +750,12 @@ class Event(_WireObject):
                 "correction target must precede the new position",
             )
         return cls(
-            schema_version=_version(data),
+            schema_version=version,
             channel=_pattern(data["channel"], _TOKEN, f"{path}/channel"),
             source=_pattern(data["source"], _TOKEN, f"{path}/source"),
             product=_pattern(data["product"], _TOKEN, f"{path}/product"),
             instrument_id=_instrument_id(data["instrument_id"], venue, f"{path}/instrument_id"),
-            asset_kind=_choice(AssetKind, data["asset_kind"], f"{path}/asset_kind"),
+            asset_kind=asset_kind,
             venue=venue,
             exchange_ts=exchange_ts,
             receive_ts=U64Text(data["receive_ts"], field=f"{path}/receive_ts"),
@@ -785,7 +821,7 @@ class Event(_WireObject):
             path += "/replacement/payload"
             kind_path = "/payload/replacement/kind"
             kind, payload = payload.replacement.kind, payload.replacement.payload
-        if kind not in _MARKET_KINDS:
+        if kind not in _MARKET_KINDS and kind != ContextKind.PERPETUAL_CONTEXT:
             return
         _require(kind in capability.message_kinds, kind_path, f"{kind} is not supported by the source product")
 
