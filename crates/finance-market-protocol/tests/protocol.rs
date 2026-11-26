@@ -269,6 +269,29 @@ fn unit_tags_require_json_strings() {
 }
 
 #[test]
+fn tagged_payload_discriminants_require_json_strings() {
+    let examples = examples();
+
+    let mut trade = examples["events"][0].clone();
+    trade["kind"] = json!({"trade": null});
+    assert_rejected::<Event>(&trade, "expected a string");
+
+    let mut correction = examples["events"][2].clone();
+    correction["payload"]["replacement"]["kind"] = json!({"trade": null});
+    assert_rejected::<Event>(&correction, "expected a string");
+
+    let duplicate_kind = examples["events"][0].to_string().replace(
+        "\"kind\":\"trade\"",
+        "\"kind\":\"trade\",\"kind\":\"trade\"",
+    );
+    let error = serde_json::from_str::<Event>(&duplicate_kind).unwrap_err();
+    assert!(
+        error.to_string().contains("duplicate field `kind`"),
+        "{error}"
+    );
+}
+
+#[test]
 fn named_payloads_and_records_require_json_objects() {
     let examples = examples();
     let mut trade = examples["events"][0].clone();

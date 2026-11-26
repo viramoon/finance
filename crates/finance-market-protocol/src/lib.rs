@@ -63,30 +63,93 @@ where
     Option::deserialize(deserializer)
 }
 
-// Serde's struct visitor also accepts positional arrays. Require an object at
-// every wire record boundary while keeping MapAccess and its duplicate keys.
-struct ObjectOnly<T>(T);
+// Require an object at every record boundary while preserving duplicate keys.
+fn decode_object<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    decode_map::<D, T, false>(deserializer)
+}
 
-impl<'de, T: Deserialize<'de>> Deserialize<'de> for ObjectOnly<T> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        use serde::de::{MapAccess, Visitor, value::MapAccessDeserializer};
-        use std::marker::PhantomData;
+fn decode_tagged_object<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    decode_map::<D, T, true>(deserializer)
+}
 
-        struct ObjectVisitor<T>(PhantomData<T>);
+fn decode_map<'de, D, T, const STRING_KIND: bool>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    use serde::de::{MapAccess, Visitor, value::MapAccessDeserializer};
+    use std::marker::PhantomData;
 
-        impl<'de, T: Deserialize<'de>> Visitor<'de> for ObjectVisitor<T> {
-            type Value = ObjectOnly<T>;
+    struct ObjectVisitor<T, const STRING_KIND: bool>(PhantomData<T>);
 
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("a JSON object")
-            }
+    impl<'de, T: Deserialize<'de>, const STRING_KIND: bool> Visitor<'de>
+        for ObjectVisitor<T, STRING_KIND>
+    {
+        type Value = T;
 
-            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
-                T::deserialize(MapAccessDeserializer::new(map)).map(ObjectOnly)
-            }
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a JSON object")
         }
 
-        deserializer.deserialize_map(ObjectVisitor(PhantomData))
+        fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<T, A::Error> {
+            if STRING_KIND {
+                let map = StringKindMap {
+                    map,
+                    read_kind: false,
+                };
+                T::deserialize(MapAccessDeserializer::new(map))
+            } else {
+                T::deserialize(MapAccessDeserializer::new(map))
+            }
+        }
+    }
+
+    deserializer.deserialize_map(ObjectVisitor::<T, STRING_KIND>(PhantomData))
+}
+
+// The tag in a Serde adjacent enum also accepts external unit-enum syntax.
+// Check the kind's string type before forwarding it to that enum decoder.
+struct StringKindMap<A> {
+    map: A,
+    read_kind: bool,
+}
+
+impl<'de, A: serde::de::MapAccess<'de>> serde::de::MapAccess<'de> for StringKindMap<A> {
+    type Error = A::Error;
+
+    fn next_key_seed<K: serde::de::DeserializeSeed<'de>>(
+        &mut self,
+        seed: K,
+    ) -> Result<Option<K::Value>, Self::Error> {
+        use serde::de::IntoDeserializer;
+
+        let Some(key) = self.map.next_key::<String>()? else {
+            return Ok(None);
+        };
+        self.read_kind = key == "kind";
+        seed.deserialize(key.into_deserializer()).map(Some)
+    }
+
+    fn next_value_seed<V: serde::de::DeserializeSeed<'de>>(
+        &mut self,
+        seed: V,
+    ) -> Result<V::Value, Self::Error> {
+        use serde::de::IntoDeserializer;
+
+        if self.read_kind {
+            let tag = self.map.next_value::<String>()?;
+            seed.deserialize(tag.into_deserializer())
+        } else {
+            self.map.next_value_seed(seed)
+        }
     }
 }
 
@@ -102,6 +165,7 @@ macro_rules! wire_object {
             )*
         }
         $(validate = $validate:ident;)?
+        $(decode = $decode:ident;)?
     ) => {
         $(#[$attr])*
         #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
@@ -124,14 +188,15 @@ macro_rules! wire_object {
                         $field: $ty,
                     )*
                 }
-                let crate::ObjectOnly(Wire { $($field),* }) =
-                    serde::Deserialize::deserialize(deserializer)?;
+                let Wire { $($field),* } = wire_object!(@decoder $($decode)?)(deserializer)?;
                 let value = Self { $($field),* };
                 $(value.$validate().map_err(serde::de::Error::custom)?;)?
                 Ok(value)
             }
         }
     };
+    (@decoder $decode:ident) => { crate::$decode };
+    (@decoder) => { crate::decode_object };
 }
 
 use wire_object;

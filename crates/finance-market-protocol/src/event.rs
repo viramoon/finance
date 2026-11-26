@@ -4,8 +4,8 @@ use utoipa::ToSchema;
 
 use crate::{
     AssetKind, Capability, DecimalText, Instrument, InstrumentId, MarketKind, NonEmptyText,
-    ObjectOnly, SchemaVersion, Token, U64Text, ValidationError, Venue, instrument::validate_venue,
-    require, required_nullable, wire_enum, wire_object,
+    SchemaVersion, Token, U64Text, ValidationError, Venue, decode_tagged_object,
+    instrument::validate_venue, require, required_nullable, wire_enum, wire_object,
 };
 
 wire_enum! {
@@ -98,16 +98,9 @@ wire_object! {
     pub struct Correction {
         pub target_epoch: U64Text,
         pub target_seq: U64Text,
-        #[serde(deserialize_with = "decode_replacement")]
+        #[serde(deserialize_with = "decode_tagged_object")]
         pub replacement: MarketMessage,
     }
-}
-
-fn decode_replacement<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<MarketMessage, D::Error> {
-    let ObjectOnly(message) = ObjectOnly::deserialize(deserializer)?;
-    Ok(message)
 }
 
 wire_object! {
@@ -185,6 +178,7 @@ wire_object! {
         pub message: Message,
     }
     validate = validate;
+    decode = decode_tagged_object;
 }
 
 fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
