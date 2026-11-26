@@ -1,10 +1,12 @@
 # finance
 
-fertile 的主项目与 submodule，基于 NautilusTrader 的交易与数据系统。负责策略、做市商数据 adapter、配置、trader / collector / backtest / api 入口、运维和研究；以源码 submodule 引入上游，不自研交易核心。
+fertile 的主项目与 submodule，基于 NautilusTrader 的交易与数据系统。负责策略、做市商数据 adapter、配置、trader / collector / projector / backtest / api 入口、运维和研究；以源码 submodule 引入上游，不自研交易核心。
 
 本仓库按 [issue #1 方案 v2](https://github.com/viramoon/finance/issues/1#issuecomment-6834604073) 初始化。当前已实现 [Nautilus 源码构建](docs/build.md)、上游离线回测批任务及 [行情与回测 HTTP API](docs/api.md)，交易策略与交易服务仍未实现；TBD 项都需后续 issue 明确后再实施。开发从 [AGENTS.md](AGENTS.md) 开始。
 
 `finance-ib` 提供 paper 只读的美股及 OPRA 顶档订阅接口，以及需显式启用的私有权限探针。真实账户各产品权限仍待验收。操作见 [IBKR 接入](docs/integrations/ib.md#美股-l1-和-opra-权限验收)。
+
+本地行情链路支持 F1 事件追加、恢复和独立 Parquet 投影，数据源适配器按后续 issue 接入。[本地行情 WAL、投影与封段接口](docs/market-wal.md)
 
 ## 系统中的位置
 
@@ -46,17 +48,22 @@ finance/
 - [IBKR 接入](docs/integrations/ib.md)
 - [HTTP 与代码导出](docs/api.md)
 - [行情标的、事件与流协议](docs/market-protocol.md)
+- [本地行情 WAL、投影与封段接口](docs/market-wal.md)
 - [StrategyBundle v1 配置与编译](docs/strategy-bundle.md)
+- [离线因子评价与研究登记](docs/factor-research.md)
 - [技术栈决策](docs/adr/ADR-0001-tech-stack.md)
 - [依赖、许可与替换](docs/adr/ADR-0002-nautilus-dependency.md)
 - [分层配置字段](config/README.md)
 - [数据与备份](catalog/README.md)
+- [数据入仓防护与 fixture 来源](docs/data-guard.md)
 - [运行手册](RUNBOOK.md)
 - [服务设计清单](service.yaml)
 
 ## 协作与检查
 
 一个任务对应一个 issue，使用 issue-<号>-<简述> 分支和 PR，CI 通过后合并，禁止直接推送 main。PR 需含 Closes #<号>、测试结果和逐条验收自检；开发问题在原分支解决，文档随行为在同一 PR 更新。文档 CI 检查必需文件、非空内容、YAML、相对链接及 PR 描述；Finance API CI 编译和测试 API，Nautilus CI 构建源码并执行上游回测、批任务和 HTTP 端到端验证。没有真实交易验证。
+
+开发克隆先在仓库根运行 `sh scripts/install-data-guard-hooks.sh`。Git 钩子和 Repository Data Guard CI 检查提交的文件与合成 fixture 来源。PR 和推送始终检查基准到目标的净差异。防护启用前已发布的历史经单独评审后可豁免逐提交检查。真实行情、截图、数据库、日志导出和备份均存放在工作树之外。规则、故障处置与例外登记见 [数据入仓防护](docs/data-guard.md)。
 
 ## 源码构建入口
 

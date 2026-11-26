@@ -14,6 +14,12 @@ paths:
   catalog: /home/box/fertile/data/catalog
   state: /home/box/fertile/data/finance-state
   logs: /home/box/fertile/logs/finance
+repository_data_policy:
+  runtime_data_outside_worktree: true
+  docs: docs/data-guard.md
+  rules: .data-guard/rules.json
+  fixture_sources: .data-guard/sources.json
+  published_history: .data-guard/published.json
 dependencies:
   ib_gateway:
     host: 127.0.0.1
@@ -53,6 +59,16 @@ processes:
       ready_path: /healthz/ready
       status_path: /status
     restart_policy: fertile deploy/
+  - name: finance-projector
+    command: 'python -m fertile_finance.market_projector --data-root "$FERTILE_DATA_ROOT" --wal-bin finance-market-wal'
+    working_directory: finance
+    python_path: python
+    dependencies: [data_root, nautilus_source_wheel, finance-market-wal]
+    input: finance-state/market-wal
+    state: finance-state/market-projection
+    output: catalog/market-events
+    health: 由本地 finance-market-wal watermarks 检查投影进度
+    restart_policy: fertile deploy/
   - name: backtest-worker
     command: scripts/finance-backtest-worker
     working_directory: finance
@@ -85,4 +101,10 @@ batch_jobs:
     command: bash scripts/backtest-sample.sh
     output: "${FERTILE_DATA_ROOT}/finance-state/backtests/sample/latest.json"
     mode: Backtest
+offline_research:
+  factor_evaluation: fertile_finance.factor_evaluation.evaluate_factor
+  factor_lifecycle: fertile_finance.research_catalog.FactorResearchCatalog
+  historical_registration: strategies/registry/factor-momentum-v1.json
+  invocation: local_python_library
+  documentation: docs/factor-research.md
 runbook: RUNBOOK.md

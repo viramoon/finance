@@ -2,6 +2,8 @@
 
 finance-api 是独立的 Rust / axum 进程；web 通过 HTTP 调用，frontend 只调用 web。当前不启动 Nautilus、trader、collector 或 IBKR，也不在 HTTP 请求中执行回测。服务部署唯一来源仍为 fertile deploy/，本仓库 service.yaml 记录组件接口。
 
+用于接口测试和文档的行情样本须来自已登记的合成 fixture。防护启用前已发布分支的合成样本在合入前也须通过来源和 SHA-256 检查。将实际 API 响应、运行日志和数据库留在工作树之外，目录和样本准入方式见 [数据入仓防护](data-guard.md)。
+
 ## 运行与配置
 
 ```sh
@@ -60,6 +62,8 @@ utoipa 从 handler 注解和实际响应类型导出，不需要数据目录、�
 权威集成快照是 fertile contracts/finance.openapi.json：改代码并验证 → 从同一 commit 导出 artifact → 后续 fertile 集成 PR 同步快照和子模块指针、比对差异 → web 生成客户端。禁止手改生成文件；当前 issue 不跨仓库更新快照或实现比对脚本。破坏性接口变更须有兼容迁移计划，见 [fertile contracts](https://github.com/viramoon/fertile/tree/main/contracts)。
 
 行情流使用独立版本化 schema 和样本，见 [行情标的、事件与流协议](market-protocol.md)。
+
+离线因子评价和历史研究登记使用 Python 接口。F10 接入对外读契约时可引用报告的十进制字符串和研究状态。[离线接口](factor-research.md)
 
 ## 历史回测与提交确认
 

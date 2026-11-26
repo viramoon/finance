@@ -62,7 +62,7 @@ finance 定义行情流契约 v1.0，供采集适配器、投影、研究和 web
 
 原始事件的 `revision` 为 `"0"`。更正事件占用独立位置并携带正修订号。其 `exchange_ts` 是替换行情的事件时间，`first_available_ts` 是本次修订的可用时间。目标是同一流分区内位置更早的原始消息，可来自旧 epoch。校验替换内容的行情种类、tick/lot、盘口深度和产品能力。应用更正的消费者需查到原始消息，核对替换种类相同，按原始位置检查修订递增。历史查询可据此保留「当时所见」和「最新修订」两种结果。
 
-本迭代提供相邻事件的校验以及游标字段。F3 使用该分区键定义持久位置、提交时点、保留窗和重放索引。F6 定义从带游标的快照续接、游标过期的 `reset_required` 响应及 WS 订阅路由。web 的 SSE 投递与用户权限由后续 web 接口定义。
+相邻事件的校验和游标字段供生产者和消费者复用。[本地 WAL 与投影](market-wal.md) 用此分区键与 epoch、seq 识别逻辑位置，持久水位使用独立的产品内 WAL 位置。F6 定义从带游标的快照续接、游标过期的 `reset_required` 响应及 WS 订阅路由。web 的 SSE 投递与用户权限由后续 web 接口定义。
 
 ## Schema 导出与兼容规则
 
@@ -76,6 +76,8 @@ finance 定义行情流契约 v1.0，供采集适配器、投影、研究和 web
 | [examples.json](../protocol/v1/examples.json) | 合成标的、产品和流消息，可供 Rust、Python 与下游读者往返。 |
 
 从仓库根运行以下命令。导出从 Rust 类型生成 schema，并通过类型往返生成样本。Rust 测试比较二次导出的字节，Python 测试读取同一份样本。运行时还负责 JSON 重复键、tick/lot、结构之外的语义和相邻位置校验。
+
+协议样本的固定合成输入和导出产物在同一 [fixture 来源清单](../.data-guard/sources.json) 登记。更新样本时先运行导出器，再校对来源说明与摘要，流程见 [数据入仓防护](data-guard.md#合成-fixture-与例外登记)。
 
 ```sh
 cargo run --locked -q -p finance-market-protocol --bin export-market-protocol -- protocol/v1
