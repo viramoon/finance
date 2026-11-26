@@ -515,6 +515,14 @@ class _ConfiguredStrategy(_PortfolioStrategy):
             balances[key[1]] += Fraction(fill.cash_delta)
         return _Settlement(fills, balances)
 
+    def _execution_rejection(self, holdings, prices, equity, projected, *, affected=None):
+        balances = projected.balances.values() if affected is None else (projected.balances[affected[1]],)
+        if any(cash < 0 for cash in balances):
+            return "sleeve_cash"
+        if any(fill.quantity > 0 for fill in projected.fills.values()):
+            return self._execution_risk_breach(holdings, prices, equity, projected.fills, affected=affected)
+        return None
+
     def _choose_executions(self, day, candidates, closes):
         reductions = {key: row.quantity for key, row in candidates.items() if row.quantity < 0}
         buys = {key: row.quantity for key, row in candidates.items() if row.quantity > 0}
@@ -523,6 +531,7 @@ class _ConfiguredStrategy(_PortfolioStrategy):
             fills, orders = self._project_fills(reductions, closes)
             return fills, orders, dict.fromkeys(buys, "execution_valuation_missing")
 
+        equity = Fraction(equity)
         prices = {key: Fraction(price) for key, price in closes.items()}
         holdings = {
             (instrument, recipe): shares
@@ -537,13 +546,22 @@ class _ConfiguredStrategy(_PortfolioStrategy):
         for key, qty in sorted(buys.items()):
             tiers[self.priorities[key[1]]][key] = qty
 
-        fixed, reasons = reductions.copy(), {}
+        fixed = reductions.copy()
         for _, claims in sorted(tiers.items()):
-            admitted, tier_reasons = self._allocate_tier(
-                claims, fixed, closes, prices, Fraction(equity), holdings, cash_at_close, supplied,
+            admitted = self._allocate_tier(
+                claims, fixed, closes, prices, equity, holdings, cash_at_close, supplied,
             )
             fixed.update(admitted)
-            reasons.update(tier_reasons)
+
+        # Attribute the first omitted share against the final batch. Trial
+        # limits can stop binding after other claims or fees change.
+        reasons = {}
+        for key, requested in sorted(buys.items()):
+            accepted = fixed.get(key, 0)
+            if accepted < requested:
+                extra = self._settle(fixed | {key: accepted + 1}, closes)
+                reason = self._execution_rejection(holdings, prices, equity, extra)
+                reasons[key] = reason or "allocation_order"
         fills, orders = self._project_fills(fixed, closes)
         return fills, orders, reasons
 
@@ -562,31 +580,24 @@ class _ConfiguredStrategy(_PortfolioStrategy):
             return self._settle(fixed | additions, closes)
 
         def rejection(projected, affected=None):
-            balances = projected.balances.values() if affected is None else (projected.balances[affected[1]],)
-            if any(cash < 0 for cash in balances):
-                return "sleeve_cash"
-            if any(fill.quantity > 0 for fill in projected.fills.values()):
-                return self._execution_risk_breach(holdings, prices, equity, projected.fills, affected=affected)
-            return None
+            return self._execution_rejection(holdings, prices, equity, projected, affected=affected)
 
         def project(risk_headroom):
             limits = self._limits(claims, prices, retained, risk_headroom)
             limits.extend(Limit("sleeve_cash", cash_headroom[recipe], uses) for recipe, uses in by_sleeve.items())
             limits.extend(Limit("sleeve_cash", Fraction(qty), {key: Fraction(1)})
                           for key, qty in sorted(claim_caps.items()))
-            additions, reasons = allocate(claims, prices, self.priorities, self.budgets, limits)
-            return additions, settle(additions), reasons
+            additions, _ = allocate(claims, prices, self.priorities, self.budgets, limits)
+            return additions, settle(additions)
 
         def notional(additions):
             return sum(qty * prices[key[0]] for key, qty in additions.items())
 
         headroom = equity
-        causes = {}
         current = project(headroom)
         while True:
-            additions, projected, reasons = current
-            cause = rejection(projected)
-            if cause is None:
+            additions, projected = current
+            if rejection(projected) is None:
                 break
             insolvent = next((recipe for recipe in sorted(cash_headroom) if projected.balances[recipe] < 0), None)
             if insolvent is not None:
@@ -602,10 +613,7 @@ class _ConfiguredStrategy(_PortfolioStrategy):
                 if notional(matches) >= notional(current[0]):
                     crossed = settle(matches)
                     if rejection(crossed) is None:
-                        current = matches, crossed, reasons
-            for key in claims:
-                if current[0][key] < additions[key]:
-                    causes[key] = cause
+                        current = matches, crossed
 
         # Revisit clipped claims in stable order after removing trial bounds.
         # Freeze peers on each trial and price the resulting net orders again.
@@ -622,9 +630,7 @@ class _ConfiguredStrategy(_PortfolioStrategy):
             cross = supplied[instrument] - (other_buys - current_qty)
             additions[key] = _refill_quantity(current_qty, requested, cross, fits, lambda qty: fits(qty, key))
 
-        admitted = {key: qty for key, qty in additions.items() if qty}
-        return admitted, {key: causes.get(key, reasons.get(key, "whole_share_rounding"))
-                          for key in claims if additions[key] < claims[key]}
+        return {key: qty for key, qty in additions.items() if qty}
 
     def _audit(self, key, intent, day, ts, *, status, reason, **details):
         instrument, recipe = key
