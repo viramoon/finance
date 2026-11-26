@@ -15,7 +15,7 @@ import sys
 import tempfile
 import time
 
-from .backtest_job import die_with_parent
+from .backtest_job import STRATEGY_JOB_ERRORS, die_with_parent
 
 REPO = Path(__file__).resolve().parents[2]
 SCHEMA = REPO / "sql/backtest-queue.sql"
@@ -142,19 +142,29 @@ def reap(db, jobs):
         else:
             try:
                 result = json.loads(job.result.read_text())
+                if not isinstance(result, dict):
+                    raise ValueError("invalid job result")
                 research_error = result.get("research_error")
+                strategy_error = result.get("strategy_error")
                 if research_error is not None and research_error not in {
                     "invalid_instrument", "no_data", "invalid_date", "invalid_source", "invalid_bar",
                     "missing_sessions", "insufficient_history", "invalid_parameters", "execution_audit_failed",
                 }:
                     raise ValueError("invalid research error")
-                if research_error is None and not isinstance(result["pnl"], str):
+                if strategy_error is not None and (research_error is not None or strategy_error not in STRATEGY_JOB_ERRORS):
+                    raise ValueError("invalid strategy error")
+                job_error = research_error or strategy_error
+                if job_error is None and not isinstance(result["pnl"], str):
                     raise ValueError("invalid pnl")
+                if result.get("strategy") == "StrategyBundle" and not all(
+                    isinstance(result.get(key), dict) for key in ("run_manifest", "strategy_report")
+                ):
+                    raise ValueError("invalid configured backtest report")
             except (OSError, ValueError, KeyError, TypeError):
                 finish(db, job_id, "failed", error="invalid_result")
             else:
-                if research_error is not None:
-                    finish(db, job_id, "failed", error=research_error)
+                if job_error is not None:
+                    finish(db, job_id, "failed", error=job_error)
                 else:
                     finish(db, job_id, "succeeded", json.dumps(result))
         job.scratch.cleanup()

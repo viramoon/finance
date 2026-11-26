@@ -72,6 +72,10 @@ static DECIMAL: LazyLock<Pattern> = LazyLock::new(|| {
     )
 });
 
+pub(crate) fn valid_strategy_version(id: &str, version: &str) -> bool {
+    STRATEGY_ID.regex.is_match(id) && VERSION.regex.is_match(version)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) enum TextFormat {
     LocalId,

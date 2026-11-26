@@ -15,13 +15,14 @@ pub use compile::{
 pub use parse::{InputFormat, MAX_BYTES};
 pub use registry::{Component, Input, Output, Warmup, component, components};
 pub use schema::bundle_schema;
+pub(crate) use schema::valid_strategy_version;
 
 use parse::Parsed;
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::LazyLock;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, Serialize, utoipa::ToSchema)]
 pub struct Location {
     pub line: usize,
     pub column: usize,

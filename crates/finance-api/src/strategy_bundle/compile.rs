@@ -1,5 +1,5 @@
 use rust_decimal::Decimal;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,9 +24,11 @@ pub struct CompiledPlan<'a> {
     pub conflict_rules: ConflictRules,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ResolvedInputs<'a> {
+    #[serde(borrow)]
     pub universe: Universe<'a>,
+    #[serde(borrow)]
     pub bars: Bars<'a>,
 }
 
