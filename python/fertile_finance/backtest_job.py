@@ -1,4 +1,4 @@
-"""Run one validated, finite sample interval in an isolated Linux child."""
+"""Run one validated, finite backtest in an isolated Linux child."""
 
 import argparse
 import ctypes
@@ -10,6 +10,13 @@ import signal
 from .backtest_sample import run_sample, atomic_write
 
 
+STRATEGY_JOB_ERRORS = frozenset({
+    "strategy_plan_invalid", "strategy_snapshot_invalid", "strategy_snapshot_missing", "strategy_snapshot_range",
+    "strategy_runtime_invalid", "invalid_date", "invalid_parameters", "insufficient_history", "no_data",
+    "execution_audit_failed", "native_cash_precision", "valuation_precision",
+})
+
+
 def die_with_parent(expected: int) -> None:
     libc = ctypes.CDLL(None, use_errno=True)
     # PR_SET_PDEATHSIG. Recheck parent after registering to close the race.
@@ -19,7 +26,17 @@ def die_with_parent(expected: int) -> None:
         raise SystemExit("worker already exited")
 
 
-def execute(request: dict, target: Path) -> None:
+def execute(request: dict, target: Path, *, snapshot=None, queue=None) -> None:
+    if request["strategy"] == "StrategyBundle":
+        from .research_catalog import ResearchError
+        from .strategy_backtest_job import run_strategy_backtest_job
+
+        try:
+            summary = run_strategy_backtest_job(request, snapshot=snapshot, queue=queue)
+        except ResearchError as exc:
+            summary = {"strategy_error": exc.code if exc.code in STRATEGY_JOB_ERRORS else "strategy_runtime_invalid"}
+        atomic_write(target, summary)
+        return
     if request["strategy"] == "SmaCrossover":
         from .backtest_research import run_research
         from .research_catalog import ResearchError, research_root
@@ -53,4 +70,4 @@ if __name__ == "__main__":
     worker = int(os.environ["FINANCE_WORKER_PID"])
     if os.getppid() == 1 or not Path(f"/proc/{worker}").exists():
         raise SystemExit("worker already exited")
-    execute(json.loads(args.request.read_text()), args.result)
+    execute(json.loads(args.request.read_text()), args.result, queue=args.request.parent.parent / "jobs.sqlite3")

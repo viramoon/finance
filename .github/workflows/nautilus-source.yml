@@ -102,6 +102,8 @@ jobs:
             cargo test --locked -p finance-api --test factor_read python_factor_publication_is_read_by_rust_contract -- --include-ignored
           bash scripts/backtest-sample.sh
           cargo build --locked -p finance-api -p finance-collector
+          FINANCE_STRATEGY_TEST_PYTHON="$FINANCE_BUILD_ROOT/venv/bin/python" \
+            cargo test --locked -p finance-api --test config_strategy_worker -- --ignored
           export FINANCE_API_BIN="$CARGO_TARGET_DIR/debug/finance-api"
           python3 scripts/check-api-e2e.py
           python3 scripts/test-job-recovery.py

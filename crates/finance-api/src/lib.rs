@@ -1,3 +1,4 @@
+mod bundle_jobs;
 pub mod config;
 mod factor_read;
 pub mod jobs;
@@ -42,6 +43,14 @@ pub struct BacktestSummary {
     pub generated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub research: Option<research::ResearchReport>,
+    /// Immutable inputs, versions, cutoff, and economics for a StrategyBundle run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub run_manifest: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Exact positions, cash, fills, and per-recipe attribution for a StrategyBundle run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub strategy_report: Option<serde_json::Map<String, serde_json::Value>>,
 }
 impl BacktestSummary {
     fn valid(&self) -> bool {
@@ -67,6 +76,11 @@ pub struct ErrorBody {
 pub struct ErrorDetail {
     pub code: String,
     pub message: String,
+    /// JSON Pointer-shaped path from a StrategyBundle compiler diagnostic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<strategy_bundle::Location>,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct Check {
@@ -86,6 +100,8 @@ fn error(status: StatusCode, code: &str, message: &str) -> ApiError {
             error: ErrorDetail {
                 code: code.into(),
                 message: message.into(),
+                path: None,
+                location: None,
             },
         }),
     )
@@ -189,6 +205,7 @@ pub fn router(state: AppState) -> Router {
         jobs::detail,
         jobs::list,
         jobs::by_key,
+        bundle_jobs::register,
         research::datasets,
         market_read::products,
         market_read::wal,
@@ -207,6 +224,13 @@ pub fn router(state: AppState) -> Router {
         market::MarketStatus,
         market::InstrumentStatus,
         jobs::JobRequest,
+        jobs::SubmitRequest,
+        jobs::JobRequestView,
+        bundle_jobs::BundleSubmission,
+        bundle_jobs::BundleRequestView,
+        bundle_jobs::StrategyDocument,
+        bundle_jobs::RegisteredStrategy,
+        strategy_bundle::Location,
         jobs::JobStatus,
         jobs::Job,
         jobs::Page,

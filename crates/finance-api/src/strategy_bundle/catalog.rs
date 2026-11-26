@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 
 /// The earliest usable point within or after the identified session.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Availability {
     SessionOpen,
@@ -11,7 +11,8 @@ pub enum Availability {
     NextSessionClose,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Universe<'a> {
     pub id: &'a str,
     pub calendar: &'a str,
@@ -21,7 +22,8 @@ pub struct Universe<'a> {
     pub available_at: Availability,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Bars<'a> {
     pub id: &'a str,
     pub calendar: &'a str,

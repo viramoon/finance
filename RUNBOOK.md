@@ -6,6 +6,8 @@
 
 把行情根目录、研究目录、数据库、截图、日志、崩溃转储和备份放在 Git 工作树之外。IBKR paper 与回放各用独立数据根。开发克隆运行 `sh scripts/install-data-guard-hooks.sh` 安装暂存区和推送检查。处理阻断时先用 `python3 -B scripts/data_guard.py --show-paths range origin/main HEAD` 定位 PR 范围内的问题。清理尚未发布的违规历史。防护启用前已发布的提交可经单独评审登记历史豁免，再追加提交移除仍留在目标树中的违规文件或补齐合成 fixture 来源。合成样本复现和登记流程见 [数据入仓防护](docs/data-guard.md)。
 
+`range` 的第一个参数同时确定差异基准和硬规则版本。复现 CI 时，使用 PR 事件中的基分支 SHA 与合并提交 SHA。推送遇到 `missing-trusted-ref` 时，先获取目标远端的默认分支，更新本地跟踪引用，再重试。
+
 ## 部署、启停与回滚
 
 按 fertile tag 获取 finance 指针与配置；确认 cloudbox / stable profile 和运行模式独立，当前只使用 IBKR paper；检查配置化持久目录、备份、Gateway 与权限。先启动依赖和采集，恢复交易状态并对账，再满足 ready 后启用策略，最后开放查询 API。TBD：具体命令和对账核对表。
@@ -75,6 +77,16 @@ PYTHONPATH=python /path/to/research/venv/bin/python -m unittest discover -s test
 ```
 
 报告复算时固定因子版、数据版、交易会话、各段区间、分位数和成本档。用逐期参考权重及目标权重复算换手、费用及费前费后收益，再核对复利汇总。遇到未来披露诊断时核对数据源的真实发布时间和该版修订的可见区间。停止新回测选择时将相应因子版本退回 `observe_only`，记录理由并保留原报告引用。入参、状态和历史证据见 [因子研究接口](docs/factor-research.md)。
+
+## 离线期权敞口验收
+
+用锁定的 Rust 工具链在仓库根目录运行合成期权链测试。
+
+```sh
+cargo test --locked --offline -p finance-collector --test option_exposure
+```
+
+先按测试中的现货价、合约乘数、OI 和 gamma 手算单合约金额，再核对各执行价与到期日汇总以及 0DTE 分组。诊断局部估算时，查看候选范围、缺失原因、OI 业务日期和输入观察时间。flip 结果随估值价格网格和模型输入解释。该计算通过 Rust 库调用，测试直接在内存中构造数据。输入及输出约定见 [期权敞口接口](docs/option-exposure.md)。
 
 ## 行情与作业
 
@@ -147,6 +159,17 @@ curl -sS http://127.0.0.1:8081/api/v1/market/status
 ### 历史价量补拉
 
 在获准采集并落盘的部署上，使用 [历史价量批任务](docs/historical-pull.md) 拉取九只美股日线和 IBKR paper 只读分钟线、BTC/ETH/SOL 公共 K 线及 Binance Spot 逐笔归档。命令需显式授权，Binance 默认关闭。使用独立于工作树的配置数据根，记录 JSON 的水位和缺口，失败后用同一参数续拉。与 Gateway 的其他历史请求错开。来源口径、命令、退出状态和耗时估算见批任务文档。
+
+### 隔离验收配置策略作业
+
+使用源码构建的 Python 环境从仓库根运行以下测试。测试在临时数据根生成合成日线，通过 Axum 路由提交并在独立 worker 中执行，再查询结果。无需启动常驻服务或绑定端口。
+
+```sh
+FINANCE_STRATEGY_TEST_PYTHON=/path/to/source-built/venv/bin/python \
+  cargo test --locked -p finance-api --test config_strategy_worker -- --ignored
+```
+
+在受控环境提交配置作业时，先将已审核的回放 JSON 发布到现有数据根下的 `finance-state/backtests/strategy-inputs/`，再按 [HTTP 接口](docs/api.md#配置策略提交与结果) 提交。API 与 worker 共享同一个 `jobs.sqlite3`。排查失败时先读 `status` 与 `error`。区间、预热、点时成分或收盘 bar 缺口的检查方法见 [配置策略作业](docs/backtest-jobs.md#配置策略作业)。客户端超时后用同一幂等键确认或重试。已入队作业使用该作业关联的快照，覆盖源文件只影响随后提交的新作业。
 
 ### 隔离验收官方历史作业
 
