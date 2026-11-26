@@ -91,60 +91,133 @@ class FixtureGenerationTest(unittest.TestCase):
         return path
 
     def verify_fixtures(self, repo):
-        sources = data_guard.parse_sources(self.fixture_file(repo, SOURCES).read_bytes())
-        fixtures = {path: self.fixture_file(repo, path) for path in sources}
-        generator = self.fixture_file(repo, GENERATOR)
+        _, tree = data_guard.staged_trees(cwd=repo)
+        sources = data_guard.load_sources(tree, required=True, cwd=repo)
+        required = set(sources) | {info["generator"] for info in sources.values()} | {GENERATOR}
+        for path in required:
+            entry = tree.get(path)
+            self.assertTrue(entry is not None and entry.mode in data_guard.REGULAR_MODES,
+                            "fixture or generator must be a regular Git blob")
+
         with tempfile.TemporaryDirectory() as directory:
-            subprocess.run([sys.executable, generator, directory],
+            generator = Path(directory) / "generate_synthetic_fixtures.py"
+            generator.write_bytes(data_guard.blob(tree[GENERATOR], cwd=repo))
+            output = Path(directory) / "output"
+            subprocess.run([sys.executable, "-I", "-B", generator, output], cwd=directory,
                            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            output = Path(directory)
             produced = {
                 path.relative_to(output).as_posix() for path in output.rglob("*")
                 if path.is_symlink() or path.is_file()
             }
-            self.assertEqual(produced, {path for path, info in sources.items() if info["generator"] == GENERATOR})
+            expected = {path for path, info in sources.items() if info["generator"] == GENERATOR}
+            self.assertTrue(produced == expected, "generated fixture inventory mismatch")
             for path, info in sources.items():
-                original = fixtures[path].read_bytes()
-                self.assertEqual(hashlib.sha256(original).hexdigest(), info["sha256"], path)
+                original = data_guard.blob(tree[path], cwd=repo)
+                self.assertTrue(hashlib.sha256(original).hexdigest() == info["sha256"],
+                                "fixture digest mismatch")
                 if path in produced:
-                    self.assertTrue(original == self.fixture_file(output, path).read_bytes(), path)
+                    self.assertTrue(original == self.fixture_file(output, path).read_bytes(),
+                                    "generated fixture bytes mismatch")
 
-    def assert_manifest_rejected_before_reading_fixtures(self, repo, path, error, message):
+    def init_fixture_repo(self, repo):
+        data_guard.git("init", "-q", "--template=", repo)
+        generator = repo / GENERATOR
+        generator.parent.mkdir()
+        generator.write_text(
+            "from pathlib import Path\nimport sys\n"
+            f"out = Path(sys.argv[1])\nout.mkdir()\n(out / 'synthetic.csv').write_bytes({MARKER!r})\n",
+            encoding="utf-8",
+        )
+        data_guard.git("add", "--", GENERATOR, cwd=repo)
+
+    def stage_manifest(self, repo, path, data=MARKER):
         manifest = repo / SOURCES
         manifest.parent.mkdir(parents=True, exist_ok=True)
         manifest.write_text(json.dumps({"version": 1, "fixtures": {path: {
-            "sha256": hashlib.sha256(MARKER).hexdigest(),
+            "sha256": hashlib.sha256(data).hexdigest(),
             "generator": GENERATOR,
             "seed": "fixed",
             "source": "Synthetic fixture for the verifier regression.",
         }}}), encoding="utf-8")
-        contents = manifest.read_bytes()
-        with patch.object(Path, "read_bytes", autospec=True, return_value=contents) as read:
-            with patch.object(subprocess, "run") as run:
-                with self.assertRaisesRegex(error, message):
+        data_guard.git("add", "--", SOURCES, cwd=repo)
+
+    def assert_manifest_rejected_before_reading_fixtures(self, repo, path, error, message):
+        self.stage_manifest(repo, path)
+        _, tree = data_guard.staged_trees(cwd=repo)
+        with patch.object(data_guard, "blob", wraps=data_guard.blob) as read_blob:
+            with patch.object(Path, "read_bytes", side_effect=AssertionError("worktree read")) as read_file:
+                with self.assertRaises(error) as failure:
                     self.verify_fixtures(repo)
-            read.assert_called_once_with(manifest)
-            run.assert_not_called()
+            self.assertTrue(str(failure.exception).endswith(message))
+            read_file.assert_not_called()
+            read_blob.assert_called_once_with(tree[SOURCES], cwd=repo)
 
     def test_fixture_verifier_rejects_absolute_and_parent_paths(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory) / "work"
+            self.init_fixture_repo(repo)
             for path in (str(repo.parent / "synthetic.csv"), "../synthetic.csv", "..\\synthetic.csv"):
                 with self.subTest(path=path):
                     self.assert_manifest_rejected_before_reading_fixtures(
-                        repo, path, data_guard.GuardError, "^invalid-sources$"
+                        repo, path, data_guard.GuardError, "invalid-sources"
                     )
 
     def test_fixture_verifier_rejects_symlink_escape(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             repo = root / "work"
-            repo.mkdir()
+            self.init_fixture_repo(repo)
             (root / "synthetic.csv").write_bytes(MARKER)
             (repo / "link").symlink_to(root, target_is_directory=True)
-            self.assert_manifest_rejected_before_reading_fixtures(
-                repo, "link/synthetic.csv", AssertionError, "fixture path uses a symbolic link"
-            )
+            (repo / "link.csv").symlink_to(root / "synthetic.csv")
+            data_guard.git("add", "--", "link", "link.csv", cwd=repo)
+            for path in ("link/synthetic.csv", "link.csv"):
+                with self.subTest(path=path):
+                    self.assert_manifest_rejected_before_reading_fixtures(
+                        repo, path, AssertionError, "fixture or generator must be a regular Git blob"
+                    )
+
+    def test_fixture_verifier_rejects_files_outside_the_index_tree(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "work"
+            self.init_fixture_repo(repo)
+            paths = (".git/synthetic-local-metadata", "untracked.csv", "intent.csv")
+            for path in paths:
+                (repo / path).write_bytes(MARKER)
+            data_guard.git("add", "-N", "--", "intent.csv", cwd=repo)
+            for path in paths:
+                with self.subTest(path=path):
+                    self.assert_manifest_rejected_before_reading_fixtures(
+                        repo, path, AssertionError, "fixture or generator must be a regular Git blob"
+                    )
+
+    def test_fixture_verifier_reads_staged_blobs_with_dirty_worktree(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "work"
+            self.init_fixture_repo(repo)
+            (repo / "synthetic.csv").write_bytes(MARKER)
+            data_guard.git("add", "--", "synthetic.csv", cwd=repo)
+            self.stage_manifest(repo, "synthetic.csv")
+            (repo / SOURCES).write_bytes(b"unstaged manifest")
+            (repo / GENERATOR).write_bytes(b"raise RuntimeError('unstaged generator')\n")
+            (repo / "synthetic.csv").write_bytes(b"unstaged fixture")
+            self.verify_fixtures(repo)
+
+    def test_fixture_verifier_redacts_digest_mismatches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "work"
+            self.init_fixture_repo(repo)
+            (repo / "synthetic.csv").write_bytes(MARKER)
+            data_guard.git("add", "--", "synthetic.csv", cwd=repo)
+            different = b"synthetic nonmatching fixture"
+            self.stage_manifest(repo, "synthetic.csv", different)
+            with self.assertRaises(AssertionError) as failure:
+                self.verify_fixtures(repo)
+            diagnostic = str(failure.exception)
+            self.assertTrue(diagnostic.endswith("fixture digest mismatch"))
+            for data in (MARKER, different):
+                self.assertFalse(hashlib.sha256(data).hexdigest() in diagnostic)
+                self.assertFalse(data.decode() in diagnostic)
 
 
 class GitGuardTest(unittest.TestCase):

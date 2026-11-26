@@ -60,9 +60,9 @@ class Rules:
     fixture_suffixes: tuple[str, ...]
 
 
-def git(*args, optional=False):
+def git(*args, optional=False, cwd=None):
     result = subprocess.run(
-        ["git", *args], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=GIT_ENV
+        ["git", *args], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=GIT_ENV, cwd=cwd
     )
     if result.returncode == 0:
         return result.stdout
@@ -71,21 +71,21 @@ def git(*args, optional=False):
     raise GuardError("git-read-failed")
 
 
-def read_tree(commit):
+def read_tree(commit, *, cwd=None):
     tree = {}
-    for row in git("ls-tree", "-r", "-z", commit).split(b"\0")[:-1]:
+    for row in git("ls-tree", "-r", "-z", commit, cwd=cwd).split(b"\0")[:-1]:
         metadata, path = row.split(b"\t", 1)
         mode, _, oid = metadata.split()
         tree[os.fsdecode(path)] = Entry(mode, oid)
     return tree
 
 
-def read_staged_tree(head, before):
+def read_staged_tree(head, before, *, cwd=None):
     # This diff describes the tree Git would commit, including deletions and
     # excluding intent-to-add entries from both blob and provenance checks.
     revision = [head] if head else []
     diff = git("diff", "--cached", "--ita-invisible-in-index", "--ignore-submodules=none",
-               "--raw", "--no-abbrev", "--no-renames", "-z", *revision, "--")
+               "--raw", "--no-abbrev", "--no-renames", "-z", *revision, "--", cwd=cwd)
     fields = diff.split(b"\0")[:-1]
     tree = before.copy()
     for metadata, name in zip(fields[::2], fields[1::2], strict=True):
@@ -100,21 +100,28 @@ def read_staged_tree(head, before):
     return tree
 
 
-def commit_id(revision, optional=False):
-    oid = git("rev-parse", "--verify", "--end-of-options", revision + "^{commit}", optional=optional)
+def commit_id(revision, optional=False, *, cwd=None):
+    oid = git("rev-parse", "--verify", "--end-of-options", revision + "^{commit}",
+              optional=optional, cwd=cwd)
     return oid.decode("ascii").strip() if oid is not None else None
+
+
+def staged_trees(*, cwd=None):
+    head = commit_id("HEAD", optional=True, cwd=cwd)
+    before = read_tree(head, cwd=cwd) if head else {}
+    return before, read_staged_tree(head, before, cwd=cwd)
 
 
 def changed_paths(before, after):
     return sorted(path for path, entry in after.items() if before.get(path) != entry)
 
 
-def blob_size(entry):
-    return int(git("cat-file", "-s", entry.oid))
+def blob_size(entry, *, cwd=None):
+    return int(git("cat-file", "-s", entry.oid, cwd=cwd))
 
 
-def blob(entry):
-    return git("cat-file", "blob", entry.oid)
+def blob(entry, *, cwd=None):
+    return git("cat-file", "blob", entry.oid, cwd=cwd)
 
 
 def unique_object(pairs):
@@ -126,11 +133,11 @@ def unique_object(pairs):
     return result
 
 
-def policy_blob(tree, path, error):
+def policy_blob(tree, path, error, *, cwd=None):
     entry = tree.get(path)
-    if not entry or entry.mode not in REGULAR_MODES or blob_size(entry) > MAX_POLICY_BYTES:
+    if not entry or entry.mode not in REGULAR_MODES or blob_size(entry, cwd=cwd) > MAX_POLICY_BYTES:
         raise GuardError(error)
-    return blob(entry)
+    return blob(entry, cwd=cwd)
 
 
 def parse_policy(data, error):
@@ -196,10 +203,10 @@ def load_rules(tree):
     )
 
 
-def load_sources(tree, required):
+def load_sources(tree, required, *, cwd=None):
     if SOURCES not in tree and not required:
         return {}
-    return parse_sources(policy_blob(tree, SOURCES, "invalid-sources"))
+    return parse_sources(policy_blob(tree, SOURCES, "invalid-sources", cwd=cwd))
 
 
 def parse_sources(data):
@@ -369,9 +376,7 @@ def main():
 
     try:
         if args.mode == "staged":
-            head = commit_id("HEAD", optional=True)
-            before = read_tree(head) if head else {}
-            tree = read_staged_tree(head, before)
+            before, tree = staged_trees()
             inspect_tree(tree, before, changed_paths(before, tree), load_rules(tree),
                          report, require_sources=True)
         else:

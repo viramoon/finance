@@ -53,6 +53,6 @@ python3 -B -m unittest discover -s tests -p test_data_guard.py -v
 2. 在工作树之外生成并审查样本，按内容计算 SHA-256。一起暂存生成器、样本和来源条目，复测同一生成步骤可以产生相同字节。协议样本继续使用 [协议导出流程](market-protocol.md#schema-导出与兼容规则)。现有 Python 合成样本可用 `python3 scripts/generate_synthetic_fixtures.py /tmp/finance-synthetic-fixtures` 重建。
 3. PR 中说明样本目的和复现方式，请审阅者核对生成器和摘要。格式误报且有合规用途时，也走同样的单文件登记流程。登记只适用于需来源凭证的文本，路径、禁止后缀、魔数、对象类型和大小限制照常执行。需调整硬规则时提交单独的规则变更供评审。
 
-独立运行 fixture 复现测试时也会先按 v1 规则校验清单。测试只读取各自根目录下的普通文件，工作树路径与临时生成路径上的符号链接均会被拒绝。
+独立运行 fixture 复现测试时，清单、样本和生成器均从 pre-commit 使用的同一暂存树按 Git 对象 ID 读取。清单引用须对应普通 Git blob，`.git` 元数据、未跟踪文件、仅标记待添加的路径和符号链接均会被拒绝。测试在独立临时目录执行生成器，核对产物集合、摘要和字节。摘要不匹配时只报告固定原因。
 
 该规则约定供 fertile、web、frontend 对照复用，由各自仓库维护策略和检查入口。总仓规则协调见 fertile TG#41。
