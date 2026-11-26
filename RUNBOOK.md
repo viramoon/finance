@@ -57,6 +57,16 @@ PYTHONPATH=python /path/to/research/venv/bin/python -m unittest discover -s test
 
 报告复算时固定因子版、数据版、交易会话、各段区间、分位数和成本档。用逐期参考权重及目标权重复算换手、费用及费前费后收益，再核对复利汇总。遇到未来披露诊断时核对数据源的真实发布时间和该版修订的可见区间。停止新回测选择时将相应因子版本退回 `observe_only`，记录理由并保留原报告引用。入参、状态和历史证据见 [因子研究接口](docs/factor-research.md)。
 
+## 离线期权敞口验收
+
+用锁定的 Rust 工具链在仓库根目录运行合成期权链测试。
+
+```sh
+cargo test --locked --offline -p finance-collector --test option_exposure
+```
+
+先按测试中的现货价、合约乘数、OI 和 gamma 手算单合约金额，再核对各执行价与到期日汇总以及 0DTE 分组。诊断局部估算时，查看候选范围、缺失原因、OI 业务日期和输入观察时间。flip 结果随估值价格网格和模型输入解释。该计算通过 Rust 库调用，测试直接在内存中构造数据。输入及输出约定见 [期权敞口接口](docs/option-exposure.md)。
+
 ## 行情与作业
 
 从 finance 仓库根运行。先按源码构建文档准备虚拟环境，设置各进程共用的 FERTILE_DATA_ROOT，然后构建三个 Rust 程序。

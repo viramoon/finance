@@ -49,6 +49,7 @@ finance/
 - [行情标的、事件与流协议](docs/market-protocol.md)
 - [历史价量补拉与逐笔归档](docs/historical-pull.md)
 - [本地行情 WAL、投影与封段接口](docs/market-wal.md)
+- [期权 GEX、gamma wall、flip 与 0DTE 计算接口](docs/option-exposure.md)
 - [StrategyBundle v1 配置与编译](docs/strategy-bundle.md)
 - [离线因子评价与研究登记](docs/factor-research.md)
 - [技术栈决策](docs/adr/ADR-0001-tech-stack.md)
