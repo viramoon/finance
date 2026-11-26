@@ -30,26 +30,35 @@ fn assert_rejected<T: DeserializeOwned + Debug + ProtocolJson>(
     value: &Value,
     path: &str,
     kind: &str,
+    serde_reason: &str,
 ) {
-    assert_rejected_json::<T>(&value.to_string(), path, kind);
+    assert_rejected_json::<T>(&value.to_string(), path, kind, Some(serde_reason));
 }
 
 fn assert_rejected_json<T: DeserializeOwned + Debug + ProtocolJson>(
     text: &str,
     path: &str,
     kind: &str,
+    serde_reason: Option<&str>,
 ) {
     let error = decode_json::<T>(text).unwrap_err();
     assert_eq!(error.path(), path, "{error}");
     assert_eq!(error.kind().as_str(), kind, "{error}");
-    assert!(
-        serde_json::from_str::<T>(text).is_err(),
-        "direct Serde decoding accepted input rejected by the diagnostic decoder: {text}"
-    );
+    let serde_error = serde_json::from_str::<T>(text)
+        .expect_err("direct Serde decoding accepted input rejected by the diagnostic decoder");
+    if let Some(reason) = serde_reason {
+        assert!(
+            serde_error.to_string().contains(reason),
+            "expected {reason:?} in the native Serde error, got {serde_error}"
+        );
+    }
 }
 
 fn assert_constraint(error: ValidationError, path: &str, reason: &str) {
     assert_eq!(error.path(), path, "{error}");
+    if let Some(field) = path.strip_prefix('/') {
+        assert_eq!(error.field(), field.replace('/', "."), "{error}");
+    }
     assert_eq!(error.kind().as_str(), "constraint_violation", "{error}");
     assert_eq!(error.reason(), reason);
 }
@@ -216,18 +225,23 @@ fn malformed_events_are_rejected_with_specific_errors() {
     let original = &examples["events"][0];
     let mut event = original.clone();
     event["payload"]["price"] = json!("6.6312e2");
-    assert_rejected::<Event>(&event, "/payload/price", "invalid_decimal");
+    assert_rejected::<Event>(&event, "/payload/price", "invalid_decimal", "exponent");
     let payload = event.as_object_mut().unwrap().remove("payload").unwrap();
     let envelope = event.to_string();
     let payload_before_kind = format!(
         r#"{{"payload":{payload},{}"#,
         envelope.strip_prefix('{').unwrap()
     );
-    assert_rejected_json::<Event>(&payload_before_kind, "/payload/price", "invalid_decimal");
+    assert_rejected_json::<Event>(
+        &payload_before_kind,
+        "/payload/price",
+        "invalid_decimal",
+        Some("exponent"),
+    );
 
     let mut event = original.clone();
     event["payload"]["quantity"] = json!("4e0");
-    assert_rejected::<Event>(&event, "/payload/quantity", "invalid_decimal");
+    assert_rejected::<Event>(&event, "/payload/quantity", "invalid_decimal", "exponent");
 
     let mut correction = examples["events"][2].clone();
     correction["payload"]["replacement"]["payload"]["price"] = json!("6.6311e2");
@@ -235,31 +249,42 @@ fn malformed_events_are_rejected_with_specific_errors() {
         &correction,
         "/payload/replacement/payload/price",
         "invalid_decimal",
+        "exponent",
     );
 
     let mut event = original.clone();
     event.as_object_mut().unwrap().remove("first_available_ts");
-    assert_rejected::<Event>(&event, "/first_available_ts", "missing_field");
+    assert_rejected::<Event>(
+        &event,
+        "/first_available_ts",
+        "missing_field",
+        "missing field `first_available_ts`",
+    );
 
     let mut event = original.clone();
     event["payload"].as_object_mut().unwrap().remove("quantity");
-    assert_rejected::<Event>(&event, "/payload/quantity", "missing_field");
+    assert_rejected::<Event>(
+        &event,
+        "/payload/quantity",
+        "missing_field",
+        "missing field `quantity`",
+    );
 
     let mut event = original.clone();
     event["surprise"] = json!(true);
-    assert_rejected::<Event>(&event, "/surprise", "unknown_field");
+    assert_rejected::<Event>(&event, "/surprise", "unknown_field", "surprise");
 
     let mut event = original.clone();
     event["payload"]["surprise"] = json!(true);
-    assert_rejected::<Event>(&event, "/payload/surprise", "unknown_field");
+    assert_rejected::<Event>(&event, "/payload/surprise", "unknown_field", "surprise");
 
     let mut event = original.clone();
     event["payload"]["bad/key~"] = json!(true);
-    assert_rejected::<Event>(&event, "/payload/bad~1key~0", "unknown_field");
+    assert_rejected::<Event>(&event, "/payload/bad~1key~0", "unknown_field", "bad/key~");
 
     let mut heartbeat = examples["events"][6].clone();
     heartbeat["payload"]["surprise"] = json!(true);
-    assert_rejected::<Event>(&heartbeat, "/payload/surprise", "unknown_field");
+    assert_rejected::<Event>(&heartbeat, "/payload/surprise", "unknown_field", "surprise");
 
     let mut correction = examples["events"][2].clone();
     correction["payload"]["replacement"]["surprise"] = json!(true);
@@ -267,65 +292,111 @@ fn malformed_events_are_rejected_with_specific_errors() {
         &correction,
         "/payload/replacement/surprise",
         "unknown_field",
+        "surprise",
     );
 
     let mut event = original.clone();
     event["exchange_ts"] = json!(null);
-    assert_rejected::<Event>(&event, "/exchange_ts", "constraint_violation");
+    assert_rejected::<Event>(
+        &event,
+        "/exchange_ts",
+        "constraint_violation",
+        "exchange_ts",
+    );
 
     let mut event = original.clone();
     event["seq"] = json!(9007199254740992_u64);
-    assert_rejected::<Event>(&event, "/seq", "invalid_type");
+    assert_rejected::<Event>(&event, "/seq", "invalid_type", "expected a string");
     event["seq"] = json!("09007199254740992");
-    assert_rejected::<Event>(&event, "/seq", "invalid_integer");
+    assert_rejected::<Event>(&event, "/seq", "invalid_integer", "canonical unsigned");
 
     event["seq"] = json!("18446744073709551616");
-    assert_rejected::<Event>(&event, "/seq", "out_of_range");
+    assert_rejected::<Event>(&event, "/seq", "out_of_range", "unsigned 64-bit range");
 
     let mut event = original.clone();
     event["native_id"] = Value::Null;
-    assert_rejected::<Event>(&event, "/native_id", "invalid_type");
+    assert_rejected::<Event>(&event, "/native_id", "invalid_type", "expected a string");
 
     let mut event = original.clone();
     event["revision"] = json!("1");
-    assert_rejected::<Event>(&event, "/revision", "constraint_violation");
+    assert_rejected::<Event>(&event, "/revision", "constraint_violation", "revision");
 
     let mut correction = examples["events"][2].clone();
     correction["payload"]["target_seq"] = correction["seq"].clone();
-    assert_rejected::<Event>(&correction, "/payload/target_seq", "constraint_violation");
+    assert_rejected::<Event>(
+        &correction,
+        "/payload/target_seq",
+        "constraint_violation",
+        "target",
+    );
 
     let mut reset = examples["events"][4].clone();
     reset["seq"] = json!("1");
-    assert_rejected::<Event>(&reset, "/seq", "constraint_violation");
+    assert_rejected::<Event>(&reset, "/seq", "constraint_violation", "seq");
 
     let mut event = original.clone();
     event["kind"] = json!("option_chain");
-    assert_rejected::<Event>(&event, "/kind", "invalid_value");
+    assert_rejected::<Event>(&event, "/kind", "invalid_value", "option_chain");
     event["kind"] = original["kind"].clone();
     event["schema_version"] = json!("2.0");
-    assert_rejected::<Event>(&event, "/schema_version", "invalid_value");
+    assert_rejected::<Event>(&event, "/schema_version", "invalid_value", "2.0");
 
     let duplicate_price = original.to_string().replace(
         "\"price\":\"663.1200\"",
         "\"price\":\"663.1200\",\"price\":\"663.1100\"",
     );
-    assert_rejected_json::<Event>(&duplicate_price, "/payload/price", "duplicate_field");
+    assert_rejected_json::<Event>(
+        &duplicate_price,
+        "/payload/price",
+        "duplicate_field",
+        Some("duplicate field `price`"),
+    );
 }
 
 #[test]
 fn diagnostic_decoder_rejects_incomplete_or_trailing_json() {
-    assert_rejected_json::<Event>(r#"{"payload":"#, "", "invalid_json");
+    assert_rejected_json::<Event>(r#"{"payload":"#, "", "invalid_json", None);
 
     let valid = &examples()["events"][0];
     let trailing_value = format!("{valid} {{}}");
-    assert_rejected_json::<Event>(&trailing_value, "", "invalid_json");
+    assert_rejected_json::<Event>(&trailing_value, "", "invalid_json", None);
 
     let cursor = format!(r#""cursor":{}"#, valid["cursor"]);
     let valid = valid.to_string();
     let unpaired_surrogate = valid.replacen(&cursor, r#""cursor":"\ud800""#, 1);
-    assert_rejected_json::<Event>(&unpaired_surrogate, "/cursor", "invalid_value");
+    assert_rejected_json::<Event>(&unpaired_surrogate, "/cursor", "invalid_value", None);
     let malformed_escape = valid.replacen(&cursor, r#""cursor":"\ud8xx""#, 1);
-    assert_rejected_json::<Event>(&malformed_escape, "", "invalid_json");
+    assert_rejected_json::<Event>(&malformed_escape, "", "invalid_json", None);
+}
+
+#[test]
+fn diagnostic_decoder_handles_extreme_numbers_and_invalid_constants() {
+    let examples = examples();
+    let event = &examples["events"][0];
+    let quantity = format!(r#""quantity":{}"#, event["payload"]["quantity"]);
+    let event = event.to_string();
+    let long_integer = "9".repeat(4301);
+    for number in [
+        "1e1000000000000000000",
+        "1e-1000000000000000000",
+        &long_integer,
+    ] {
+        let text = event.replacen(&quantity, &format!(r#""quantity":{number}"#), 1);
+        assert_rejected_json::<Event>(&text, "/payload/quantity", "invalid_type", None);
+    }
+
+    for constant in ["NaN", "Infinity", "-Infinity"] {
+        let text = event.replacen(&quantity, &format!(r#""quantity":{constant}"#), 1);
+        assert_rejected_json::<Event>(&text, "", "invalid_json", None);
+    }
+
+    let capability = &examples["capabilities"][2];
+    let depth = format!(r#""max_depth":{}"#, capability["max_depth"]);
+    let capability = capability.to_string();
+    for number in [&long_integer, &format!("-{long_integer}")] {
+        let text = capability.replacen(&depth, &format!(r#""max_depth":{number}"#), 1);
+        assert_rejected_json::<Capability>(&text, "/max_depth", "out_of_range", None);
+    }
 }
 
 #[test]
@@ -334,19 +405,34 @@ fn unit_tags_require_json_strings() {
 
     let mut trade = examples["events"][0].clone();
     trade["payload"]["side"] = json!({"buy": null});
-    assert_rejected::<Event>(&trade, "/payload/side", "invalid_type");
+    assert_rejected::<Event>(&trade, "/payload/side", "invalid_type", "expected a string");
 
     let mut instrument = examples["instruments"][0].clone();
     instrument["asset_kind"] = json!({"etf": null});
-    assert_rejected::<Instrument>(&instrument, "/asset_kind", "invalid_type");
+    assert_rejected::<Instrument>(
+        &instrument,
+        "/asset_kind",
+        "invalid_type",
+        "expected a string",
+    );
 
     let mut capability = examples["capabilities"][0].clone();
     capability["message_kinds"] = json!([{"trade": null}]);
-    assert_rejected::<Capability>(&capability, "/message_kinds/0", "invalid_type");
+    assert_rejected::<Capability>(
+        &capability,
+        "/message_kinds/0",
+        "invalid_type",
+        "expected a string",
+    );
 
     let mut capability = examples["capabilities"][0].clone();
     capability["schema_version"] = json!({"1.0": null});
-    assert_rejected::<Capability>(&capability, "/schema_version", "invalid_type");
+    assert_rejected::<Capability>(
+        &capability,
+        "/schema_version",
+        "invalid_type",
+        "expected a string",
+    );
 }
 
 #[test]
@@ -355,17 +441,27 @@ fn tagged_payload_discriminants_require_json_strings() {
 
     let mut trade = examples["events"][0].clone();
     trade["kind"] = json!({"trade": null});
-    assert_rejected::<Event>(&trade, "/kind", "invalid_type");
+    assert_rejected::<Event>(&trade, "/kind", "invalid_type", "expected a string");
 
     let mut correction = examples["events"][2].clone();
     correction["payload"]["replacement"]["kind"] = json!({"trade": null});
-    assert_rejected::<Event>(&correction, "/payload/replacement/kind", "invalid_type");
+    assert_rejected::<Event>(
+        &correction,
+        "/payload/replacement/kind",
+        "invalid_type",
+        "expected a string",
+    );
 
     let duplicate_kind = examples["events"][0].to_string().replace(
         "\"kind\":\"trade\"",
         "\"kind\":\"trade\",\"kind\":\"trade\"",
     );
-    assert_rejected_json::<Event>(&duplicate_kind, "/kind", "duplicate_field");
+    assert_rejected_json::<Event>(
+        &duplicate_kind,
+        "/kind",
+        "duplicate_field",
+        Some("duplicate field `kind`"),
+    );
 }
 
 #[test]
@@ -373,22 +469,32 @@ fn named_payloads_and_records_require_json_objects() {
     let examples = examples();
     let mut trade = examples["events"][0].clone();
     trade["payload"] = json!(["663.1200", "4", "buy"]);
-    assert_rejected::<Event>(&trade, "/payload", "invalid_type");
+    assert_rejected::<Event>(&trade, "/payload", "invalid_type", "JSON object");
 
     let mut heartbeat = examples["events"][6].clone();
     heartbeat["payload"] = json!([]);
-    assert_rejected::<Event>(&heartbeat, "/payload", "invalid_type");
+    assert_rejected::<Event>(&heartbeat, "/payload", "invalid_type", "JSON object");
 
     let mut correction = examples["events"][2].clone();
     correction["payload"]["replacement"] =
         json!(["trade", correction["payload"]["replacement"]["payload"]]);
-    assert_rejected::<Event>(&correction, "/payload/replacement", "invalid_type");
+    assert_rejected::<Event>(
+        &correction,
+        "/payload/replacement",
+        "invalid_type",
+        "JSON object",
+    );
 
     let mut snapshot = examples["events"][9].clone();
     snapshot["payload"]["asks"][0]["quantity"] = json!(false);
-    assert_rejected::<Event>(&snapshot, "/payload/asks/0/quantity", "invalid_type");
+    assert_rejected::<Event>(
+        &snapshot,
+        "/payload/asks/0/quantity",
+        "invalid_type",
+        "expected a string",
+    );
     snapshot["payload"]["asks"][0] = json!(["101012.2", "0.008"]);
-    assert_rejected::<Event>(&snapshot, "/payload/asks/0", "invalid_type");
+    assert_rejected::<Event>(&snapshot, "/payload/asks/0", "invalid_type", "JSON object");
 
     let capability = json!([
         "1.0",
@@ -399,7 +505,7 @@ fn named_payloads_and_records_require_json_objects() {
         true,
         "delayed"
     ]);
-    assert_rejected::<Capability>(&capability, "", "invalid_type");
+    assert_rejected::<Capability>(&capability, "", "invalid_type", "JSON object");
 }
 
 #[test]
@@ -420,7 +526,6 @@ fn tick_lot_and_depth_cover_all_market_payloads_and_replacements() {
     let error = decode::<Event>(&trade)
         .validate_against(&arca, &delayed)
         .unwrap_err();
-    assert_eq!(error.field(), "payload.price");
     assert_constraint(
         error,
         "/payload/price",
@@ -487,6 +592,7 @@ fn tick_lot_and_depth_cover_all_market_payloads_and_replacements() {
     let error = decode::<Event>(&records[9])
         .validate_against(&perp, &decode(&shallow))
         .unwrap_err();
+    assert!(error.to_string().contains("depth"), "{error}");
     assert_constraint(
         error,
         "/payload/bids",
@@ -575,32 +681,52 @@ fn instrument_and_capability_require_valid_metadata() {
     let examples = examples();
     let mut instrument = examples["instruments"][0].clone();
     instrument["venue"] = json!("BATS");
-    assert_rejected::<Instrument>(&instrument, "/venue", "constraint_violation");
+    assert_rejected::<Instrument>(&instrument, "/venue", "constraint_violation", "venue");
 
     let mut instrument = examples["instruments"][0].clone();
     instrument["tick_size"] = json!("0.00");
-    assert_rejected::<Instrument>(&instrument, "/tick_size", "constraint_violation");
+    assert_rejected::<Instrument>(
+        &instrument,
+        "/tick_size",
+        "constraint_violation",
+        "tick_size",
+    );
     instrument["tick_size"] = json!("1e-2");
-    assert_rejected::<Instrument>(&instrument, "/tick_size", "invalid_decimal");
+    assert_rejected::<Instrument>(&instrument, "/tick_size", "invalid_decimal", "exponent");
 
     let mut instrument = examples["instruments"][3].clone();
     instrument
         .as_object_mut()
         .unwrap()
         .remove("settlement_currency");
-    assert_rejected::<Instrument>(&instrument, "/settlement_currency", "missing_field");
+    assert_rejected::<Instrument>(
+        &instrument,
+        "/settlement_currency",
+        "missing_field",
+        "missing field `settlement_currency`",
+    );
 
     let mut capability = examples["capabilities"][0].clone();
     capability["message_kinds"] = json!(["trade", "trade"]);
-    assert_rejected::<Capability>(&capability, "/message_kinds", "constraint_violation");
+    assert_rejected::<Capability>(
+        &capability,
+        "/message_kinds",
+        "constraint_violation",
+        "message_kinds",
+    );
 
     let mut capability = examples["capabilities"][2].clone();
     capability["max_depth"] = json!(0);
-    assert_rejected::<Capability>(&capability, "/max_depth", "constraint_violation");
+    assert_rejected::<Capability>(
+        &capability,
+        "/max_depth",
+        "constraint_violation",
+        "max_depth",
+    );
     capability["max_depth"] = json!(true);
-    assert_rejected::<Capability>(&capability, "/max_depth", "invalid_type");
+    assert_rejected::<Capability>(&capability, "/max_depth", "invalid_type", "expected u32");
     capability["max_depth"] = json!(u64::from(u32::MAX) + 1);
-    assert_rejected::<Capability>(&capability, "/max_depth", "out_of_range");
+    assert_rejected::<Capability>(&capability, "/max_depth", "out_of_range", "expected u32");
 
     let capability = &examples["capabilities"][2];
     let depth = format!(r#""max_depth":{}"#, capability["max_depth"]);
@@ -611,6 +737,6 @@ fn instrument_and_capability_require_valid_metadata() {
         ("1e999", "invalid_type"),
     ] {
         let json = capability.replacen(&depth, &format!(r#""max_depth":{value}"#), 1);
-        assert_rejected_json::<Capability>(&json, "/max_depth", kind);
+        assert_rejected_json::<Capability>(&json, "/max_depth", kind, None);
     }
 }

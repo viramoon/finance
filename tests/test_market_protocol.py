@@ -177,6 +177,40 @@ class MarketProtocolTests(unittest.TestCase):
         with self.assert_protocol_error("/payload/asks/0/quantity", "invalid_type"):
             Event.from_json(json.dumps(snapshot))
 
+    def test_raw_json_numbers_keep_field_diagnostics(self):
+        trade = self.event()
+        trade["payload"]["quantity"] = "RAW_NUMBER"
+        trade_wire = json.dumps(trade)
+        long_integer = "9" * 4301
+        huge_exponent = "1e1000000000000000000"
+        for name, number in (
+            ("large exponent", huge_exponent),
+            ("small exponent", "1e-1000000000000000000"),
+            ("long integer", long_integer),
+        ):
+            with self.subTest(quantity=name), self.assert_protocol_error("/payload/quantity", "invalid_type"):
+                Event.from_json(trade_wire.replace('"RAW_NUMBER"', number, 1))
+
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(constant=constant), self.assert_protocol_error("", "invalid_json", constant):
+                Event.from_json(trade_wire.replace('"RAW_NUMBER"', constant, 1))
+
+        book = next(row for row in self.examples["capabilities"] if row["max_depth"] > 0)
+        depth_wire = json.dumps(book | {"max_depth": "RAW_NUMBER"})
+        for name, number, kind in (
+            ("large exponent", huge_exponent, "invalid_type"),
+            ("long positive integer", long_integer, "out_of_range"),
+            ("long negative integer", "-" + long_integer, "out_of_range"),
+            ("quoted integer", '"1"', "invalid_type"),
+        ):
+            with self.subTest(max_depth=name), self.assert_protocol_error("/max_depth", kind):
+                Capability.from_json(depth_wire.replace('"RAW_NUMBER"', number, 1))
+
+        depth_limit = 2**32 - 1
+        capability = Capability.from_json(depth_wire.replace('"RAW_NUMBER"', str(depth_limit), 1))
+        self.assertIs(type(capability.max_depth), int)
+        self.assertEqual(capability.max_depth, depth_limit)
+
     def test_strict_fields_and_duplicates(self):
         event = self.event()
         for key in ("schema_version", "exchange_ts", "receive_ts", "first_available_ts", "license", "kind", "payload"):

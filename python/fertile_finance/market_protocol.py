@@ -5,7 +5,7 @@ constructors accept values supplied by typed callers.
 """
 
 from dataclasses import dataclass, fields, is_dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from enum import StrEnum
 import json
 import re
@@ -229,6 +229,11 @@ class _ObjectPairs:
     pairs: list[tuple[str, object]]
 
 
+@dataclass(frozen=True, slots=True)
+class _JsonNumber:
+    text: str
+
+
 def _read_objects(value: object, path: str = "") -> object:
     # The JSON object's path is only known once the parser has returned its tree.
     if isinstance(value, _ObjectPairs):
@@ -247,9 +252,25 @@ def _reject_constant(text: str) -> None:
     raise ProtocolError("", "invalid_json", f"unexpected constant {text}")
 
 
-def _json_integer(text: str) -> int | Decimal:
-    # Keep -0 distinct from the accepted unsigned integer spelling 0.
-    return Decimal(text) if text == "-0" else int(text)
+def _depth(value: object, path: str) -> int:
+    reason = "integer exceeds unsigned 32-bit range"
+    if type(value) is int:
+        _require(0 <= value <= _MAX_U32, path, reason, kind="out_of_range")
+        return value
+    if isinstance(value, _JsonNumber):
+        text = value.text
+        # The JSON parser has checked syntax. Apply the protocol's integer
+        # spelling and range before converting any digits to a number.
+        if text != "-0" and text.removeprefix("-").isdecimal():
+            limit = str(_MAX_U32)
+            _require(
+                not text.startswith("-") and (len(text), text) <= (len(limit), limit),
+                path,
+                reason,
+                kind="out_of_range",
+            )
+            return int(text)
+    raise ProtocolError(path, "invalid_type", "expected an unsigned 32-bit integer")
 
 
 def _wire(value: object) -> object:
@@ -281,14 +302,14 @@ class _WireObject:
             value = json.loads(
                 text,
                 object_pairs_hook=_ObjectPairs,
-                parse_float=Decimal,
-                parse_int=_json_integer,
+                parse_float=_JsonNumber,
+                parse_int=_JsonNumber,
                 parse_constant=_reject_constant,
             )
             value = _read_objects(value)
         except ProtocolError:
             raise
-        except (ValueError, InvalidOperation, RecursionError, TypeError) as exc:
+        except (ValueError, RecursionError, TypeError) as exc:
             raise ProtocolError("", "invalid_json", str(exc)) from exc
         return cls.from_dict(value)
 
@@ -401,10 +422,7 @@ class Capability(_WireObject):
         )
         _require(bool(kinds), kinds_path, "expected at least one market message kind")
         _require(len(set(kinds)) == len(kinds), kinds_path, "duplicate message kind")
-        max_depth = data["max_depth"]
-        if type(max_depth) is not int:
-            raise ProtocolError("/max_depth", "invalid_type", "expected an unsigned 32-bit integer")
-        _require(0 <= max_depth <= _MAX_U32, "/max_depth", "integer exceeds unsigned 32-bit range", kind="out_of_range")
+        max_depth = _depth(data["max_depth"], f"{path}/max_depth")
         _require(
             (max_depth > 0) == bool(_BOOK_KINDS.intersection(kinds)),
             f"{path}/max_depth",

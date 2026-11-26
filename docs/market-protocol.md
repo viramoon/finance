@@ -96,8 +96,11 @@ Rust 使用 `finance_market_protocol::decode_json::<T>(input)`，其中 `T` 为 
 | 输入问题 | 路径 | 错误种类 |
 | --- | --- | --- |
 | 逐笔价格为 `"6.6312e2"` | `/payload/price` | `invalid_decimal` |
-| 逐笔数量为 JSON 数字 | `/payload/quantity` | `invalid_type` |
+| 逐笔数量为 JSON 数字，包括 `1e1000000000000000000` | `/payload/quantity` | `invalid_type` |
 | 序号为 `"18446744073709551616"` | `/seq` | `out_of_range` |
+| `max_depth` 的整数字面量超出无符号 32 位范围 | `/max_depth` | `out_of_range` |
 | 更正的盘口替换中第一档价格非法 | `/payload/replacement/payload/bids/0/price` | `invalid_decimal` |
+
+解码按字段判断 JSON 数字的类型和范围，极大的整数和指数仍有字段路径。`max_depth` 接受范围内的无符号整数字面量，`-0`、小数及指数写法报告 `invalid_type`。`NaN`、`Infinity` 和 `-Infinity` 属于 JSON 语法错误，报告空路径和 `invalid_json`。
 
 结构错误种类包括 `missing_field`、`unknown_field`、`duplicate_field` 和 `invalid_json`。非规范的无符号整数字符串报告 `invalid_integer`，未知枚举值等报告 `invalid_value`。读取事件后调用 `validate_against(instrument, capability)` 校验元数据和步进，再用 `validate_successor(previous)` 核对已有流位置。此类语义约束错误报告 `constraint_violation`。
