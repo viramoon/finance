@@ -39,6 +39,8 @@ cargo run --locked -p finance-collector
 
 ibapi 3.2.0 的公开历史 / 流式 OHLCV 字段为 binary64。适配器按可往返的最短十进制表示转换并验证，无法用精确 Decimal 表示时拒绝入库。writer 以后续定点格式校验及写入。上游已丢失的原始精度无法从 SDK 恢复。
 
+[历史价量批任务](../historical-pull.md) 另提供常规交易时段的一分钟 `TRADES`。命令复用 Gateway 端点和受管账户校验，使用 probe client ID。使用同一个已配置的外部数据根维持批任务跨进程和重启的 pacing 状态。
+
 实时权限不足时，先停止 collector，再用单独数据根及 config/collector/ib-delayed.yaml 启动，同时调整读取方的数据根。此模式选择 IB 的 Delayed 数据类型并轮询至少滞后 20 分钟的 HMDS 历史成交，支持该交易所的账户权限仍是前提。状态标记 ib-delayed，每分钟轮询，按实际收盘时刻判断年龄，示例阈值 1500 秒。实时模式标记 ib-realtime，示例阈值 180 秒。354 / 10167 / 162 权限错误需核对订阅、paper 账户数据共享及历史数据许可。
 
 ## 重连与排查

@@ -75,6 +75,10 @@ curl -sS http://127.0.0.1:8081/api/v1/market/status
 
 历史回测导入、信号和审计见 [研究回测手册](docs/historical-backtest.md)。部署时向 API 和 worker 配置同一只读研究 catalog；请求状态和结果仍由持久作业队列管理。
 
+### 历史价量补拉
+
+在获准采集并落盘的部署上，使用 [历史价量批任务](docs/historical-pull.md) 拉取九只美股日线和 IBKR paper 只读分钟线、BTC/ETH/SOL 公共 K 线及 Binance Spot 逐笔归档。命令需显式授权，Binance 默认关闭。使用独立于工作树的配置数据根，记录 JSON 的水位和缺口，失败后用同一参数续拉。与 Gateway 的其他历史请求错开。来源口径、命令、退出状态和耗时估算见批任务文档。
+
 ### 隔离验收官方历史作业
 
 从 finance 仓库根运行。先按 [IBM 2024 原始日线](docs/historical-backtest.md#ibm-2024-原始日线) 转换、复核并导入日线快照，再指定与部署分开的数据根、只读研究根和可用的本机端口。

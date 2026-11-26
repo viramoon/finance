@@ -8,6 +8,8 @@ BarSource 按标的订阅、接收闭合 bar，并支持按时间区间回补。
 
 writer 是通过 finance 构建入口安装的 Nautilus Python 包及其原生扩展，直接使用上游 ParquetDataCatalog.write_data。Rust 采集进程复用该持久子进程，每批确认后才更新已落盘进度。这样能使用已锁定版本的高精度 Arrow schema 与文件命名，避免重复链接另一套上游 persistence / DataFusion 依赖。目标 catalog 所在文件系统的暂存区写入完成并 fsync 后，原子 rename 发布文件，再同步父目录并原子更新 finance-state/collector/watermarks.json。每个实时采集存储区同时只允许一个 writer 持有排他锁。启动时按可见 Parquet 文件重建水位，截断 commit 后但 checkpoint 前的失败窗口；每个标的跳过已确认时间戳，批内去重按时间排序。停采后再做 catalog 和 finance-state 的一致备份。
 
+[历史价量批任务](../docs/historical-pull.md) 使用相同 bar 格式和 writer，在按来源和周期隔离的历史 catalog 中按实际行修复水位之前的缺口。逐笔日归档单独存放，按标的和原生 ID 标识成交。
+
 ## 本地运行
 
 在 finance 仓库根目录完成 bash scripts/build.sh 与 cargo build --locked -p finance-collector，加载盒子的 env.sh。示例使用默认 127.0.0.1:8082、数据根 /home/box/fertile/data。FINANCE_BUILD_ROOT 指向包含 venv 的编译目录，也可用 FINANCE_PYTHON 显式指定源码 wheel 对应解释器。

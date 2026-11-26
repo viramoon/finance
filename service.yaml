@@ -77,4 +77,14 @@ batch_jobs:
     command: bash scripts/backtest-sample.sh
     output: "${FERTILE_DATA_ROOT}/finance-state/backtests/sample/latest.json"
     mode: Backtest
+  - name: historical-pull
+    command: PYTHONPATH=python "${FINANCE_PYTHON}" -m fertile_finance.historical_pull
+    working_directory: finance
+    invocation: 按需运行，需 --allow-download，Binance 另需 --enable-binance
+    dependencies: [data_root, nautilus_source_wheel]
+    data_root: --data-root 或 FERTILE_DATA_ROOT，显式绝对路径且在 Git 工作树之外
+    output: "${FERTILE_DATA_ROOT}/catalog/historical"
+    state: "${FERTILE_DATA_ROOT}/finance-state/historical"
+    ibkr: 使用 paper 只读 Gateway 和 probe client ID
+    binance_enabled_by_default: false
 runbook: RUNBOOK.md

@@ -57,6 +57,8 @@ utoipa 从 handler 注解和实际响应类型导出，不需要数据目录、�
 
 权威集成快照是 fertile contracts/finance.openapi.json：改代码并验证 → 从同一 commit 导出 artifact → 后续 fertile 集成 PR 同步快照和子模块指针、比对差异 → web 生成客户端。禁止手改生成文件；当前 issue 不跨仓库更新快照或实现比对脚本。破坏性接口变更须有兼容迁移计划，见 [fertile contracts](https://github.com/viramoon/fertile/tree/main/contracts)。
 
+历史价量的入口、JSON 运行报告和 Parquet 目录见 [历史价量批任务](historical-pull.md)。该批任务通过本地命令和目录提供接口。
+
 行情流使用独立版本化 schema 和样本，见 [行情标的、事件与流协议](market-protocol.md)。
 
 ## 历史回测与提交确认
