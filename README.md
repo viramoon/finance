@@ -22,7 +22,7 @@ fertile 的主项目与 submodule，基于 NautilusTrader 的交易与数据系�
 finance/
 ├── README.md / AGENTS.md / RUNBOOK.md / service.yaml
 ├── .agents/skills/          本仓库专属 skill 约定
-├── strategies/             Nautilus Strategy / Actor 扩展
+├── strategies/             策略配置、示例和研究
 ├── adapters/mm_api/        做市商数据 adapter 边界
 ├── nodes/                  trader / collector / backtest / api
 ├── config/                 base / cloudbox / stable 字段设计
@@ -32,7 +32,7 @@ finance/
 └── .github/                模板与文档检查
 ```
 
-目录中的 README 说明职责和边界。策略和业务服务目录目前仍只有 README；vendor 源码与构建入口按 issue #3 实现，不伪造接口快照或生成客户端。
+目录中的 README 说明职责和边界。策略目录提供配置契约、示例和离线研究。vendor 源码与构建入口按 issue #3 实现。
 
 ## 文档索引
 
@@ -43,6 +43,7 @@ finance/
 - [连接恢复与熔断](docs/connectivity.md)
 - [IBKR 接入](docs/integrations/ib.md)
 - [HTTP 与代码导出](docs/api.md)
+- [StrategyBundle v1 配置与编译](docs/strategy-bundle.md)
 - [技术栈决策](docs/adr/ADR-0001-tech-stack.md)
 - [依赖、许可与替换](docs/adr/ADR-0002-nautilus-dependency.md)
 - [分层配置字段](config/README.md)

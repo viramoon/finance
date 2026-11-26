@@ -1,0 +1,5 @@
+apiVersion: fertile.finance/strategy/v1
+kind: StrategyBundle
+metadata:
+  id: &bundle_id example.anchor
+  title: *bundle_id
