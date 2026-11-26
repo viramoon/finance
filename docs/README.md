@@ -43,6 +43,7 @@ fertile 以 git submodule 引入 finance、web、frontend；agent 是独立仓�
 - [依赖、许可与替换](adr/ADR-0002-nautilus-dependency.md)
 - [分层配置字段](../config/README.md)
 - [数据与备份](../catalog/README.md)
+- [数据入仓防护与 fixture 来源](data-guard.md)
 - [运行手册](../RUNBOOK.md)
 - [服务设计清单](../service.yaml)
 

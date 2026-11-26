@@ -2,6 +2,8 @@
 
 finance-collector 在数据根的 catalog 下写入 Nautilus v1.231.0 可直接读取的 Bar，finance-api 读取同一数据根的 collector 状态。配置和启动命令见 [运行手册](../RUNBOOK.md)。测试数据源用 config/collector/replay.csv 的十进制 OHLCV 形成合成行情，用于持续演练。replay 状态不可用作真实市场行情。
 
+数据根与研究根应位于 Git 工作树之外。回放 CSV 属于 [已登记的合成 fixture](../.data-guard/sources.json)。实际行情、数据库和导出文件的目录约定见 [数据入仓防护](../docs/data-guard.md)。
+
 ## 输入与恢复
 
 BarSource 按标的订阅、接收闭合 bar，并支持按时间区间回补。输入标识为完整 Nautilus 标的 ID，如 SPY.ARCA。价格与数量从源到存储均为十进制字符串 / 定点对象，时间为 UTC 纳秒。单个 writer 按标的、bar 规格和 UTC 日期分组。Nautilus v1.231.0 在 data/bar/<完整 bar type> 下扫描时间区间文件，跨日拆文件，文件名使用上游生成的起止时间。
