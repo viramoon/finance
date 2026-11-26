@@ -2,6 +2,8 @@
 
 `StrategyBundle` 把离线研究所需的策略组件、数据与时钟、组合预算、风控和模拟执行模型固化为一份可校验、可编译为 JSON 的声明。当前引擎为 `nautilus_cash_equity`，模式为 `backtest`，范围是多头现金权益、整股和非负权重。编译出的计划供后续 F7 配置回测读取。现有 `DemoStrategy` 与 `SmaCrossover` 继续通过 [作业接口](backtest-jobs.md) 运行。
 
+`finance-strategy compile-legacy-sma` 单独为现有的 `SmaCrossover` 生成单标的观察计划。计划版本、共享求值和回放方式见 [实时决策接口](decision-process.md)。
+
 ## 格式与组件
 
 根对象包含 `apiVersion: fertile.finance/strategy/v1`、`kind: StrategyBundle`、`metadata` 和 `spec`。`metadata.id` 与 `metadata.version` 标识一份发布版本。版本为三段用点分隔的数字，每段最多 10 位，数值零写作 `0`，其余数值用无前导零的十进制表示。`metadata.title` 是 1 至 256 个 Unicode 字符的显示标题。组件版本使用注册表中的完整 `id@version`。格式、策略和组件各有独立版本。

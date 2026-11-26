@@ -174,6 +174,35 @@ pub fn compile<'a>(
     })
 }
 
+pub(crate) fn legacy_sma_parameters_valid(fast: u16, slow: u16, shares: u16) -> bool {
+    2 <= fast && fast < slow && slow <= 250 && (1..=1000).contains(&shares)
+}
+
+/// Compile the existing single-instrument research strategy to an observation plan.
+pub fn compile_legacy_sma(
+    instrument_id: &str,
+    fast_period: u16,
+    slow_period: u16,
+    shares: u16,
+) -> Result<Value, &'static str> {
+    if !crate::research::instrument_valid(instrument_id) {
+        return Err("Choose an XNYS instrument ID.");
+    }
+    if !legacy_sma_parameters_valid(fast_period, slow_period, shares) {
+        return Err("Require 2 <= fast_period < slow_period <= 250 and 1..1000 shares.");
+    }
+    let mut plan = serde_json::json!({
+        "plan_version": "fertile.finance/sma-crossover-plan/v1",
+        "strategy": "SmaCrossover",
+        "instrument_id": instrument_id,
+        "parameters": { "fast_period": fast_period, "slow_period": slow_period, "shares": shares },
+    });
+    plan.sort_all_objects();
+    let canonical = serde_json::to_vec(&plan).expect("JSON tree is serializable");
+    plan["content_sha256"] = Value::String(sha256(&canonical));
+    Ok(plan)
+}
+
 fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }

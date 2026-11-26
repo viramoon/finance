@@ -86,6 +86,21 @@ curl -sS http://127.0.0.1:8081/api/v1/market/status
 
 历史回测导入、信号和审计见 [研究回测手册](docs/historical-backtest.md)。部署时向 API 和 worker 配置同一只读研究 catalog；请求状态和结果仍由持久作业队列管理。
 
+### 实时决策与并行回测
+
+多个 `scripts/finance-backtest-worker` 实例可共用同一宿主本地盘上的 `FERTILE_DATA_ROOT`。升级前让旧 worker 完成在途作业并停止，再启动新 worker。每个实例单独配置并发和资源限制。作业租约默认 15 秒，实例用 `FINANCE_WORKER_LEASE_SECONDS` 或 `--lease-seconds` 设置续租周期的基准。迁移、超时和重复执行防护见 [作业手册](docs/backtest-jobs.md#worker-运行与恢复)。
+
+使用 `finance-strategy` 编译单标的计划，并为 `finance-decision` 指定已有的绝对数据根和获准计算与留存的 F1 回放文件。以下 `TEST.XNYS` 为合成标的，回放需由输入方准备。
+
+```sh
+cargo build --locked -p finance-api --bin finance-strategy
+target/debug/finance-strategy compile-legacy-sma TEST.XNYS 2 3 10 > /path/to/sma-plan.json
+FERTILE_DATA_ROOT=/path/to/decision-data scripts/finance-decision \
+  --plan /path/to/sma-plan.json --replay /path/to/test-bars.ndjson
+```
+
+一次性回放在读完后退出。对持续追加的同一文件加 `--follow`，运维可单独向该进程发送 SIGTERM 再使用同一参数启动。保留回放文件已提交的字节前缀和 `finance-state/decisions/decisions.sqlite3`。重启会重建指标状态、核对前缀并从持久断点续读。遇到缺口、更正或输入文件替换，先核对源和覆盖范围。用已复核的新输入基线和新数据根建立独立记录。进程健康由守护器检查，消费进度用决策库中的持久检查点核对。此进程只读行情，写入本地策略目标和消费进度，无端口或账户配置。文件格式、边界与诊断见 [实时决策接口](docs/decision-process.md)。
+
 ### 隔离验收官方历史作业
 
 从 finance 仓库根运行。先按 [IBM 2024 原始日线](docs/historical-backtest.md#ibm-2024-原始日线) 转换、复核并导入日线快照，再指定与部署分开的数据根、只读研究根和可用的本机端口。

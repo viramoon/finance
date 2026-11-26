@@ -1,5 +1,6 @@
 //! Durable, single-host submission. SQLite's write transaction serializes the
 //! idempotency lookup, capacity check and insertion across API processes.
+use crate::strategy_bundle::legacy_sma_parameters_valid;
 use crate::{ApiError, AppState, BacktestSummary, ErrorBody, error, research};
 use axum::{
     Json, Router,
@@ -77,7 +78,7 @@ impl JobRequest {
                     ));
                 }
                 if !matches!(params, (Some(fast), Some(slow), Some(shares))
-                    if 2 <= fast && fast < slow && slow <= 250 && (1..=1000).contains(&shares))
+                    if legacy_sma_parameters_valid(fast, slow, shares))
                 {
                     return Err(invalid(
                         "Require 2 <= fast_period < slow_period <= 250 and 1..1000 shares",

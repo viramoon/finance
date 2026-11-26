@@ -6,13 +6,14 @@ finance 是 fertile 的主项目与 submodule，交易核心以 vendor/nautilus_
 CSV Replay / IB 数据源 → finance-collector → Nautilus Parquet catalog + 状态文件
                                              → trader → 风控 / 执行 → IB Gateway
 Yahoo / Ken French / FRED 存档 → 历史适配器 → catalog/historical → Python 研究
-经审核的 NYSE CSV → 独立研究 catalog → SmaCrossover 回测作业
+经审核的 NYSE CSV → 独立研究 catalog → 回测 worker → 共享策略求值 → 历史模拟
+F1 闭合 bar 回放 → finance-decision ─────────────→ 共享策略求值 → 本地决策记录
 浏览器 → web → HTTP → finance api → 示例回测 latest.json
 上游 CSV 示例 → 回测批任务 → 原子 latest.json
 实时节点状态与查询：后续设计（内部对接 TBD）
 ```
 
-trader、collector、api 是独立常驻进程，backtest 是批任务。交易节点与行情采集分开，采集停止需触发行情陈旧保护；web 和 api 不可用不影响交易主循环。API 不是下单幂等或风控的唯一保护层。
+collector、api、回测 worker 和 finance-decision 独立运行。回测 worker 通过本地作业队列租约横向扩展。实时决策可独立重启并从持久断点续读。`SmaCrossover` 的求值器仅依赖已编译计划与闭合行情，模拟执行留在回测进程。输入与数据目录见 [实时决策接口](decision-process.md)。上图 trader 支路对应未来设计。
 
 当前云电脑只用 paper。迁移时 IB Gateway、实时数据、交易和订单状态可搬到稳定服务器，研究回测留云电脑，边界遵守 [fertile ADR-001](https://github.com/viramoon/fertile/blob/main/docs/adr/ADR-001-cloud-box-network-constraints.md)。部署环境与运行模式独立，见 [配置](../config/README.md)。
 
