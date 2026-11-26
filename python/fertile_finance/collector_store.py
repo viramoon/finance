@@ -44,6 +44,15 @@ def ensure_dir(path):
         fsync_dir(path.parent)
 
 
+def atomic_publish(src, dest):
+    """Publish a completed file staged on the destination filesystem."""
+    ensure_dir(dest.parent)
+    with src.open("rb") as file:
+        os.fsync(file.fileno())
+    os.replace(src, dest)
+    fsync_dir(dest.parent)
+
+
 def atomic_json(target, value):
     state = target.parent
     with tempfile.NamedTemporaryFile("w", dir=state, prefix=".watermarks-", delete=False) as output:
@@ -137,11 +146,7 @@ class Store:
             # The staging catalog contains exactly the upstream-generated file.
             (src,) = self.staging.glob("data/bar/*/*.parquet")
             dest = self.root / src.relative_to(self.staging)
-            ensure_dir(dest.parent)
-            with src.open("rb") as file:
-                os.fsync(file.fileno())
-            os.replace(src, dest)
-            fsync_dir(dest.parent)
+            atomic_publish(src, dest)
             self.marks[instrument] = bars[-1].ts_event
         if groups:
             checkpoint(self.state, self.marks)
