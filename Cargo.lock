@@ -311,6 +311,9 @@ version = "0.0.0"
 dependencies = [
  "axum",
  "chrono",
+ "finance-collector",
+ "finance-market-protocol",
+ "futures-util",
  "regex",
  "rusqlite",
  "rust_decimal",
@@ -348,6 +351,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "utoipa",
 ]
 
 [[package]]

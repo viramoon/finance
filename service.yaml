@@ -98,6 +98,14 @@ processes:
     bind_host: 127.0.0.1
     port: 8081 # FINANCE_API_PORT / config.api.port 可覆盖
     dependencies: [data_root]
+    read_contract:
+      version: v1
+      documentation: docs/api.md
+      market_state: [finance-state/market-wal, finance-state/market-projection]
+      factor_snapshot: finance-state/factor-research/read-v1.json
+      cache_control: private, no-store
+      openapi_export: cargo run --locked -q -p finance-api -- export-openapi
+      stream_schema_export: cargo run --locked -q -p finance-api -- export-read-stream DIRECTORY
     health:
       live_path: /healthz/live
       ready_path: /healthz/ready

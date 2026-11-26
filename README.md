@@ -8,6 +8,8 @@ fertile 的主项目与 submodule，基于 NautilusTrader 的交易与数据系�
 
 本地行情链路支持 F1 事件追加、恢复和独立 Parquet 投影，Hyperliquid 公共永续行情已接入。[本地行情 WAL、投影与封段接口](docs/market-wal.md)
 
+finance-api 提供 v1 行情 WAL、投影、水位、缺口及因子研究只读查询，并从代码导出 REST OpenAPI 和版本化 WS/SSE 消息契约。[首批读契约与导出命令](docs/api.md#首批读契约)
+
 ## 系统中的位置
 
 | 仓库 | 在 fertile 系统中的职责 |

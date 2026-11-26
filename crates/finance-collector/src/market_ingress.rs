@@ -10,6 +10,7 @@ use anyhow::{Context, Result, ensure};
 use finance_market_protocol::{Capability, Event, Instrument, InstrumentId, Token, U64Text};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tempfile::NamedTempFile;
+use utoipa::ToSchema;
 
 use crate::market_wal::{WAL_SUBDIRECTORIES, WalManifest, WalReader, WalWriter};
 
@@ -30,7 +31,7 @@ fn product_dir(data_root: &Path, source: &Token, product: &Token) -> PathBuf {
         .join(product.as_str())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProductPolicy {
     pub source: Token,
@@ -60,12 +61,13 @@ pub enum PublishResult {
     Denied,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 pub struct SourceObservation {
     pub channel: Token,
     pub instrument_id: InstrumentId,
     pub epoch: U64Text,
     pub seq: U64Text,
+    #[schema(required = true, inline)]
     pub exchange_ts: Option<U64Text>,
     pub receive_ts: U64Text,
 }
@@ -83,15 +85,17 @@ impl From<&Event> for SourceObservation {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, ToSchema)]
 pub struct Watermarks {
+    #[schema(required = true)]
     pub source_latest: Option<SourceObservation>,
     pub local_durable: U64Text,
     pub projected: U64Text,
+    #[schema(required = true, inline)]
     pub remote_verified: Option<U64Text>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GapCause {
     LicenseSkip,
@@ -102,7 +106,7 @@ pub enum GapCause {
     StorageUnavailable,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryOutcome {
     TickBackfilled,
@@ -111,7 +115,7 @@ pub enum RecoveryOutcome {
     HistoryUnrecoverable,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct QualityReport {
     pub channel: Token,
@@ -120,8 +124,10 @@ pub struct QualityReport {
     pub to_ts: U64Text,
     pub cause: GapCause,
     /// None denotes a gap with recovery still pending.
+    #[schema(required = true)]
     pub outcome: Option<RecoveryOutcome>,
     /// Number of recovered items, or number known missing for an unrecoverable interval.
+    #[schema(required = true, inline)]
     pub count: Option<U64Text>,
 }
 
@@ -355,9 +361,9 @@ fn empty_watermarks() -> Watermarks {
 }
 
 pub fn read_watermarks(data_root: &Path, source: &Token, product: &Token) -> Result<Watermarks> {
-    if recording_policy(data_root, source, product)?.is_none() {
+    let Some(policy) = recording_policy(data_root, source, product)? else {
         return Ok(empty_watermarks());
-    }
+    };
 
     #[derive(Deserialize)]
     struct ProjectionWatermark {
@@ -386,6 +392,10 @@ pub fn read_watermarks(data_root: &Path, source: &Token, product: &Token) -> Res
         let record = records
             .first()
             .context("missing last committed WAL record")?;
+        ensure!(
+            record.event.license == policy.license,
+            "WAL event license differs from recording policy"
+        );
         Some(SourceObservation::from(&record.event))
     };
     Ok(Watermarks {

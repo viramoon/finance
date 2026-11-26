@@ -48,6 +48,25 @@ FERTILE_PROFILE=cloudbox cargo run --locked -p finance-api
 
 API 接受 SIGTERM 和 Ctrl-C 优雅停止；部署守护、日志收集和滚动重启以 fertile deploy/ 为准，本 PR 不部署。默认 loopback / 8081，无账户配置和 Gateway 依赖；不能把当前 ready 当成交易 ready。
 
+## 首批读契约验收
+
+用隔离数据根或直接运行进程内 HTTP 测试。出现 `market_product_not_found` 时核对 source/product 与 F3 的落盘策略。投影位置未知时查看 `local_durable` 和 `projected` 水位，必要时在同一隔离根运行一次投影。因子列表为空时核对离线快照是否已经发布。新查询读取已有 WAL 和投影，因子使用单独的可选快照文件。[查询与错误码](docs/api.md#首批读契约)
+
+```sh
+cargo test --locked --offline -p finance-api --test read_contract --test market_read --test factor_read --test read_stream
+cargo build --locked --offline -p finance-collector --bin finance-market-wal
+FINANCE_F3_TEST_PYTHON="$FINANCE_PYTHON" FINANCE_F3_TEST_WAL_BIN="$WAL_BIN" \
+  cargo test --locked --offline -p finance-api --test market_read \
+  python_projector_index_is_readable_over_http -- --include-ignored
+FINANCE_F8_TEST_PYTHON="$FINANCE_PYTHON" \
+  cargo test --locked --offline -p finance-api --test factor_read \
+  python_factor_publication_is_read_by_rust_contract -- --include-ignored
+cargo run --locked --offline -q -p finance-api -- export-openapi > /tmp/finance.openapi.json
+cargo run --locked --offline -q -p finance-api -- export-read-stream /tmp/finance-read-stream
+```
+
+`FINANCE_PYTHON` 指向已构建 Nautilus 的 Python，`WAL_BIN` 指向刚构建的 `finance-market-wal`。联测在临时数据根用合成样本验证 Python 投影、因子发布和 Rust API 读取。生成器无需启动 API 或连接数据源。取用同一 finance 提交生成的 OpenAPI、WS/SSE schema 和合成样本供下游核对。[导出与下游更新顺序](docs/api.md#openapi-与契约)
+
 ## 离线因子研究验收
 
 在仓库根目录用含研究依赖的现有 Python 环境执行。定向测试在内存生成截面和收盘价，月频登记读取仓库内原报告并核对证据哈希。
