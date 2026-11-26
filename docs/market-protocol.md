@@ -77,6 +77,8 @@ finance 定义行情流契约 v1.0，供采集适配器、投影、研究和 web
 
 从仓库根运行以下命令。导出从 Rust 类型生成 schema，并通过类型往返生成样本。Rust 测试比较二次导出的字节，Python 测试读取同一份样本。运行时还负责 JSON 重复键、tick/lot、结构之外的语义和相邻位置校验。
 
+协议样本的固定合成输入和导出产物在同一 [fixture 来源清单](../.data-guard/sources.json) 登记。更新样本时先运行导出器，再校对来源说明与摘要，流程见 [数据入仓防护](data-guard.md#合成-fixture-与例外登记)。
+
 ```sh
 cargo run --locked -q -p finance-market-protocol --bin export-market-protocol -- protocol/v1
 cargo test --locked -p finance-market-protocol
