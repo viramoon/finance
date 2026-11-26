@@ -53,6 +53,17 @@ processes:
       ready_path: /healthz/ready
       status_path: /status
     restart_policy: fertile deploy/
+  - name: finance-binance
+    command: finance-binance
+    working_directory: finance
+    python_path: python
+    config_env: FINANCE_BINANCE_CONFIG
+    profiles: {cloudbox: config/binance/cloudbox.yaml, stable: config/binance/stable.yaml}
+    enabled_by_default: false
+    dependencies: [data_root, nautilus_source_wheel]
+    output: finance-state/market-wal
+    health: JSON 状态日志，403/451 为 region_restricted
+    restart_policy: 仅失败重启，由 fertile deploy/ 决定是否启用
   - name: finance-projector
     command: 'python -m fertile_finance.market_projector --data-root "$FERTILE_DATA_ROOT" --wal-bin finance-market-wal'
     working_directory: finance

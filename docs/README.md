@@ -36,6 +36,7 @@ fertile 以 git submodule 引入 finance、web、frontend，agent 单独维护�
 - [Nautilus 使用与升级](nautilus.md)
 - [连接恢复与熔断](connectivity.md)
 - [IBKR 接入](integrations/ib.md)
+- [Binance 公共行情适配](integrations/binance.md)
 - [HTTP 与代码导出](api.md)
 - [行情标的、事件与流协议](market-protocol.md)
 - [本地行情 WAL、投影与封段接口](market-wal.md)

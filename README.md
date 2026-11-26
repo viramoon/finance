@@ -4,7 +4,7 @@ fertile 的主项目与 submodule，基于 NautilusTrader 的交易与数据系�
 
 本仓库按 [issue #1 方案 v2](https://github.com/viramoon/finance/issues/1#issuecomment-6834604073) 初始化。当前已实现 [Nautilus 源码构建](docs/build.md)、上游离线回测批任务及 [行情与回测 HTTP API](docs/api.md)，交易策略与交易服务仍未实现；TBD 项都需后续 issue 明确后再实施。开发从 [AGENTS.md](AGENTS.md) 开始。
 
-本地行情链路支持 F1 事件追加、恢复和独立 Parquet 投影，数据源适配器按后续 issue 接入。[本地行情 WAL、投影与封段接口](docs/market-wal.md)
+本地行情链路支持 F1 事件追加、恢复和独立 Parquet 投影。[Binance 公共行情适配](docs/integrations/binance.md)接入现货与 USDT 永续，所有内置 profile 默认关闭。[本地行情 WAL、投影与封段接口](docs/market-wal.md)
 
 ## 系统中的位置
 

@@ -301,3 +301,78 @@ assert events[2]['payload']['replacement']['payload']['price'] == '663.1100'
             .unwrap(),
     );
 }
+
+#[test]
+#[ignore = "requires FINANCE_F3_TEST_PYTHON pointing to the built project Python environment"]
+fn perpetual_context_wal_projects_and_indexes_exact_decimal_strings() {
+    let root = tempfile::tempdir().unwrap();
+    let examples: Value = serde_json::from_str(EXAMPLES).unwrap();
+    let instrument_json = examples["instruments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["instrument_id"] == "BTC-USDT-PERP.BINANCE")
+        .unwrap();
+    let instrument = fixture::<Instrument>(instrument_json);
+    let access = ProductPolicy {
+        source: "binance".parse().unwrap(),
+        product: "usdt-perp-context".parse().unwrap(),
+        ..policy(false)
+    };
+    let capability = fixture::<Capability>(&json!({
+        "schema_version": "2.0", "source": access.source, "product": access.product,
+        "message_kinds": ["funding_rate", "open_interest"], "max_depth": 0,
+        "can_backfill": false, "delay_tier": "realtime"
+    }));
+    let mut ingress = MarketIngress::open(root.path(), access.clone()).unwrap();
+    let data: Value =
+        serde_json::from_str(include_str!("../fixtures/binance/observations.json")).unwrap();
+    for (kind, payload) in [
+        (
+            "funding_rate",
+            json!({"rate": data["funding"]["r"], "next_funding_ts": "2000000000"}),
+        ),
+        (
+            "open_interest",
+            json!({"quantity": data["interest"]["openInterest"]}),
+        ),
+    ] {
+        let event = fixture::<Event>(&json!({
+            "schema_version": "2.0", "channel": kind, "kind": kind, "payload": payload,
+            "source": access.source, "product": access.product, "license": access.license,
+            "instrument_id": instrument.instrument_id, "asset_kind": "perpetual", "venue": "BINANCE",
+            "exchange_ts": "1000000000", "receive_ts": "1000000001", "first_available_ts": "1000000001",
+            "epoch": "1", "seq": "1", "revision": "0", "cursor": "1:1"
+        }));
+        ingress.publish(event, &instrument, &capability).unwrap();
+    }
+    assert_eq!(ingress.flush().unwrap(), Some(2));
+
+    let python = env::var_os("FINANCE_F3_TEST_PYTHON").unwrap();
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let verify = r#"
+from pathlib import Path
+import sys
+from fertile_finance.market_projector import main, projected_partitions, read_latest_event
+
+root = Path(sys.argv[1])
+sys.argv[1:2] = ["--data-root", str(root), "--wal-bin"]
+assert main() == 0
+source, product = "binance", "usdt-perp-context"
+[part] = projected_partitions(root, source, product)
+assert part.row_count == 2
+def get(channel):
+    return read_latest_event(root, source, product, channel, "BTC-USDT-PERP.BINANCE", "1", "1")
+assert get("funding_rate").to_dict()["payload"]["rate"] == "-0.00000001"
+assert get("open_interest").to_dict()["payload"]["quantity"] == "123.456789123456"
+"#;
+    checked_output(
+        Command::new(&python)
+            .env("PYTHONPATH", repo.join("python"))
+            .args(["-B", "-c", verify])
+            .arg(root.path())
+            .args([WAL_BIN, "--once"])
+            .output()
+            .unwrap(),
+    );
+}

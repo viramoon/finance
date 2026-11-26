@@ -1,6 +1,6 @@
 # 配置分层设计
 
-部署配置按 base → 选定 profile 覆盖 → 受控环境变量 / 密钥引用加载；API 使用 api.bind_host、api.port 和 paths.data_root。finance-ib 独立读取 ib 段校验纸账户端点、client ID 与超时，collector 的数据源、标的、刷新和补数参数从 config/collector/ 加载。见 [API](../docs/api.md) 和 [IB 接入](../docs/integrations/ib.md)。下表注明未来交易进程的规划字段。
+部署配置按 base → 选定 profile 覆盖 → 受控环境变量 / 密钥引用加载；API 使用 api.bind_host、api.port 和 paths.data_root。finance-ib 独立读取 ib 段校验纸账户端点、client ID 与超时，collector 的数据源、标的、刷新和补数参数从 config/collector/ 加载。见 [API](../docs/api.md) 和 [IB 接入](../docs/integrations/ib.md)。Binance 公共行情单独读取 `config/binance/<profile>.yaml`，内置配置默认关闭，按源和产品显式授权。见 [Binance 接入](../docs/integrations/binance.md)。下表注明未来交易进程的规划字段。
 
 - `base.yaml`：跨环境字段、单位、默认值和验证规则。
 - `cloudbox.yaml`：云电脑根目录与网络参数覆盖，当前只允许 IBKR paper。
