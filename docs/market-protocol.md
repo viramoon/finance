@@ -85,7 +85,11 @@ cargo test --locked -p finance-market-protocol
 PYTHONPATH=python python -m unittest discover -s tests -p test_market_protocol.py -v
 ```
 
-读取端按完整 `schema_version` 选择 schema，拒绝未知版本、未知字段、未知种类和缺少必填字段。任意增删字段或种类、缩窄值域、改变单位或事件语义都需要显式协商并以新的主版本发布，旧 schema 和样本保留给旧读者。只修订文档或更正生成物中与既定 v1.0 规则不一致的部分时保留原协议版本。协议版本独立于代码包版本和 fertile 发布版本。
+读取端按完整 `schema_version` 选择 schema，拒绝未知版本、未知字段、未知种类和缺少必填字段。
+
+**协议主版本在首次随 fertile 集成发布时冻结。** 首次发布前可在候选主版本内追加消息种类，生产者和读取端按同一个候选契约联调。冻结后，增删字段或消息种类、缩窄值域、改变单位或事件语义都须显式协商并使用新主版本，保留旧 schema 和样本供旧读者使用。只修订文档或更正生成物中与既定协议规则不一致的部分时保留原协议版本。协议版本独立于代码包版本和 fertile 发布版本。
+
+v1.0 的 schema、样本和读取行为沿用既有契约。v2.0 由 F5 引入，仍处于首次集成发布前。F4 在该候选版本中追加 `funding_rate`、`open_interest` 和用于独立上下文流的 `gap`、`reset`、`heartbeat`、`status`。已有 Hyperliquid `perpetual_context` 样本及同一流中的 v1.0 控制消息继续可读。
 
 跨仓消费方应从同一个 finance 提交取 schema 和样本，并在自身测试中核对识别的版本、消息分支以及精确字段。finance → web → frontend 的 HTTP OpenAPI 指针继续按原有流程更新。
 
