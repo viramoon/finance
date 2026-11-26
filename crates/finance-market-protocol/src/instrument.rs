@@ -2,7 +2,8 @@ use std::collections::HashSet;
 
 use crate::{
     CalendarId, Currency, DecimalText, InstrumentId, NonEmptyText, SchemaVersion, Token,
-    ValidationError, Venue, require, required_nullable, wire_enum, wire_object,
+    ValidationError, Venue, require, require_schema_version, required_nullable, wire_enum,
+    wire_object,
 };
 
 wire_enum! {
@@ -56,6 +57,10 @@ wire_object! {
 
 impl Instrument {
     pub fn validate(&self) -> Result<(), ValidationError> {
+        require_schema_version(
+            self.schema_version == SchemaVersion::V1,
+            "instrument uses version 1.0",
+        )?;
         validate_venue(&self.instrument_id, &self.venue)?;
         for (field, value) in [
             ("tick_size", &self.tick_size),
@@ -101,6 +106,7 @@ wire_enum! {
         Trade = "trade",
         Snapshot = "snapshot",
         Delta = "delta",
+        PerpetualContext = "perpetual_context",
     }
 }
 
@@ -118,7 +124,7 @@ wire_object! {
         pub schema_version: SchemaVersion,
         pub source: Token,
         pub product: Token,
-        #[schema(min_items = 1, max_items = 4)]
+        #[schema(min_items = 1, max_items = 5)]
         pub message_kinds: Vec<MarketKind>,
         #[schema(maximum = 4294967295u32)]
         pub max_depth: u32,
@@ -130,6 +136,11 @@ wire_object! {
 
 impl Capability {
     pub fn validate(&self) -> Result<(), ValidationError> {
+        require_schema_version(
+            (self.schema_version == SchemaVersion::V2)
+                == self.message_kinds.contains(&MarketKind::PerpetualContext),
+            "capability uses version 2.0 exactly when it supports perpetual_context",
+        )?;
         require(
             !self.message_kinds.is_empty(),
             "message_kinds",

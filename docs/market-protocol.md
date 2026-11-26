@@ -1,6 +1,6 @@
 # 行情标的、事件与流协议
 
-finance 定义行情流契约 v1.0，供采集适配器、投影、研究和 web 消费。传输格式为 UTF-8 JSON。当前交付包括类型、校验、独立 schema 和合成样本。接入与闭合 bar 写入继续使用现有 [BarSource 通路](../catalog/README.md)。HTTP 路由和 OpenAPI 见 [API 文档](api.md)。
+finance 定义行情流契约，供采集适配器、投影、研究和 web 消费。传输格式为 UTF-8 JSON。当前交付包括类型、校验、独立 schema 和合成样本。接入与闭合 bar 写入继续使用现有 [BarSource 通路](../catalog/README.md)。HTTP 路由和 OpenAPI 见 [API 文档](api.md)。
 
 ## 标的与产品
 
@@ -66,7 +66,7 @@ finance 定义行情流契约 v1.0，供采集适配器、投影、研究和 web
 
 ## Schema 导出与兼容规则
 
-每条标的、能力和事件都带 `schema_version: "1.0"`。仓库交付以下独立的 JSON Schema Draft 2020-12 和跨仓样本。
+v1 的标的、能力和事件都带 `schema_version: "1.0"`。仓库交付以下独立的 JSON Schema Draft 2020-12 和跨仓样本。
 
 | 文件 | 内容 |
 | --- | --- |
@@ -89,9 +89,23 @@ PYTHONPATH=python python -m unittest discover -s tests -p test_market_protocol.p
 
 跨仓消费方应从同一个 finance 提交取 schema 和样本，并在自身测试中核对识别的版本、消息分支以及精确字段。finance → web → frontend 的 HTTP OpenAPI 指针继续按原有流程更新。
 
+### v2.0 永续上下文
+
+`schema_version: "2.0"` 的事件种类为 `perpetual_context`，适用于 `asset_kind: "perpetual"`。保留原信封、位置和时钟定义；缺源端时钟时 `exchange_ts` 为 null。`payload` 由三个十进制字符串组成。资金费率 `funding_rate` 可为负，未平仓量 `open_interest` 非负，标记价格 `mark_price` 大于零。标记价格与未平仓量保留源值的精度，可超出交易价格和数量的网格。原始事件修订为 `"0"`。
+
+能力声明包含 `perpetual_context` 时使用 2.0，可同时声明 v1.0 市场数据种类。标的及 `reset`、`gap` 等控制消息沿用 v1.0。读者须按每条记录的版本选择 schema，跨版本控制消息也参与同一流分区的 epoch、seq 校验。
+
+生成 [事件 schema](../protocol/v2/event.schema.json)、[能力 schema](../protocol/v2/capability.schema.json) 和 [合成样本](../protocol/v2/examples.json) 的命令如下。
+
+```sh
+cargo run --locked --offline -q -p finance-market-protocol --bin export-market-protocol -- protocol/v2 --v2
+```
+
+接口与恢复规则见 [Hyperliquid](integrations/hyperliquid.md) 及 [ADR-0034](adr/ADR-0034-hyperliquid-context-stream.md)。
+
 ## 解码与错误定位
 
-Rust 使用 `finance_market_protocol::decode_json::<T>(input)`，其中 `T` 为 `Instrument`、`Capability` 或 `Event`。通过错误的 `path()` 和 `kind().as_str()` 读取诊断。Python 使用 `fertile_finance.market_protocol` 的同名类型及 `from_json(input)`，通过 `ProtocolError.path` 和 `ProtocolError.kind` 读取诊断。
+Rust 使用 `finance_market_protocol::decode_json::<T>(input)`，其中 `T` 为 `Instrument`、`Capability` 或 `Event`。通过错误的 `path()` 和 `kind().as_str()` 读取诊断。Python 使用 `fertile_finance.market_protocol` 的同名类型及 `from_json(input)`，通过 `ProtocolError.path` 和 `ProtocolError.kind` 读取诊断。Python 的 `Kind` 枚举对应 v1.0 消息种类，永续上下文使用 `ContextKind.PERPETUAL_CONTEXT`。
 
 路径使用相对于所读对象的 JSON Pointer，数组下标从零开始。语法错误等定位到整个输入的情况使用空路径。调用方可按错误种类分支，并用可读错误消息显示原因。
 

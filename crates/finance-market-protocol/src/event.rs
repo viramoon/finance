@@ -9,7 +9,7 @@ use crate::{
     decode_tagged_object,
     diagnostics::{Object, decode_at},
     instrument::validate_venue,
-    require, required_nullable, wire_enum, wire_object,
+    require, require_schema_version, required_nullable, wire_enum, wire_object,
 };
 
 wire_enum! {
@@ -131,7 +131,15 @@ wire_object! {
     }
 }
 
-/// The version 1.0 kind tag and its corresponding payload.
+wire_object! {
+    pub struct PerpetualContext {
+        pub funding_rate: DecimalText,
+        pub open_interest: DecimalText,
+        pub mark_price: DecimalText,
+    }
+}
+
+/// The event kind tag and its corresponding payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(
     tag = "kind",
@@ -149,6 +157,7 @@ pub enum Message {
     Reset(Reset),
     Heartbeat(Heartbeat),
     Status(Status),
+    PerpetualContext(PerpetualContext),
 }
 
 // Generate the wire fields once for the normal Serde type and for the decoder
@@ -261,6 +270,11 @@ impl Event {
     }
 
     pub fn validate(&self) -> Result<(), ValidationError> {
+        let context = matches!(&self.message, Message::PerpetualContext(_));
+        require_schema_version(
+            (self.schema_version == SchemaVersion::V2) == context,
+            "schema version 2.0 is reserved for perpetual_context events",
+        )?;
         validate_venue(&self.instrument_id, &self.venue)?;
         require(self.epoch.get() > 0, "epoch", "must be greater than zero")?;
         match &self.message {
@@ -294,6 +308,23 @@ impl Event {
                 "payload.to_ts",
                 "must be at or after payload.from_ts",
             )?,
+            Message::PerpetualContext(context) => {
+                require(
+                    self.asset_kind == AssetKind::Perpetual,
+                    "asset_kind",
+                    "context requires a perpetual instrument",
+                )?;
+                require(
+                    context.open_interest.value() >= Decimal::ZERO,
+                    "payload.open_interest",
+                    "must be nonnegative",
+                )?;
+                require(
+                    context.mark_price.value() > Decimal::ZERO,
+                    "payload.mark_price",
+                    "must be greater than zero",
+                )?;
+            }
             _ => {}
         }
 
@@ -335,6 +366,15 @@ impl Event {
             "product",
             "does not match the supplied capability",
         )?;
+        if matches!(&self.message, Message::PerpetualContext(_)) {
+            require(
+                capability
+                    .message_kinds
+                    .contains(&MarketKind::PerpetualContext),
+                "kind",
+                "perpetual_context is unsupported by the source/product",
+            )?;
+        }
         if let Some(market) = self.message.market_payload() {
             let path = self.message.market_path();
             require(
@@ -454,6 +494,7 @@ impl Message {
             "reset" => decode_at(payload, "/payload").map(Self::Reset),
             "heartbeat" => decode_at(payload, "/payload").map(Self::Heartbeat),
             "status" => decode_at(payload, "/payload").map(Self::Status),
+            "perpetual_context" => decode_at(payload, "/payload").map(Self::PerpetualContext),
             _ => MarketMessage::decode_payload(kind, payload, "").map(Self::from),
         }
     }
@@ -470,7 +511,11 @@ impl Message {
                 MarketMessage::Snapshot(snapshot) => MarketPayload::Snapshot(snapshot),
                 MarketMessage::Delta(delta) => MarketPayload::Delta(delta),
             }),
-            Self::Gap(_) | Self::Reset(_) | Self::Heartbeat(_) | Self::Status(_) => None,
+            Self::Gap(_)
+            | Self::Reset(_)
+            | Self::Heartbeat(_)
+            | Self::Status(_)
+            | Self::PerpetualContext(_) => None,
         }
     }
 
