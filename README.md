@@ -50,6 +50,7 @@ finance/
 - [历史价量补拉与逐笔归档](docs/historical-pull.md)
 - [本地行情 WAL、投影与封段接口](docs/market-wal.md)
 - [统一指标与回放口径](docs/indicators.md)
+- [期权 GEX、gamma wall、flip 与 0DTE 计算接口](docs/option-exposure.md)
 - [StrategyBundle v1 配置与编译](docs/strategy-bundle.md)
 - [离线因子评价与研究登记](docs/factor-research.md)
 - [技术栈决策](docs/adr/ADR-0001-tech-stack.md)
@@ -64,7 +65,7 @@ finance/
 
 一个任务对应一个 issue，使用 issue-<号>-<简述> 分支和 PR，CI 通过后合并，禁止直接推送 main。PR 需含 Closes #<号>、测试结果和逐条验收自检；开发问题在原分支解决，文档随行为在同一 PR 更新。文档 CI 检查必需文件、非空内容、YAML、相对链接及 PR 描述；Finance API CI 编译和测试 API，Nautilus CI 构建源码并执行上游回测、批任务和 HTTP 端到端验证。没有真实交易验证。
 
-开发克隆先在仓库根运行 `sh scripts/install-data-guard-hooks.sh`。Git 钩子和 Repository Data Guard CI 检查提交的文件与合成 fixture 来源。PR 和推送始终检查基准到目标的净差异。防护启用前已发布的历史经单独评审后可豁免逐提交检查。真实行情、截图、数据库、日志导出和备份均存放在工作树之外。规则、故障处置与例外登记见 [数据入仓防护](docs/data-guard.md)。
+开发克隆先在仓库根运行 `sh scripts/install-data-guard-hooks.sh`。Git 钩子和 Repository Data Guard CI 检查提交的文件与合成 fixture 来源。提交、推送和 PR 分别从 `HEAD`、远端跟踪默认分支和 PR 基分支 SHA 读取硬规则。PR 和推送同时检查提交历史与净差异。防护启用前已发布的历史经单独评审后可豁免逐提交检查。真实行情、截图、数据库、日志导出和备份均存放在工作树之外。规则、故障处置与例外登记见 [数据入仓防护](docs/data-guard.md)。
 
 ## 源码构建入口
 

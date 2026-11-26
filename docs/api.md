@@ -2,7 +2,7 @@
 
 finance-api 是独立的 Rust / axum 进程；web 通过 HTTP 调用，frontend 只调用 web。当前不启动 Nautilus、trader、collector 或 IBKR，也不在 HTTP 请求中执行回测。服务部署唯一来源仍为 fertile deploy/，本仓库 service.yaml 记录组件接口。
 
-用于接口测试和文档的行情样本须来自已登记的合成 fixture。防护启用前已发布分支的合成样本在合入前也须通过来源和 SHA-256 检查。将实际 API 响应、运行日志和数据库留在工作树之外，目录和样本准入方式见 [数据入仓防护](data-guard.md)。
+用于接口测试和文档的行情样本须来自已登记的合成 fixture。API 的 PR 作业以 PR 基分支 SHA 的硬规则检查 Git 对象，样本来源和 SHA-256 由候选树的清单提供。防护启用前已发布分支的合成样本也须通过该检查。将实际 API 响应、运行日志和数据库留在工作树之外，目录和样本准入方式见 [数据入仓防护](data-guard.md)。
 
 ## 运行与配置
 

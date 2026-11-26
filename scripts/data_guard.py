@@ -16,6 +16,66 @@ RULES = ".data-guard/rules.json"
 SOURCES = ".data-guard/sources.json"
 PUBLISHED = ".data-guard/published.json"
 MAX_POLICY_BYTES = 256 * 1024
+# Frozen baseline for an unborn HEAD and diagnostics without a tracking ref.
+BOOTSTRAP_RULES = b'''
+{
+  "version": 1,
+  "max_blob_bytes": 262144,
+  "blocked_path_components": [
+    "audit",
+    "backup",
+    "backups",
+    "data",
+    "dumps",
+    "exports",
+    "logs",
+    "raw",
+    "results",
+    "screenshots"
+  ],
+  "blocked_suffixes": [
+    ".7z", ".arrow", ".avif", ".bak", ".bin", ".bmp", ".bz2", ".core",
+    ".db", ".db-shm", ".db-wal", ".dmp", ".dump", ".feather", ".gif", ".gz",
+    ".heic", ".ipynb", ".jpeg", ".jpg", ".log", ".mdb", ".orc", ".parquet",
+    ".pdf", ".png", ".rar", ".sqlite", ".sqlite3", ".sqlite3-shm", ".sqlite3-wal",
+    ".tar", ".tgz", ".tif", ".tiff", ".webp", ".xz", ".zip", ".zst"
+  ],
+  "blocked_magic": [
+    {"offset": 0, "hex": "50415231"},
+    {"offset": 0, "hex": "50415245"},
+    {"offset": 0, "hex": "4152524f5731"},
+    {"offset": 0, "hex": "4f5243"},
+    {"offset": 0, "hex": "1f8b"},
+    {"offset": 0, "hex": "504b0304"},
+    {"offset": 0, "hex": "504b0506"},
+    {"offset": 0, "hex": "504b0708"},
+    {"offset": 0, "hex": "425a68"},
+    {"offset": 0, "hex": "fd377a585a00"},
+    {"offset": 0, "hex": "377abcaf271c"},
+    {"offset": 0, "hex": "526172211a07"},
+    {"offset": 0, "hex": "28b52ffd"},
+    {"offset": 257, "hex": "7573746172"},
+    {"offset": 0, "hex": "89504e470d0a1a0a"},
+    {"offset": 0, "hex": "ffd8ff"},
+    {"offset": 0, "hex": "474946383761"},
+    {"offset": 0, "hex": "474946383961"},
+    {"offset": 8, "hex": "57454250"},
+    {"offset": 4, "hex": "66747970"},
+    {"offset": 0, "hex": "255044462d"},
+    {"offset": 0, "hex": "53514c69746520666f726d6174203300"},
+    {"offset": 0, "hex": "5047444d50"},
+    {"offset": 0, "hex": "2d2d0a2d2d20506f737467726553514c2064617461626173652064756d700a"},
+    {"offset": 0, "hex": "2d2d204d7953514c2064756d7020"},
+    {"offset": 0, "hex": "76657273696f6e2068747470733a2f2f6769742d6c66732e6769746875622e636f6d2f737065632f7631"}
+  ],
+  "fixture_paths": [
+    "tests/fixtures/*.json",
+    "protocol/v1/examples.json",
+    "crates/finance-market-protocol/fixtures/examples.input.json"
+  ],
+  "fixture_suffixes": [".csv", ".tsv", ".ndjson", ".jsonl"]
+}
+'''
 REGULAR_MODES = {b"100644", b"100755"}
 OID_PATTERN = r"(?:[0-9a-f]{40}|[0-9a-f]{64})"
 OID = re.compile(OID_PATTERN.encode("ascii"))
@@ -110,9 +170,12 @@ def commit_id(revision, optional=False, *, cwd=None):
 
 
 def staged_trees(*, cwd=None):
-    head = commit_id("HEAD", optional=True, cwd=cwd)
-    before = read_tree(head, cwd=cwd) if head else {}
-    return before, read_staged_tree(head, before, cwd=cwd)
+    oid = git("rev-parse", "--verify", "--quiet", "HEAD", optional=True, cwd=cwd)
+    if oid is None:
+        git("symbolic-ref", "--quiet", "HEAD", cwd=cwd)  # An unborn HEAD is symbolic.
+    head = commit_id(oid.decode("ascii").strip(), cwd=cwd) if oid else None
+    before = read_tree(head, cwd=cwd) if head else None
+    return before, read_staged_tree(head, before or {}, cwd=cwd)
 
 
 def changed_paths(before, after):
@@ -190,8 +253,12 @@ def valid_path(path):
 
 
 def load_rules(tree):
+    return parse_rules(policy_blob(tree, RULES, "invalid-rules"))
+
+
+def parse_rules(data):
     error = "invalid-rules"
-    raw = parse_policy(policy_blob(tree, RULES, error), error)
+    raw = parse_policy(data, error)
     if raw.keys() != {"version", *Rules.__annotations__}:
         raise GuardError(error)
     size = raw["max_blob_bytes"]
@@ -343,11 +410,13 @@ def inspect_blob(path, entry, rules, source):
     return None
 
 
-def inspect_tree(tree, before, paths, rules, report, require_sources=False):
+def inspect_tree(tree, before, paths, rules, report, require_policy=False):
+    if require_policy or any(path == RULES or path.startswith(RULES + "/") for path in paths):
+        load_rules(tree)  # Validate candidate policy independently of enforcement.
     if any(published_path(path) for path in paths):
         load_published(tree)  # Validate the candidate without using it to select history.
     csv.field_size_limit(rules.max_blob_bytes)
-    sources = load_sources(tree, require_sources)
+    sources = load_sources(tree, require_policy)
     for path, record in sources.items():
         if not all(tree.get(item, Entry(b"", b"")).mode in REGULAR_MODES
                    for item in (path, record["generator"])):
@@ -366,13 +435,17 @@ def inspect_tree(tree, before, paths, rules, report, require_sources=False):
 
 def inspect_range(base, tip, report, *, trusted):
     target = read_tree(tip)
-    rules = load_rules(target)
     baseline = read_tree(base) if base else {}
-    inspect_tree(target, baseline, changed_paths(baseline, target), rules, report, require_sources=True)
-
-    trusted_tree = {}
     if trusted:
         trusted_tree = baseline if trusted == base else read_tree(trusted)
+        rules = load_rules(trusted_tree)
+    else:
+        # Report violations in an untracked push, but always deny publication.
+        report("missing-trusted-ref")
+        trusted_tree = {}
+        rules = parse_rules(BOOTSTRAP_RULES)
+    inspect_tree(target, baseline, changed_paths(baseline, target), rules, report, require_policy=True)
+
     revisions = [tip.encode("ascii")]
     if base:
         revisions.append(b"^" + base.encode("ascii"))
@@ -382,12 +455,21 @@ def inspect_range(base, tip, report, *, trusted):
         commit, *parents = line.decode("ascii").split()
         tree = target if commit == tip else read_tree(commit)
         before = read_tree(parents[0]) if parents else {}
-        inspect_tree(tree, before, changed_paths(before, tree), rules, report, require_sources=commit == tip)
+        inspect_tree(tree, before, changed_paths(before, tree), rules, report, require_policy=commit == tip)
+
+
+def tracking_default(remote):
+    prefix = f"refs/remotes/{remote}/"
+    target = git("symbolic-ref", "--quiet", prefix + "HEAD", optional=True)
+    ref = os.fsdecode(target.rstrip(b"\n")) if target else prefix + "main"
+    if not ref.startswith(prefix):
+        return None
+    oid = git("show-ref", "--verify", "--hash", ref, optional=True)
+    return commit_id(oid.decode("ascii").strip(), optional=True) if oid else None
 
 
 def inspect_push(remote, report):
-    tracking = [commit_id(f"refs/remotes/{remote}/{ref}", optional=True) for ref in ("HEAD", "main")]
-    default_base = next((oid for oid in tracking if oid), None)
+    default_base = tracking_default(remote)
     for line in sys.stdin.buffer:
         fields = line.split()
         if len(fields) != 4 or not all(OID.fullmatch(fields[i]) for i in (1, 3)):
@@ -422,9 +504,13 @@ def main():
     try:
         if args.mode == "staged":
             before, tree = staged_trees()
+            if before is None:
+                rules = parse_rules(BOOTSTRAP_RULES)
+                before = {}
+            else:
+                rules = load_rules(before)
             load_published(before)
-            inspect_tree(tree, before, changed_paths(before, tree), load_rules(tree),
-                         report, require_sources=True)
+            inspect_tree(tree, before, changed_paths(before, tree), rules, report, require_policy=True)
         else:
             if git("rev-parse", "--is-shallow-repository").strip() != b"false":
                 raise GuardError("incomplete-history")
