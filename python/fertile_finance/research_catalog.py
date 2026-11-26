@@ -19,7 +19,7 @@ from nautilus_trader.model.currencies import USD
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.identifiers import InstrumentId, Symbol
 from nautilus_trader.model.instruments import Equity
-from nautilus_trader.model.objects import Price, Quantity
+from nautilus_trader.model.objects import FIXED_PRECISION, Price, Quantity
 from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 
 from .collector_store import DECIMAL
@@ -32,6 +32,11 @@ LATEST = date(2100, 12, 31)
 CENT = Decimal("0.01")
 FIELDS = ["date", "open", "high", "low", "close", "volume"]
 MANIFEST = "dataset.json"
+RAW_BASIS = "raw_unadjusted"
+RAW_ACTIONS = "cash_dividends_excluded_split_free_reviewed"
+YAHOO_SPLIT_BASIS = "yahoo_chart_split_normalized"
+YAHOO_SPLIT_ACTIONS = "cash_dividends_excluded_yahoo_split_normalized_reviewed"
+YAHOO_LINEAGE = "yahoo-lineage.json"
 
 
 class ResearchError(ValueError):
@@ -79,19 +84,21 @@ def bar_type(instrument):
     return BarType.from_str(f"{instrument}-1-DAY-LAST-EXTERNAL")
 
 
-def price(value):
-    if not DECIMAL.fullmatch(value) or len(value) > 16:
-        raise ResearchError("invalid_bar", "Price must be positive decimal USD at cent granularity")
+def price(value, *, precision=2):
+    granularity = "cent granularity" if precision == 2 else f"up to {precision} decimal places"
+    message = f"Price must be positive decimal USD at {granularity}"
+    if not DECIMAL.fullmatch(value) or len(value) > max(16, 8 + precision):
+        raise ResearchError("invalid_bar", message)
     try:
         amount = Decimal(value)
-        if 0 < amount <= 1_000_000 and amount == amount.quantize(CENT):
-            return Price.from_str(format(amount, ".2f"))
+        if 0 < amount <= 1_000_000 and amount == amount.quantize(Decimal((0, (1,), -precision))):
+            return Price.from_str(format(amount, f".{precision}f"))
     except InvalidOperation:
         pass
-    raise ResearchError("invalid_bar", "Price must be positive decimal USD at cent granularity")
+    raise ResearchError("invalid_bar", message)
 
 
-def parse_rows(raw, kind):
+def parse_rows(raw, kind, *, fractional_before=None):
     rows = csv.DictReader(io.StringIO(raw.decode("utf-8"), newline=""))
     if rows.fieldnames != FIELDS:
         raise ResearchError("invalid_bar", "Expected CSV columns " + ",".join(FIELDS))
@@ -108,7 +115,17 @@ def parse_rows(raw, kind):
         volume = row["volume"]
         if not re.fullmatch(r"[0-9]{1,12}", volume):
             raise ResearchError("invalid_bar", "Volume must be a nonnegative whole share count")
-        prices = tuple(price(row[key]) for key in FIELDS[1:5])
+        precision = FIXED_PRECISION if fractional_before is not None and day < fractional_before else 2
+        prices = []
+        for key in FIELDS[1:5]:
+            try:
+                parsed = price(row[key], precision=precision)
+            except ResearchError as exc:
+                raise ResearchError(exc.code, f"{key} on {day}: {exc}") from exc
+            if fractional_before is not None and precision != FIXED_PRECISION:
+                # Keep a single storage precision for every bar in the adjusted dataset.
+                parsed = Price.from_raw(parsed.raw, FIXED_PRECISION)
+            prices.append(parsed)
         o, h, low, close = (p.as_decimal() for p in prices)
         if not low <= min(o, close) <= max(o, close) <= h:
             raise ResearchError("invalid_bar", f"Invalid OHLC range for {day}")
@@ -118,7 +135,41 @@ def parse_rows(raw, kind):
     return result
 
 
-def import_catalog(root, csv_path, *, instrument, source, kind, asset_type):
+def _reviewed_split_cutoff(lineage, instrument, asset_type, csv_sha256):
+    if (
+        not isinstance(lineage, dict)
+        or lineage.get("series_id") != instrument
+        or lineage.get("asset_type") != asset_type
+        or lineage.get("sha256") != csv_sha256
+        or lineage.get("price_basis") != "yahoo_chart_quote"
+        or lineage.get("output_price_basis") != YAHOO_SPLIT_BASIS
+        or lineage.get("corporate_actions") != YAHOO_SPLIT_ACTIONS
+    ):
+        raise ResearchError("invalid_source", "Yahoo split lineage does not match the CSV, instrument, or price basis")
+    evidence = lineage.get("split_review_evidence")
+    snapshots = lineage.get("adjustment_as_of")
+    events = lineage.get("split_events")
+    if (not isinstance(evidence, str) or not evidence.strip()
+            or not isinstance(snapshots, list) or len(snapshots) != 1
+            or not isinstance(events, list) or not events):
+        raise ResearchError("invalid_source", "Yahoo split lineage requires review evidence, one snapshot date and split events")
+    snapshot = iso_date(snapshots[0])
+    requested_start = iso_date(lineage.get("requested_start") or lineage.get("first_session"))
+    latest = requested_start
+    for event in events:
+        if (not isinstance(event, dict)
+                or any(type(event.get(leg)) is not int or event[leg] <= 0 for leg in ("numerator", "denominator"))
+                or type(event.get("source_timestamp")) is not int or event["source_timestamp"] < 0
+                or not (event.get("source_id") is None or isinstance(event["source_id"], str))):
+            raise ResearchError("invalid_source", "Invalid event in Yahoo split lineage")
+        day = iso_date(event.get("session"))
+        if not latest <= day <= snapshot:
+            raise ResearchError("invalid_source", f"Out-of-order or out-of-snapshot Yahoo split date {day}")
+        latest = day
+    return latest, snapshot
+
+
+def import_catalog(root, csv_path, *, instrument, source, kind, asset_type, yahoo_split_lineage=None):
     if not ID.fullmatch(instrument):
         raise ResearchError("invalid_instrument", "Choose an XNYS-listed USD stock or ETF, such as IBM.XNYS")
     if not SOURCE.fullmatch(source) or kind not in {"historical", "fixture"} or asset_type not in {"stock", "etf"}:
@@ -132,8 +183,20 @@ def import_catalog(root, csv_path, *, instrument, source, kind, asset_type):
         raw = source_file.read(limit + 1)
     if len(raw) > limit:
         raise ResearchError("invalid_source", "CSV must fit within 8 MiB")
-    rows = parse_rows(raw, kind)
+    csv_sha256 = hashlib.sha256(raw).hexdigest()
+    lineage_raw = None
+    fractional_before = None
+    if yahoo_split_lineage is not None:
+        lineage_raw = yahoo_split_lineage.read_bytes()
+        lineage = json.loads(lineage_raw)
+        fractional_before, snapshot = _reviewed_split_cutoff(lineage, instrument, asset_type, csv_sha256)
+    rows = parse_rows(raw, kind, fractional_before=fractional_before)
     start, end = min(rows), max(rows)
+    if lineage_raw is not None and (
+        end > snapshot or (lineage.get("first_session"), lineage.get("last_session"), lineage.get("observations"))
+        != (str(start), str(end), len(rows))
+    ):
+        raise ResearchError("invalid_source", "Yahoo split lineage session coverage does not match the CSV")
     calendar = sessions(start, end)
     now = pd.Timestamp.now(tz="UTC").value
     kind_of_bar = bar_type(instrument)
@@ -148,10 +211,10 @@ def import_catalog(root, csv_path, *, instrument, source, kind, asset_type):
 
     metadata = {
         "instrument": instrument, "asset_type": asset_type, "source": source,
-        "source_sha256": hashlib.sha256(raw).hexdigest(),
+        "source_sha256": csv_sha256,
         "data_kind": kind, "calendar": "XNYS", "first_session": str(start), "last_session": str(end),
-        "observations": len(bars), "price_basis": "raw_unadjusted",
-        "corporate_actions": "cash_dividends_excluded_split_free_reviewed",
+        "observations": len(bars), "price_basis": RAW_BASIS if lineage_raw is None else YAHOO_SPLIT_BASIS,
+        "corporate_actions": RAW_ACTIONS if lineage_raw is None else YAHOO_SPLIT_ACTIONS,
     }
     require_bar_timestamps(bars)
     # Readers only discover the final directory. Never replace a published dataset.
@@ -161,6 +224,8 @@ def import_catalog(root, csv_path, *, instrument, source, kind, asset_type):
         catalog = ParquetDataCatalog(staging)
         catalog.write_data([cash_equity(instrument)])
         catalog.write_data(bars)
+        if lineage_raw is not None:
+            (staging / YAHOO_LINEAGE).write_bytes(lineage_raw)
         (staging / MANIFEST).write_text(json.dumps(metadata, ensure_ascii=False) + "\n")
         staging.rename(destination)
     return metadata
@@ -176,9 +241,9 @@ def load_interval(root, instrument, start, end):
         metadata = json.loads((path / MANIFEST).read_text())
     except FileNotFoundError:
         raise ResearchError("no_data", "No research catalog for that instrument") from None
-    if (metadata["calendar"], metadata["price_basis"], metadata["corporate_actions"]) != (
-        "XNYS", "raw_unadjusted", "cash_dividends_excluded_split_free_reviewed",
-    ) or metadata["instrument"] != instrument or metadata["asset_type"] not in {"stock", "etf"} or (
+    if metadata["calendar"] != "XNYS" or (metadata["price_basis"], metadata["corporate_actions"]) not in {
+        (RAW_BASIS, RAW_ACTIONS), (YAHOO_SPLIT_BASIS, YAHOO_SPLIT_ACTIONS),
+    } or metadata["instrument"] != instrument or metadata["asset_type"] not in {"stock", "etf"} or (
         metadata["data_kind"] not in {"historical", "fixture"}
     ):
         raise ResearchError("invalid_source", "Catalog provenance or instrument does not match the research profile")
@@ -212,12 +277,16 @@ def main():
     parser.add_argument("--source", required=True, help="Public provider label, with no URL credentials or secrets")
     parser.add_argument("--kind", choices=("historical", "fixture"), required=True)
     parser.add_argument("--asset-type", choices=("stock", "etf"), required=True)
-    parser.add_argument("--raw-split-free-reviewed", required=True, action="store_true",
+    review = parser.add_mutually_exclusive_group(required=True)
+    review.add_argument("--raw-split-free-reviewed", action="store_true",
                         help="Confirm raw (without dividend adjustments) OHLCV and no splits in the supplied span")
+    review.add_argument("--yahoo-split-normalized-lineage", type=Path, metavar="JSON",
+                        help="Reviewed converter lineage for Yahoo OHLCV on one split-normalized share basis")
     args = parser.parse_args()
     try:
         print(json.dumps(import_catalog(research_root(), args.csv, instrument=args.instrument,
-                                       source=args.source, kind=args.kind, asset_type=args.asset_type)))
+                                       source=args.source, kind=args.kind, asset_type=args.asset_type,
+                                       yahoo_split_lineage=args.yahoo_split_normalized_lineage)))
     except (OSError, ValueError) as exc:
         parser.exit(1, f"{exc}\n")
 

@@ -3,7 +3,7 @@
 from collections import Counter, deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_CEILING
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from itertools import pairwise
 
 from nautilus_trader.backtest.engine import BacktestEngine
@@ -35,7 +35,9 @@ def coverage_windows(equity, end):
 
 def design_price(close, side):
     slip = (close * SLIPPAGE_BPS / 10_000).quantize(CENT, rounding=ROUND_CEILING)
-    return close + slip if side == OrderSide.BUY else max(CENT, close - slip)
+    if side == OrderSide.BUY:
+        return (close + slip).quantize(CENT, rounding=ROUND_CEILING)
+    return max(CENT, (close - slip).quantize(CENT, rounding=ROUND_FLOOR))
 
 
 @dataclass

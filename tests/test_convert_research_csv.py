@@ -10,16 +10,45 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 
+from fertile_finance.backtest_job import execute
 from fertile_finance.historical_catalog import HistoricalCatalog
+from fertile_finance.research_catalog import sessions
 from fertile_finance.yahoo_daily import load_yahoo_daily
 
 
 REPO = Path(__file__).resolve().parents[1]
 FIXTURE = REPO / "tests" / "fixtures" / "historical" / "yahoo_ibm.json"
 AS_OF = date(2024, 12, 3)
+IBM_2024_START = date(2024, 1, 2)
+IBM_2024_END = date(2024, 12, 31)
+
+
+def ibm_2024_archive(path, *, first_open="162.8300018310547"):
+    """Construct a complete fixture with the issue's first open as an exact JSON token."""
+    chart = json.loads(FIXTURE.read_bytes())
+    source = chart["chart"]["result"][0]
+    calendar = sessions(IBM_2024_START, IBM_2024_END)
+    source["timestamp"] = [close // 10**9 for close in calendar.values()]
+    source["events"] = {}
+    # Vary prices so the official SMA and performance code see a changing NAV.
+    cyclic_closes = [200 - abs(index % 80 - 40) for index in range(1, len(calendar))]
+    source["indicators"] = {
+        "quote": [{
+            "open": ["first-open", *cyclic_closes],
+            "high": ["first-high", *(close + 2 for close in cyclic_closes)],
+            "low": [160, *(close - 2 for close in cyclic_closes)],
+            "close": [163, *cyclic_closes],
+            "volume": [1000] * len(calendar),
+        }],
+        "adjclose": [{"adjclose": [150] * len(calendar)}],
+    }
+    # An error of exactly 0.00002 USD is inside the inclusive tolerance.
+    payload = json.dumps(chart).replace('"first-open"', first_open).replace('"first-high"', "165.00998")
+    path.write_text(payload, encoding="utf-8")
 
 
 class ConvertResearchCSV(unittest.TestCase):
@@ -152,3 +181,69 @@ class ConvertResearchCSV(unittest.TestCase):
         self.assertIn("Output already exists", result.stderr)
         self.assertEqual(self.csv.read_bytes(), b"existing content")
         self.assertEqual(list(self.root.glob(".research-csv-*")), [])
+
+    def test_ibm_2024_documented_example_converts_imports_and_runs_official_job(self):
+        archive = self.root / "ibm-2024.json"
+        ibm_2024_archive(archive)
+        batch = load_yahoo_daily(archive, adjustment_as_of=IBM_2024_END)
+        HistoricalCatalog(self.historical_root).write_yahoo(batch)
+        interval = ("--start", IBM_2024_START, "--end", IBM_2024_END)
+        from_archive = self.convert("--yahoo-json", archive, "--adjustment-as-of", IBM_2024_END, *interval)
+        self.assertEqual(from_archive.returncode, 0, from_archive.stderr)
+        archive_csv = self.csv.read_bytes()
+        archive_lineage = json.loads(from_archive.stdout)
+        self.csv.unlink()
+
+        from_catalog = self.convert(*self.catalog_args(), *interval)
+        self.assertEqual(from_catalog.returncode, 0, from_catalog.stderr)
+        lineage = json.loads(from_catalog.stdout)
+        self.assertEqual(self.csv.read_bytes(), archive_csv)
+        self.assertEqual(lineage["sha256"], archive_lineage["sha256"])
+        self.assertEqual(lineage["sha256"], hashlib.sha256(archive_csv).hexdigest())
+        self.assertEqual((archive_lineage["normalized_price_count"], lineage["normalized_price_count"]), (2, 2))
+        self.assertEqual((lineage["first_session"], lineage["last_session"], lineage["observations"],
+                          lineage["missing_sessions"]), ("2024-01-02", "2024-12-31", 252, 0))
+        self.assertEqual(archive_csv.decode().splitlines()[1], "2024-01-02,162.83,165.01,160.00,163.00,1000")
+
+        imported = self.run_module(
+            "research_catalog", self.csv, "--instrument", "IBM.XNYS", "--asset-type", "stock",
+            "--kind", "fixture", "--source", "Yahoo Finance chart IBM fixture", "--raw-split-free-reviewed",
+            env={**self.env, "FERTILE_RESEARCH_ROOT": str(self.research_root)},
+        )
+        self.assertEqual(imported.returncode, 0, imported.stderr)
+        manifest = json.loads(imported.stdout)
+        self.assertEqual((manifest["source_sha256"], manifest["observations"]), (lineage["sha256"], 252))
+
+        request = {
+            "strategy": "SmaCrossover", "instrument": "IBM.XNYS",
+            "start": "2024-01-02T00:00:00Z", "end": "2024-12-31T00:00:00Z",
+            "params": {"fast_period": 10, "slow_period": 30, "shares": 1},
+        }
+        target = self.root / "result.json"
+        with patch.dict(os.environ, {"FERTILE_RESEARCH_ROOT": str(self.research_root),
+                                    "FERTILE_DATA_ROOT": str(self.root / "unused-data")}):
+            execute(request, target)
+        summary = json.loads(target.read_text())["research"]
+        self.assertEqual(summary["dataset"], manifest)
+        self.assertEqual((summary["actual_start"], summary["actual_end"], summary["observations"]),
+                         ("2024-01-02", "2024-12-31", 252))
+        self.assertEqual(summary["risk_free_rate"], "0")
+        windows = summary["windows"]
+        self.assertEqual([row["window"] for row in windows], ["50y", "10y", "5y", "longest_sample"])
+        for window in windows[:3]:
+            self.assertEqual(window["coverage"], "insufficient")
+            self.assertIsNone(window["metrics"])
+        longest = windows[-1]
+        self.assertEqual((longest["coverage"], longest["rf_source"], longest["observations"]), ("full", "rf=0", 223))
+        self.assertTrue(Decimal(longest["metrics"]["sharpe"]).is_finite())
+        self.assertFalse((self.root / "unused-data").exists())
+
+    def test_ibm_2024_quote_outside_cent_tolerance_fails_without_csv(self):
+        archive = self.root / "ibm-2024-off-tick.json"
+        ibm_2024_archive(archive, first_open="162.83002000000001")
+        result = self.convert("--yahoo-json", archive, "--adjustment-as-of", IBM_2024_END,
+                              "--start", IBM_2024_START, "--end", IBM_2024_END)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Source quote open on 2024-01-02", result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertFalse(self.csv.exists())

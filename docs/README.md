@@ -46,3 +46,4 @@ fertile 以 git submodule 引入 finance、web、frontend；agent 是独立仓�
 
 - [源码构建与官方回测](build.md)
 - [源码 submodule 决策](adr/ADR-0003-nautilus-source-submodule.md)
+- [Yahoo 拆股归一化日线准入](adr/ADR-0004-yahoo-split-normalized-research.md)
