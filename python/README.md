@@ -24,6 +24,17 @@ FERTILE_DATA_ROOT="$(mktemp -d)" PYTHONPATH=python \
 
 源码构建的 Python 环境包含研究日线导入器和均线策略。配置、运行和费用见 [历史回测](../docs/historical-backtest.md)。
 
+从仓库根设置 `PYTHONPATH=python`，用源码构建的解释器调用以下模块。每个入口支持 `--help`。
+
+| 模块 | 用途 |
+| --- | --- |
+| `fertile_finance.isolated_historical_job` | 在独立数据根、研究根和环回端口上通过官方 HTTP API 执行一次作业 |
+| `fertile_finance.migrate_spy` | 核对旧 SPY 固定 21:00 UTC 时点并用本地 Yahoo 存档重导，支持 `--dry-run` |
+| `fertile_finance.convert_research_csv` | 从 Yahoo 文件或历史数据根生成官方导入 CSV，输出源 quote 血缘和 SHA-256 |
+| `fertile_finance.research_catalog` | 将经审核的原始 OHLCV 快照发布到指定研究根 |
+
+完整操作见 [运行手册](../RUNBOOK.md#隔离验收官方历史作业)、[SPY 迁移](../catalog/README.md#既有-spy-固定-2100-utc-数据) 和 [CSV 导出与审核导入](../docs/historical-backtest.md#准备数据)。
+
 ### Unix epoch 边界
 
 本系统日线时间戳下界是 `1970-01-01T00:00:00Z`，该时刻及之后的有效时间戳均可表示。预 1970 历史不可用。最长样本从第一条可用观测起算，研究作业从 warmup 完成后的第一条净值起算。原生 Nautilus 对负时间戳的运行时验证见 [日线时间戳下界](../docs/nautilus.md#日线时间戳下界)。

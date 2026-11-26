@@ -63,8 +63,10 @@ GET /api/v1/backtests/datasets 返回具名日线 catalog 的可选标的、来�
 
 新成功作业的 `summary.research.windows` 依序返回四行，`window` 为 `50y`、`10y`、`5y` 或 `longest_sample`。使用 `label` 展示覆盖不足的固定窗口，例如 `50y (insufficient)`。每行包含 `requested_years`、`requested_start`、`actual_start`、`actual_end`、`actual_years`、`calendar_start`、`calendar_end`、`observations`、`expected_sessions`、`missing_sessions`、`missing_pct`、`coverage` 和 `rf_source`。请求区间超出所选日历的可用范围时，行内附有 `coverage_reason="calendar_out_of_range"`。最长样本行的 `requested_years` 为 `null`。日期采用 `YYYY-MM-DD`，实际跨度及比例使用十进制字符串，数量为整数。
 
-`coverage=insufficient` 时 `metrics` 为 `null`。满窗的 `metrics` 包含 `return_pct`、`cagr_pct`、`max_drawdown_pct`、`volatility_pct`、`turnover_pct` 和无量纲的 `sharpe`，计算值为十进制字符串，无法计算的单项为 `null`。当前作业标记 `rf_source="rf=0"`。已有的成功摘要仍可读取，可能只有三个固定窗口及原有字段。判定和计算口径见 [日线窗口](../python/README.md#日线窗口)。
+`coverage=insufficient` 时 `metrics` 为 `null`。满窗的 `metrics` 包含 `return_pct`、`cagr_pct`、`max_drawdown_pct`、`volatility_pct`、`turnover_pct` 和无量纲的 `sharpe`，计算值为十进制字符串，无法计算的单项为 `null`。官方 HTTP 作业 Sharpe 使用 `rf=0`，结果标记 `rf_source="rf=0"`。已导入的 French 和 FRED 归档供研究读取，不自动参与官方作业 Sharpe。已有的成功摘要仍可读取，可能只有三个固定窗口及原有字段。判定和计算口径见 [日线窗口](../python/README.md#日线窗口)。
 
 日历构造失败的行记录 `coverage_reason="calendar_unavailable"` 和 `calendar_diagnostic`，该行的 `calendar_start`、应有交易日数、缺失交易日数及缺失比例为 `null`。`calendar_end` 省略。
 
 GET /api/v1/backtests/by-key 使用提交时的同一 `Idempotency-Key` 请求头。存在时返回原作业 ID，不存在时返回 404。经 web 查询时也使用提交凭据。详情继续用 GET /api/v1/backtests/{id}。回测条件和风险边界见 [历史回测](historical-backtest.md)。
+
+通过独立的本机 API 实例验收官方历史作业时，提交和轮询仍使用上述路由。使用方法见 [隔离运行官方历史作业](backtest-jobs.md#隔离运行官方历史作业)。
