@@ -1,0 +1,17 @@
+{
+  "id": "research.factor-momentum",
+  "version": "1.0.0",
+  "state": "research_only",
+  "directory": "strategies/2026-11-25-factor-momentum",
+  "summary": "results/summary.json",
+  "artifacts_sha256": {
+    "README.md": "1b795f9b856dbd0ce9c67632beff4a53871ad46803feeb8f5d03ecac2e075d99",
+    "DIAGNOSTICS.md": "ee73656c1b9e7e11c2c2149e1188bccd8a2e0e1b282d6f4442530269e0e35c93",
+    "data/raw/MANIFEST.txt": "b627656ef215690c6b5f972247abb830f34b093e84a6d8c53c8cc58f5215ad74",
+    "data/comparisons/provenance.json": "6e4d1922e5a6d94ef99ae4cac5ff25bb70e37b0a1eb333544ddbe330e43bb12f",
+    "results/summary.json": "9bf2c0b5e2e35c83430a25d54e8a8a080f71b29f2802ee867dd18c0ba09f6bbd",
+    "results/audit/cash.csv.gz": "957a8b6b4c6ce2f077148dec83f55eba03a0d8f88a25603eec3fbdff289d144f",
+    "results/audit/orders.csv.gz": "13c1b128b8b9814b1cac3af674390fe305d516d3d2862ad0f35708e2528c380d",
+    "results/audit/positions.csv.gz": "d6d797004106e150d74698fe412d6a52f8689964ffa70732b16d3cde29cad9c6"
+  }
+}

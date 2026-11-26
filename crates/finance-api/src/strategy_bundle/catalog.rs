@@ -1,4 +1,5 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 
 /// The earliest usable point within or after the identified session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -37,6 +38,21 @@ pub struct Catalog<'a> {
     pub calendars: &'a [&'a str],
     pub universes: &'a [Universe<'a>],
     pub bars: &'a [Bars<'a>],
+}
+
+#[derive(Deserialize)]
+struct HistoricalResearchId<'a> {
+    id: &'a str,
+}
+
+pub(super) fn is_historical_research(id: &str) -> bool {
+    static MOMENTUM: LazyLock<HistoricalResearchId<'static>> = LazyLock::new(|| {
+        serde_json::from_str(include_str!(
+            "../../../../strategies/registry/factor-momentum-v1.json"
+        ))
+        .expect("the historical factor-momentum registry has a built-in strategy ID")
+    });
+    id == MOMENTUM.id
 }
 
 const REVIEWED_BARS: Bars<'static> = Bars {
