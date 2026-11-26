@@ -8,16 +8,16 @@
       "source": "手工设计的三根闭合 bar，覆盖十进制精度和循环回放。"
     },
     "crates/finance-collector/tests/nasdaq_totalview.rs": {
-      "sha256": "d90e6b20eaddc07d0b4f6f8baee8eb3a449b47a8a0cfda8a44c6710ec7c8442c",
+      "sha256": "48a6ca8545714d4623d430f6ebbb1a9a87094f048f7e47c25c0432716f360ab3",
       "generator": "scripts/export-totalview-review-sources.sh",
       "seed": "fixed",
-      "source": "在内存中从固定合约 ID、价格和精确数量构造展示行，验证 Nasdaq 标签及 WAL 隔离。用 sh scripts/export-totalview-review-sources.sh 从当前提交导出测试源码。"
+      "source": "固定合成深度行用于隔离子进程展示。既有 v1/examples.json 的合成盘口快照用于同数据根 WAL 写入对照。用 sh scripts/export-totalview-review-sources.sh 从当前提交导出测试源码。"
     },
     "crates/finance-ib/src/depth/focus/tests.rs": {
-      "sha256": "bd0051affc6f406e12b6e4da6a72f10322f1d37a53cd5813cd123f331d3358ed",
+      "sha256": "9f2474868520829c569a1a2450c218ce1ccb6725e807dba870d99d8cd4d0ca94",
       "generator": "scripts/export-totalview-review-sources.sh",
       "seed": "fixed",
-      "source": "固定合成深度行、回调与焦点切换，验证并发上限、位置语义、清簿和故障。用 sh scripts/export-totalview-review-sources.sh 从当前提交导出测试源码。"
+      "source": "独立列出八个 Nasdaq 代码，配合固定合成深度行、回调和焦点切换，验证并发上限、位置语义、清簿和故障。用 sh scripts/export-totalview-review-sources.sh 从当前提交导出测试源码。"
     },
     "crates/finance-ib/src/depth/transport_tests.rs": {
       "sha256": "b0e3eafbeb835eddb2cf2250ba546eae103ab1d3659491d386b0af2a4b04e818",

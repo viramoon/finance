@@ -91,7 +91,9 @@ Replay 可单独运行。paper 模式下 probe 用 client ID 91，collector 用 
 
 ### 离线验收 Nasdaq TotalView 场所深度
 
-自动测试直接构造合成深度事件和 Gateway 回放，验证八只自选可切换、SPY 拒绝、两个固定名额与一个页面名额、清簿再订阅、场所及档数标签，以及展示路径的 WAL 隔离。测试使用临时目录和内存传输，无需 Gateway 或账户配置。
+焦点测试使用独立列出的 QQQ、AAPL、MSFT、NVDA、AMZN、GOOGL、META、TSLA 逐一验证切换，另验证 SPY 拒绝、两个固定名额与一个页面名额、清簿再订阅和场所及档数标签。深度测试使用合成回调和内存 Gateway 回放，无需账户配置。
+
+WAL 隔离测试在子进程中运行深度展示入口，将工作目录和 `FERTILE_DATA_ROOT` 都指向同一个临时目录。子进程在展示盘口时和退出展示循环后核对目录为空，并检查 WAL 产品和 TotalView 记录策略。随后在同一目录落盘一条获准记录的合成 F1 盘口快照作为对照，父进程核对只存在该对照产品且能原样回读快照。产品策略测试另行核对 `ibkr/nasdaq-totalview` 拒绝本地记录、非展示派生与 Drive 备份。
 
 ```sh
 cargo test --locked --offline -p finance-ib depth

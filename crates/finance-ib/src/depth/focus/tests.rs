@@ -14,6 +14,17 @@ const ALLOWED: DepthPermissions = DepthPermissions {
     eds_confirmed: true,
 };
 
+const NASDAQ_WATCHLIST: [(&str, DepthSymbol); 8] = [
+    ("QQQ", DepthSymbol::Qqq),
+    ("AAPL", DepthSymbol::Aapl),
+    ("MSFT", DepthSymbol::Msft),
+    ("NVDA", DepthSymbol::Nvda),
+    ("AMZN", DepthSymbol::Amzn),
+    ("GOOGL", DepthSymbol::Googl),
+    ("META", DepthSymbol::Meta),
+    ("TSLA", DepthSymbol::Tsla),
+];
+
 type Callback = Result<Option<DepthUpdate>, DepthError>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -65,9 +76,14 @@ impl<'a> DepthSource for &'a Replay {
 
     async fn confirm_depth(&self, symbol: DepthSymbol) -> Result<ConfirmedContract, DepthError> {
         self.record(Trace::Confirm(symbol));
+        let (index, (ticker, _)) = NASDAQ_WATCHLIST
+            .iter()
+            .enumerate()
+            .find(|(_, (_, expected))| *expected == symbol)
+            .expect("symbol in the synthetic Nasdaq watchlist");
         Ok(ConfirmedContract {
-            con_id: 1000 + symbol as i32,
-            symbol: symbol.as_str().into(),
+            con_id: 1000 + index as i32,
+            symbol: (*ticker).into(),
             primary_exchange: Some("NASDAQ".into()),
             kind: ContractKind::Equity,
             liquid_hours: Vec::new(),
@@ -78,7 +94,10 @@ impl<'a> DepthSource for &'a Replay {
         &self,
         request: &DepthRequest,
     ) -> Result<Self::Subscription, DepthError> {
-        let symbol = request.contract().symbol.parse().unwrap();
+        let (_, symbol) = NASDAQ_WATCHLIST
+            .into_iter()
+            .find(|(ticker, _)| *ticker == request.contract().symbol)
+            .expect("requested ticker in the synthetic Nasdaq watchlist");
         let (sender, callbacks) = mpsc::unbounded_channel();
         let mut data = self.data.lock().unwrap();
         if let Some((failed, error)) = data.fail_open
@@ -200,20 +219,28 @@ async fn run_replay(
 
 #[tokio::test]
 async fn every_nasdaq_symbol_can_follow_with_two_fixed_slots_and_spy_closes_the_follow_slot() {
+    assert_eq!(DepthSymbol::ALL.len(), NASDAQ_WATCHLIST.len());
+    let symbols = NASDAQ_WATCHLIST.map(|(ticker, expected)| {
+        assert!(DepthSymbol::ALL.contains(&expected), "missing {ticker}");
+        assert_eq!(expected.as_str(), ticker);
+        let parsed = ticker.parse::<DepthSymbol>().unwrap();
+        assert_eq!(parsed, expected, "incorrect mapping for {ticker}");
+        parsed
+    });
     let replay = Replay::default();
     let defaults = DepthFocus::default();
     let (focus, receiver) = watch::channel(defaults);
     let (sender, mut frames) = mpsc::unbounded_channel();
 
     let (result, ()) = tokio::join!(run_replay(&replay, receiver, ALLOWED, 5, sender), async {
-        let qqq = opened(&mut frames, DepthSymbol::Qqq).await;
-        opened(&mut frames, DepthSymbol::Aapl).await;
+        let qqq = opened(&mut frames, symbols[0]).await;
+        let aapl = opened(&mut frames, symbols[1]).await;
         assert_eq!(
             "SPY".parse::<DepthSymbol>(),
             Err(DepthError::UnsupportedSymbol)
         );
         assert_eq!(
-            DepthFocus::new(&DepthSymbol::ALL[..3], None),
+            DepthFocus::new(&symbols[..3], None),
             Err(DepthError::InvalidFocus)
         );
         assert_eq!(
@@ -221,7 +248,7 @@ async fn every_nasdaq_symbol_can_follow_with_two_fixed_slots_and_spy_closes_the_
             Err(DepthError::InvalidFocus)
         );
 
-        for symbol in DepthSymbol::ALL.into_iter().skip(2) {
+        for symbol in symbols.into_iter().skip(2) {
             focus.send_replace(defaults.with_followed(Some(symbol)));
             opened(&mut frames, symbol).await;
             assert_eq!(
@@ -230,26 +257,27 @@ async fn every_nasdaq_symbol_can_follow_with_two_fixed_slots_and_spy_closes_the_
             );
         }
 
-        // Selecting a pinned page uses its existing line and removes the old follow line.
-        focus.send_replace(defaults.with_followed(Some(DepthSymbol::Qqq)));
-        frame(&mut frames, DepthSymbol::Tsla, |frame| {
-            frame.state == DepthState::Inactive
-        })
-        .await;
-        replay.inject(
-            DepthSymbol::Qqq,
-            row(DepthSide::Bid, DepthOperation::Insert, 0, "12.01", "1"),
-        );
-        assert_eq!(
-            frame(&mut frames, DepthSymbol::Qqq, |frame| frame.state
-                == DepthState::Receiving)
-            .await
-            .request_id,
-            Some(qqq)
-        );
-
-        focus.send_replace(defaults.with_followed(Some(DepthSymbol::Tsla)));
-        opened(&mut frames, DepthSymbol::Tsla).await;
+        // Each pinned page reuses its existing line and releases the follow slot.
+        for (symbol, request_id) in [(symbols[0], qqq), (symbols[1], aapl)] {
+            focus.send_replace(defaults.with_followed(Some(symbol)));
+            frame(&mut frames, DepthSymbol::Tsla, |frame| {
+                frame.state == DepthState::Inactive
+            })
+            .await;
+            replay.inject(
+                symbol,
+                row(DepthSide::Bid, DepthOperation::Insert, 0, "12.01", "1"),
+            );
+            assert_eq!(
+                frame(&mut frames, symbol, |frame| frame.state
+                    == DepthState::Receiving)
+                .await
+                .request_id,
+                Some(request_id)
+            );
+            focus.send_replace(defaults.with_followed(Some(DepthSymbol::Tsla)));
+            opened(&mut frames, DepthSymbol::Tsla).await;
+        }
         focus.send_replace(defaults.with_followed("SPY".parse().ok()));
         frame(&mut frames, DepthSymbol::Tsla, |frame| {
             frame.state == DepthState::Inactive
@@ -263,14 +291,14 @@ async fn every_nasdaq_symbol_can_follow_with_two_fixed_slots_and_spy_closes_the_
     assert_eq!(data.peak, 3);
     assert!(data.lines.is_empty());
     let trace = replay.trace.lock().unwrap();
-    for symbol in DepthSymbol::ALL {
+    for symbol in symbols {
         let count = trace
             .iter()
             .filter(|event| matches!(event, Trace::Open(open, _) if *open == symbol))
             .count();
-        assert_eq!(count, if symbol == DepthSymbol::Tsla { 2 } else { 1 });
+        assert_eq!(count, if symbol == DepthSymbol::Tsla { 3 } else { 1 });
     }
-    for pair in DepthSymbol::ALL[2..].windows(2) {
+    for pair in symbols[2..].windows(2) {
         let cancel_previous = trace
             .iter()
             .position(|event| matches!(event, Trace::Cancel(symbol, _) if *symbol == pair[0]))
