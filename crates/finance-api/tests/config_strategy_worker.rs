@@ -72,7 +72,55 @@ fn decimal(value: &Value) -> Decimal {
     value.as_str().unwrap().parse().unwrap()
 }
 
+fn python_command(data_root: &Path, research_root: &Path) -> Command {
+    let python = env::var_os("FINANCE_STRATEGY_TEST_PYTHON").expect("source-built Python path");
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut command = Command::new(python);
+    command
+        .current_dir(&repo)
+        .env("PYTHONPATH", repo.join("python"))
+        .env("FERTILE_DATA_ROOT", data_root)
+        .env("FERTILE_RESEARCH_ROOT", research_root)
+        .env("OPENBLAS_NUM_THREADS", "1")
+        .env("OMP_NUM_THREADS", "1");
+    command
+}
+
+fn generate_replay(command: &mut Command, data_root: &Path, flags: &[&str]) {
+    let fixture = command
+        .arg("tests/config_strategy_replay_fixture.py")
+        .arg(data_root)
+        .args(flags)
+        .output()
+        .unwrap();
+    assert!(
+        fixture.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fixture.stderr)
+    );
+}
+
 struct Worker(Child);
+
+impl Worker {
+    fn start(command: &mut Command, log: &Path) -> Self {
+        let stdout = fs::File::create(log).unwrap();
+        Self(
+            command
+                .args([
+                    "-m",
+                    "fertile_finance.worker",
+                    "--isolated",
+                    "--timeout",
+                    "30",
+                ])
+                .stdout(stdout.try_clone().unwrap())
+                .stderr(stdout)
+                .spawn()
+                .unwrap(),
+        )
+    }
+}
 
 impl Drop for Worker {
     fn drop(&mut self) {
@@ -107,32 +155,14 @@ async fn await_job(app: &Router, job: &Value, worker: &mut Worker, log: &Path) -
 #[tokio::test]
 #[ignore = "requires the source-built Nautilus Python environment; exercised by Nautilus CI"]
 async fn configured_recipes_survive_retry_and_execute_in_the_real_worker() {
-    let python = env::var_os("FINANCE_STRATEGY_TEST_PYTHON").expect("source-built Python path");
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     let research_root = temp.path().join("research");
     fs::create_dir(&research_root).unwrap();
-    let python_command = || {
-        let mut command = Command::new(&python);
-        command
-            .current_dir(&repo)
-            .env("PYTHONPATH", repo.join("python"))
-            .env("FERTILE_DATA_ROOT", &data_root)
-            .env("FERTILE_RESEARCH_ROOT", &research_root)
-            .env("OPENBLAS_NUM_THREADS", "1")
-            .env("OMP_NUM_THREADS", "1");
-        command
-    };
-    let fixture = python_command()
-        .arg("tests/config_strategy_replay_fixture.py")
-        .arg(&data_root)
-        .output()
-        .unwrap();
-    assert!(
-        fixture.status.success(),
-        "{}",
-        String::from_utf8_lossy(&fixture.stderr)
+    generate_replay(
+        &mut python_command(&data_root, &research_root),
+        &data_root,
+        &[],
     );
 
     let app = router(AppState {
@@ -191,21 +221,7 @@ async fn configured_recipes_survive_retry_and_execute_in_the_real_worker() {
     assert_eq!(submit(&app, "entry-exit", registered_job).await, entry);
 
     let log = temp.path().join("worker.log");
-    let stdout = fs::File::create(&log).unwrap();
-    let mut worker = Worker(
-        python_command()
-            .args([
-                "-m",
-                "fertile_finance.worker",
-                "--isolated",
-                "--timeout",
-                "30",
-            ])
-            .stdout(stdout.try_clone().unwrap())
-            .stderr(stdout)
-            .spawn()
-            .unwrap(),
-    );
+    let mut worker = Worker::start(&mut python_command(&data_root, &research_root), &log);
     let entry = await_job(&app, &entry, &mut worker, &log).await;
     let targets = await_job(&app, &targets, &mut worker, &log).await;
     let conflict = await_job(&app, &conflict, &mut worker, &log).await;
@@ -310,4 +326,80 @@ async fn configured_recipes_survive_retry_and_execute_in_the_real_worker() {
     assert!(first_bbb.iter().any(|row| row["recipe"] == "A"
         && row["status"] == "rejected"
         && row["reason"] == "portfolio_asset_limit"));
+}
+
+#[tokio::test]
+#[ignore = "requires the source-built Nautilus Python environment; exercised by Nautilus CI"]
+async fn target_weights_rank_truncate_and_rebalance_to_equal_notional() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let research_root = temp.path().join("research");
+    fs::create_dir(&research_root).unwrap();
+    generate_replay(
+        &mut python_command(&data_root, &research_root),
+        &data_root,
+        &["--target-weights"],
+    );
+    let app = router(AppState {
+        data_root: data_root.clone(),
+        research_root: research_root.clone(),
+    });
+    let bundle = TARGET_WEIGHTS
+        .replace("top_n: 5", "top_n: 2")
+        .replace("amount: \"100000\"", "amount: \"10000\"")
+        .replace(
+            "max_weight_per_asset: \"0.25\"",
+            "max_weight_per_asset: \"1\"",
+        )
+        .replace("commission_bps: \"2\"", "commission_bps: \"0\"")
+        .replace("slippage_bps: \"5\"", "slippage_bps: \"0\"");
+    let mut submission = inline(&bundle);
+    submission["end"] = json!("2024-03-08T00:00:00Z");
+    let job = submit(&app, "rank-and-rebalance", submission).await;
+
+    let log = temp.path().join("worker.log");
+    let mut worker = Worker::start(&mut python_command(&data_root, &research_root), &log);
+    let completed = await_job(&app, &job, &mut worker, &log).await;
+    let summary = &completed["summary"];
+    let report = &summary["strategy_report"];
+    let fills: Vec<_> = report["fills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|fill| {
+            (
+                fill["instrument_id"].as_str().unwrap(),
+                fill["side"].as_str().unwrap(),
+                fill["signal_date"].as_str().unwrap(),
+                fill["fill_date"].as_str().unwrap(),
+                decimal(&fill["quantity"]),
+                decimal(&fill["quantity"]) * decimal(&fill["price"]),
+            )
+        })
+        .collect();
+    let leg = |instrument, side, signal, executed, shares| {
+        (
+            instrument,
+            side,
+            signal,
+            executed,
+            Decimal::from(shares),
+            Decimal::from(5000),
+        )
+    };
+    assert_eq!(
+        fills,
+        [
+            leg("BBB.XNYS", "buy", "2024-03-01", "2024-03-04", 50),
+            leg("CCC.XNYS", "buy", "2024-03-01", "2024-03-04", 100),
+            leg("BBB.XNYS", "sell", "2024-03-05", "2024-03-06", 50),
+            leg("AAA.XNYS", "buy", "2024-03-05", "2024-03-06", 20),
+        ]
+    );
+    assert_eq!(
+        report["positions"],
+        json!({"AAA.XNYS":"20", "CCC.XNYS":"100"})
+    );
+    assert_eq!(decimal(&report["cash"]), Decimal::ZERO);
+    assert_eq!(decimal(&summary["pnl"]), Decimal::ZERO);
 }
