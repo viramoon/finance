@@ -38,6 +38,7 @@ fertile 以 git submodule 引入 finance、web、frontend，agent 单独维护�
 - [IBKR 接入](integrations/ib.md)
 - [HTTP 与代码导出](api.md)
 - [行情标的、事件与流协议](market-protocol.md)
+- [历史价量补拉与逐笔归档](historical-pull.md)
 - [本地行情 WAL、投影与封段接口](market-wal.md)
 - [StrategyBundle v1 配置与编译](strategy-bundle.md)
 - [离线因子评价与研究登记](factor-research.md)

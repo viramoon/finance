@@ -46,6 +46,7 @@ finance/
 - [IBKR 接入](docs/integrations/ib.md)
 - [HTTP 与代码导出](docs/api.md)
 - [行情标的、事件与流协议](docs/market-protocol.md)
+- [历史价量补拉与逐笔归档](docs/historical-pull.md)
 - [本地行情 WAL、投影与封段接口](docs/market-wal.md)
 - [StrategyBundle v1 配置与编译](docs/strategy-bundle.md)
 - [离线因子评价与研究登记](docs/factor-research.md)
