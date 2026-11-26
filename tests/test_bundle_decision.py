@@ -13,6 +13,8 @@ import time
 import unittest
 
 from config_strategy_replay_fixture import BARS_REF, UNIVERSE_REF, build
+from fertile_finance.backtest_job import execute
+from fertile_finance.research_catalog import nyse
 from fertile_finance.strategy_backtest_job import run_strategy_backtest_job
 from fertile_finance.strategy_replay import canonical_sha256
 
@@ -299,6 +301,66 @@ raise SystemExit(result)
                 self.assertNotIn("forged diagnostic", run.stderr)
                 self.assertEqual(self._read("SELECT replay_offset FROM decision_checkpoint"), [(len(prefix),)])
                 self.assertEqual(self._rows(), [])
+
+    def test_compiled_sleeve_budget_is_exact_and_bound_to_bundle(self):
+        plan = _plan(ranking=True)
+        spec = plan["bundle"]["spec"]
+        sleeve = spec["portfolio"]["sleeves"][0]
+        sleeve["budget_weight"] = "0.3"
+        plan["sleeves"] = [sleeve.copy()]
+        spec["portfolio"]["initial_cash"]["amount"] = "100"
+        spec["clock"]["warmup_sessions"] = 1
+        spec["factors"]["momentum"]["params"]["lookback_sessions"] = 1
+        plan["content_sha256"] = canonical_sha256(plan["bundle"])
+
+        instrument = "AAA.XNYS"
+        sessions = (("2024-03-01", True), ("2024-03-04", False))
+        frames = []
+        for day, warmup in sessions:
+            bar = dict.fromkeys(("open", "high", "low", "close"), "0.10")
+            bar.update(volume="100", first_available_ts=str(nyse().schedule.at[day, "close"].value))
+            frames.append({
+                "schema": SESSION_SCHEMA, "session": day, "warmup": warmup, "members": [instrument],
+                "cash": "100", "bars": {instrument: bar}, "pending_reductions": [],
+                "sleeves": {sleeve["recipe"]: {"shares": {}, "sessions_held": {}, "exited": []}},
+            })
+        self.replay_path.write_bytes(b"".join(map(_encode, frames)))
+        self.plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        valid = self._launch()
+        self.assertEqual(valid.returncode, 0, valid.stderr)
+        self.assertEqual(self._read("SELECT target_shares FROM bundle_decisions"), [("300",)])
+
+        rehashed = json.loads(json.dumps(plan))
+        rehashed["bundle"]["spec"]["portfolio"]["sleeves"][0]["budget_weight"] = 0.3
+        rehashed["sleeves"][0]["budget_weight"] = 0.3
+        rehashed["content_sha256"] = canonical_sha256(rehashed["bundle"])
+        for index, (case, changes) in enumerate((
+            ("fractional JSON number", {"sleeves": [{**sleeve, "budget_weight": 0.3}]}),
+            ("changed decimal string", {"sleeves": [{**sleeve, "budget_weight": "0.4"}]}),
+            ("non-integer priority", {"sleeves": [{**sleeve, "priority": 10.0}]}),
+            ("changed priority", {"sleeves": [{**sleeve, "priority": 11}]}),
+            ("changed execution model", {"execution": "execution.modified@1.0.0"}),
+            ("changed data reference", {"inputs": {**plan["inputs"], "bars": {"id": "test.other@1.0.0"}}}),
+            ("rehashed floating budget", rehashed),
+        )):
+            with self.subTest(case=case):
+                tampered = {**plan, **changes}
+                self.plan_path.write_text(json.dumps(tampered), encoding="utf-8")
+                # A new data root prevents the checkpoint's whole-plan digest from masking
+                # acceptance of a tampered plan by the loader.
+                empty_root = self.root / f"invalid-{index}"
+                empty_root.mkdir()
+                rejected = subprocess.run(
+                    self.command, env={**self.env, "FERTILE_DATA_ROOT": str(empty_root)},
+                    capture_output=True, text=True, timeout=20,
+                )
+                self.assertEqual(rejected.returncode, 1, rejected.stderr)
+                self.assertEqual(rejected.stderr, "finance-decision: Invalid compiled StrategyBundle plan\n")
+                self.assertEqual(list(empty_root.iterdir()), [])
+
+                result = self.root / "worker-result.json"
+                execute({"strategy": "StrategyBundle", "plan": tampered}, result)
+                self.assertEqual(json.loads(result.read_text()), {"strategy_error": "strategy_plan_invalid"})
 
 
 if __name__ == "__main__":

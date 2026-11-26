@@ -13,6 +13,7 @@ from .portfolio_inputs import DataGap, ResearchError
 from .research_decimal import EXACT_RESEARCH_CONTEXT
 from .strategy_allocation import Claim, Limit, allocate
 from .strategy_indicators import IndicatorEvaluator, evaluate_indicator
+from .strategy_plan import BUNDLE_PLAN_VERSION, plan_decimal
 
 if TYPE_CHECKING:
     from nautilus_trader.model.data import Bar
@@ -75,7 +76,7 @@ class BundleSignalEvaluator:
     """Keep indicator history and accept the portfolio state at each closed session."""
 
     def __init__(self, plan: dict, *, indicator_evaluator: IndicatorEvaluator | None = None):
-        if plan.get("plan_version") != "fertile.finance/strategy-plan/v1":
+        if plan.get("plan_version") != BUNDLE_PLAN_VERSION:
             raise ResearchError("unsupported_strategy_plan", "Supply a trusted version 1 compiled strategy plan")
         spec = plan["bundle"]["spec"]
         self.reentry = spec["policy"]["same_session_reentry"]
@@ -87,16 +88,17 @@ class BundleSignalEvaluator:
         TopologicalSorter({name: component.get("depends_on", ()) for name, component in self.factors.items()}).prepare()
         self.history = {}
         self.factor_values = {}
-        self.gross_cap = Fraction(spec["portfolio"]["max_gross_weight"])
-        self.asset_cap = Fraction(spec["portfolio"]["max_weight_per_asset"])
+        self.gross_cap = Fraction(plan_decimal(spec["portfolio"]["max_gross_weight"]))
+        self.asset_cap = Fraction(plan_decimal(spec["portfolio"]["max_weight_per_asset"]))
         self.sleeves = {}
         for row in plan["sleeves"]:
             name = row["recipe"]
             recipe = spec["recipes"][name]
-            budget = Fraction(row["budget_weight"])
-            risk_caps = [Fraction(self.modules[key]["params"]["max_gross_weight"]) for key in recipe["risk"]]
+            budget = Fraction(plan_decimal(row["budget_weight"]))
+            risk_caps = [Fraction(plan_decimal(self.modules[key]["params"]["max_gross_weight"]))
+                         for key in recipe["risk"]]
             sizing = self.modules.get(recipe.get("sizing"))
-            cap = Fraction(sizing["params"]["max_weight_per_asset"]) if sizing else Fraction(1)
+            cap = Fraction(plan_decimal(sizing["params"]["max_weight_per_asset"])) if sizing else Fraction(1)
             component_keys = [recipe[key] for key in ("entry", "exit", "sizing", "allocator") if key in recipe]
             component_keys += recipe["filters"] + recipe["risk"]
             components = {self.modules[key]["use"] for key in component_keys}
@@ -172,13 +174,13 @@ class BundleSignalEvaluator:
             else:
                 parameters = exit_module["params"]
                 observed = self._value(parameters["factor"], key)
-                exits = observed is not None and observed < Decimal(parameters["threshold"])
+                exits = observed is not None and observed < plan_decimal(parameters["threshold"])
             if exits:
                 targets[key], reasons[key] = 0, "recipe_exit"
         if equity is None or not sleeve.budget:
             return targets, reasons
         parameters = entry["params"]
-        threshold = Decimal(parameters["threshold"])
+        threshold = plan_decimal(parameters["threshold"])
         bars = session.bars
         candidates = []
         for key in sorted(session.members):

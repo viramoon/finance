@@ -19,6 +19,7 @@ from .research_decimal import EXACT_RESEARCH_CONTEXT, RESEARCH_CONTEXT
 from .strategy_allocation import Claim, Limit, allocate
 from .strategy_fee_search import largest_cash_feasible_fee_total
 from .strategy_indicators import IndicatorEvaluator
+from .strategy_plan import BUNDLE_PLAN_VERSION, plan_decimal
 from .strategy_signals import BundleSession, BundleSignal, BundleSignalEvaluator, SleeveState, mark_equity
 
 from nautilus_trader.backtest.models import FeeModel
@@ -106,8 +107,8 @@ def _affordable_cents(upper, feasible):
 
 class _CashEquityCosts(FeeModel):
     def __init__(self, execution):
-        self.commission_rate = Decimal(execution["commission_bps"]) / 10_000
-        self.slippage_rate = Decimal(execution["slippage_bps"]) / 10_000
+        self.commission_rate = plan_decimal(execution["commission_bps"]) / 10_000
+        self.slippage_rate = plan_decimal(execution["slippage_bps"]) / 10_000
 
     def prices(self, price):
         mid = price.as_decimal()
@@ -133,7 +134,8 @@ class _ConfiguredStrategy(_PortfolioStrategy):
         self.costs = costs
         self.days = {day: index for index, day in enumerate(inputs.closes)}
         self.sleeves = {
-            row["recipe"]: _Sleeve(config.initial_cash * Decimal(row["budget_weight"])) for row in plan["sleeves"]
+            row["recipe"]: _Sleeve(config.initial_cash * plan_decimal(row["budget_weight"]))
+            for row in plan["sleeves"]
         }
         self.pending = {}
         self.attribution = []
@@ -619,11 +621,11 @@ def run_config_strategy_backtest(
     signal_observer: Callable[[BundleSession, BundleSignal], None] | None = None,
 ) -> ConfigStrategyResult:
     """Replay pinned point-in-time inputs and optionally observe each close-time decision."""
-    if plan.get("plan_version") != "fertile.finance/strategy-plan/v1":
+    if plan.get("plan_version") != BUNDLE_PLAN_VERSION:
         raise ResearchError("unsupported_strategy_plan", "Supply a trusted version 1 compiled strategy plan")
     with localcontext(RESEARCH_CONTEXT, prec=80):
         spec = plan["bundle"]["spec"]
-        cash = Decimal(spec["portfolio"]["initial_cash"]["amount"])
+        cash = plan_decimal(spec["portfolio"]["initial_cash"]["amount"])
         config = PortfolioConfig(fill_timing="next_close", initial_cash=cash)
         if history_start is None:
             history_start = min(start, min((row.date for row in universe), default=start))
