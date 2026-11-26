@@ -143,7 +143,7 @@ pub(super) async fn run_with<T: Session>(
 enum End {
     Stopped,
     Disconnect,
-    DepthGap(Market, usize),
+    DepthGap(Market, usize, &'static str),
     Http { code: u16, retry_after: Option<u64> },
 }
 
@@ -506,7 +506,13 @@ impl<'a, O: Observer> Feed<'a, O> {
                 data: StreamMessage::Depth { symbol, diff },
             } => {
                 let (index, state) = locate(&mut self.markets, metadata, market, &symbol)?;
-                let depth = state.book.update(diff, received, market)?;
+                let depth = state.book.update(
+                    diff,
+                    received,
+                    market,
+                    &state.instrument.tick_size,
+                    &state.instrument.lot_size,
+                )?;
                 self.depth(market, index, depth)
             }
             Frame::Stream {
@@ -605,7 +611,20 @@ impl<'a, O: Observer> Feed<'a, O> {
     fn depth(&mut self, market: Market, index: usize, depth: Depth) -> Result<Option<End>> {
         match depth {
             Depth::Pending => {}
-            Depth::Gap => return Ok(Some(End::DepthGap(market, index))),
+            Depth::Gap => {
+                return Ok(Some(End::DepthGap(
+                    market,
+                    index,
+                    "binance_depth_sequence_gap",
+                )));
+            }
+            Depth::InvalidIncrement => {
+                return Ok(Some(End::DepthGap(
+                    market,
+                    index,
+                    "binance_depth_invalid_increment",
+                )));
+            }
             Depth::Initialized(snapshot, updates) => {
                 self.publish(
                     market,
@@ -673,10 +692,10 @@ impl<'a, O: Observer> Feed<'a, O> {
                         continue;
                     }
                     let (cause, reason) = match end {
-                        End::DepthGap(m, i)
+                        End::DepthGap(m, i, reason)
                             if m == market && i == index && channel == Channel::Depth =>
                         {
-                            (GapCause::SourceGap, "binance_depth_sequence_gap")
+                            (GapCause::SourceGap, reason)
                         }
                         End::Http {
                             code: 418 | 429, ..

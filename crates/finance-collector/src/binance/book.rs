@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use anyhow::{Context, Result, ensure};
-use finance_market_protocol::{BookDelta, BookSide, BookSnapshot};
+use finance_market_protocol::{BookDelta, BookSide, BookSnapshot, DecimalText};
 use rust_decimal::Decimal;
 
 use super::wire::{Diff, Market, Snapshot, ns};
@@ -31,6 +31,7 @@ pub enum Depth {
     Initialized(DepthFrame<BookSnapshot>, Vec<DepthFrame<BookDelta>>),
     Updated(DepthFrame<BookDelta>),
     Gap,
+    InvalidIncrement,
 }
 
 #[derive(Default)]
@@ -88,7 +89,14 @@ impl Book {
         self.bridge(market)
     }
 
-    pub fn update(&mut self, diff: Diff, receive: u64, market: Market) -> Result<Depth> {
+    pub fn update(
+        &mut self,
+        diff: Diff,
+        receive: u64,
+        market: Market,
+        tick_size: &DecimalText,
+        lot_size: &DecimalText,
+    ) -> Result<Depth> {
         if !diff.sequence_valid(market) {
             return Ok(self.invalidate());
         }
@@ -105,6 +113,13 @@ impl Book {
         let (Ok(delta), Ok(exchange)) = (diff.payload(), ns(diff.event_ms)) else {
             return Ok(self.invalidate());
         };
+        // Use the same exact divisibility check as F1 before buffering or applying.
+        if delta.updates.iter().any(|update| {
+            !update.price.is_multiple_of(tick_size) || !update.quantity.is_multiple_of(lot_size)
+        }) {
+            *self = Self::default();
+            return Ok(Depth::InvalidIncrement);
+        }
         let update = Update {
             first: diff.first,
             last: diff.last,
@@ -231,13 +246,24 @@ mod tests {
         serde_json::from_str(include_str!("../../fixtures/binance/depth.json")).unwrap()
     }
 
-    fn update(book: &mut Book, data: &serde_json::Value, name: &str, market: Market) -> Depth {
+    fn apply_update(book: &mut Book, diff: Diff, market: Market, receive: u64) -> Depth {
         book.update(
-            serde_json::from_value(data[name].clone()).unwrap(),
-            10,
+            diff,
+            receive,
             market,
+            &"0.01".parse().unwrap(),
+            &"0.001".parse().unwrap(),
         )
         .unwrap()
+    }
+
+    fn update(book: &mut Book, data: &serde_json::Value, name: &str, market: Market) -> Depth {
+        apply_update(
+            book,
+            serde_json::from_value(data[name].clone()).unwrap(),
+            market,
+            10,
+        )
     }
 
     fn snapshot(book: &mut Book, data: &serde_json::Value, name: &str, market: Market) -> Depth {
@@ -332,7 +358,7 @@ mod tests {
         missing_pu.as_object_mut().unwrap().remove("pu");
         let missing_pu = serde_json::from_value(missing_pu).unwrap();
         assert!(matches!(
-            book.update(missing_pu, 21, market).unwrap(),
+            apply_update(&mut book, missing_pu, market, 21),
             Depth::Gap
         ));
     }

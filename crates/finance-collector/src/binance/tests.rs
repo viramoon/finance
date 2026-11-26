@@ -468,3 +468,94 @@ async fn missing_next_funding_time_publishes_rate_and_keeps_perpetual_feed_runni
         );
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn continuous_depth_with_invalid_tick_or_lot_resets_and_restores_book() {
+    let cfg = config(true, false);
+    let depth: Value =
+        serde_json::from_str(include_str!("../../fixtures/binance/depth.json")).unwrap();
+    let off_tick_price = "10.015";
+    let off_lot_quantity = "1.0005";
+    for (field, invalid, initialized) in [
+        (0, off_tick_price, true),
+        (1, off_lot_quantity, true),
+        (0, off_tick_price, false),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_shutdown, stop) = watch::channel(false);
+        let mut observer = Capture::default();
+        let mut next = depth["spot_next"].clone();
+        next["b"][0][field] = json!(invalid);
+        let mut first = vec![
+            metadata("spot"),
+            frame("stream", "spot", depth["spot_bridge"].clone()),
+        ];
+        let snapshot = frame("snapshot", "spot", depth["spot_snapshot"].clone());
+        let invalid_delta = frame("stream", "spot", next);
+        first.extend(if initialized {
+            [snapshot, invalid_delta]
+        } else {
+            [invalid_delta, snapshot]
+        });
+        let mut sessions = VecDeque::from([
+            Replay::from(first),
+            Replay::from(vec![
+                metadata("spot"),
+                frame("stream", "spot", depth["spot_gap"].clone()),
+                frame("snapshot", "spot", depth["spot_recovery"].clone()),
+                failure(451, None),
+            ]),
+        ]);
+        let end = run_with(&cfg, tmp.path(), stop, &mut observer, |_| {
+            Ok(sessions.pop_front().unwrap())
+        })
+        .await
+        .unwrap();
+        assert_eq!(end, Status::RegionRestricted { http_status: 451 });
+        assert!(sessions.is_empty());
+
+        let captured = events(tmp.path(), SPOT_PRODUCT);
+        let btc: Vec<_> = captured
+            .iter()
+            .filter(|event| {
+                event.instrument_id.as_str() == "BTC-USDT.BINANCE"
+                    && event.channel.as_str() == "depth"
+            })
+            .collect();
+        assert_eq!(captured, observer.events);
+        assert!(btc.iter().all(|event| {
+            event
+                .native_id
+                .as_ref()
+                .is_none_or(|id| id.as_str() != "9007199254741003")
+        }));
+        let gap_index = usize::from(initialized) * 2 + 1;
+        let [gap, reset, snapshot, update, ..] = &btc[gap_index..] else {
+            panic!("incomplete recovery: {btc:?}");
+        };
+        assert!(matches!(&gap.message, Message::Gap(details)
+            if details.reason.as_str() == "binance_depth_invalid_increment"));
+        assert!(matches!(&reset.message, Message::Reset(details)
+            if details.reason.as_str() == "binance_depth_invalid_increment"));
+        assert_eq!(reset.epoch.get(), gap.epoch.get() + 1);
+        assert!(matches!(snapshot.message, Message::Snapshot(_)));
+        assert_eq!(
+            snapshot.native_id.as_ref().unwrap().as_str(),
+            "9007199254741005"
+        );
+        assert!(matches!(update.message, Message::Delta(_)));
+        for pair in btc.windows(2) {
+            pair[1].validate_successor(pair[0]).unwrap();
+        }
+        let quality = read_quality(
+            tmp.path(),
+            &SOURCE.parse().unwrap(),
+            &SPOT_PRODUCT.parse().unwrap(),
+        )
+        .unwrap();
+        assert!(quality.iter().any(|report| {
+            report.cause == GapCause::SourceGap
+                && report.outcome == Some(RecoveryOutcome::BookRestoredFromSnapshot)
+        }));
+    }
+}
