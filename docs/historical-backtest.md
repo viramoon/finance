@@ -49,3 +49,7 @@ export FERTILE_RESEARCH_ROOT=/path/to/isolated/research
 - 相对实际最后一个绩效日分别回看 50、10、5 个日历年，并独立报告 `longest_sample`。每行包含请求起点、实际首尾、跨度、观测数、应有和缺失交易日及缺失比例。初始边界最多缺五个交易日，内部及末端须完整且至少两条观测才标记 `full`。请求起点早于 epoch 时保留原始日期，从 `calendar_start=1970-01-01` 统计交易日并将整窗标记不足。覆盖不足时 `metrics` 为 `null`。详见 [日线窗口](../python/README.md#日线窗口)。
 
 从独立数据根和研究根通过 HTTP 验收四窗口，见 [隔离验收官方历史作业](../RUNBOOK.md#隔离验收官方历史作业)。接口、鉴权与超时确认见 [API](api.md) 和 [作业手册](backtest-jobs.md)。
+
+## 公开因子研究
+
+[时序因子动量](../strategies/2026-11-25-factor-momentum/README.md) 使用 Ken French 月收益和抵押现金进行离线研究。其日频档案只用于核验来源覆盖与标记信号、执行的收盘时点。1970 年以前的月收益单列为非系统补充。
