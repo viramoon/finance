@@ -8,6 +8,7 @@ from contextlib import contextmanager
 import csv
 from datetime import date
 from decimal import Decimal
+import doctest
 import fcntl
 from functools import partial
 import hashlib
@@ -313,6 +314,26 @@ class TradeArchiveTest(unittest.TestCase):
                     TradeImportReport((), (str(OLD_DAY), str(NEW_DAY)), (), 0),
                 )
                 self.assertEqual(empty.calls, [])
+
+    def test_documented_archive_readback_uses_local_parquet_without_f3_wal(self):
+        http = HTTPReplay(archive_fixture("BTC", OLD_DAY))
+        self.assertEqual(self.run_import(http).trades_written, 2)
+        guide = Path(__file__).resolve().parents[1] / "docs/historical-pull.md"
+        _, marker, fenced = guide.read_text(encoding="utf-8").partition("```pycon\n")
+        self.assertTrue(marker, "archive guide must include a runnable PyArrow example")
+        session = doctest.DocTestParser().get_doctest(
+            fenced.split("```", 1)[0], {"archive_path": self.partition("BTC", OLD_DAY)},
+            "archive_readback", str(guide), 0,
+        )
+        result = doctest.DocTestRunner(verbose=False).run(session, clear_globs=False)
+        self.assertGreater(result.attempted, 0)
+        self.assertEqual(result.failed, 0)
+        self.assertEqual(session.globs["instrument_id"], "BTCUSDT.BINANCE")
+        rows = session.globs["trades"].to_pylist()
+        self.assertEqual([row["trade_id"] for row in rows], [str(2**53 + 1), str(2**53 + 2)])
+        self.assertEqual(rows[0]["ts_ns"], rows[1]["ts_ns"])
+        for path in ("catalog/market-events", "finance-state/market-wal", "finance-state/market-projection"):
+            self.assertFalse((self.root / path).exists(), path)
 
     def test_archive_fills_missing_middle_on_resume_without_refetching_neighbors(self):
         http = HTTPReplay([*archive_fixture("BTC", OLD_DAY), (404, b""), *archive_fixture("BTC", NEXT_DAY)])

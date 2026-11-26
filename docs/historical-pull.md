@@ -46,7 +46,22 @@ export FERTILE_DATA_ROOT=/path/to/authorized/history-data
 - 同一参数重跑时先处理上次遗留的缺口，再从扫描游标推进。网络失败和写入失败会保留已提交进度。扫描游标在 Parquet 发布后更新，重启会先按实际 Parquet 行查缺。需要核对恢复后的文件、切换查询范围或从起点复核时可加 `--rescan`。既有行保持不变，补入缺口时按原文件区间原子发布，最大水位不回退。
 - 逐笔使用 `$FERTILE_DATA_ROOT/catalog/historical/binance-spot-trades/<instrument>/<UTC-date>.parquet`。每个已校验的日文件是一个恢复单位。原生 `trade_id` 和价格、数量、quote quantity 为字符串，`ts_ns` 为 UTC 纳秒，保留 maker 标记并附来源 URL 和 SHA-256 元数据。2025-01-01 起 Spot 文件时间戳按微秒处理，更早的文件按毫秒处理。导入时验证日内原生 ID 严格递增，重跑跳过已提交的 UTC 日期。同一时间戳可以有多笔成交。日归档 404 会列入 `missing_days`，下次运行继续尝试。损坏归档不会发布。
 
-命令在 stdout 输出 JSON。退出 `0` 对应已完成当前闭合窗口、尚无已闭合窗口或 Binance 已禁用。退出 `2` 表示报告中仍有缺口，命令行参数错误也使用 `2` 并在 stderr 给出用法。退出 `1` 表示运行失败。读取 bar 用现有 `ParquetDataCatalog` 接口，日归档由 PyArrow 读取。批任务对账时核对扫描进度、实际水位、缺口与退出状态。
+命令在 stdout 输出 JSON。退出 `0` 对应已完成当前闭合窗口、尚无已闭合窗口或 Binance 已禁用。退出 `2` 表示报告中仍有缺口，命令行参数错误也使用 `2` 并在 stderr 给出用法。退出 `1` 表示运行失败。读取 bar 用现有 `ParquetDataCatalog` 接口。批任务对账时核对扫描进度、实际水位、缺口与退出状态。
+
+## 读取 Binance 逐笔日归档
+
+日归档是 F11 独立发布的本地 Parquet。用 PyArrow 读取，以文件元数据的 `instrument_id` 和行中的原生 `trade_id` 标识成交。与 [F3 WAL](market-wal.md) 的接入留给后续项。
+
+将 `archive_path` 设为已导入的某个日文件的绝对路径。下例读取首批成交。
+
+```pycon
+>>> import pyarrow.parquet as pq
+>>> with pq.ParquetFile(archive_path) as archive:
+...     instrument_id = archive.schema_arrow.metadata[b"instrument_id"].decode("ascii")
+...     trades = next(archive.iter_batches(batch_size=1024, columns=["trade_id", "ts_ns", "price", "quantity"]))
+>>> trades.num_rows > 0
+True
+```
 
 ## 预计耗时与连接约束
 
@@ -67,4 +82,4 @@ IBKR 历史任务使用 [paper 连接保护](integrations/ib.md) 及 probe clien
 
 批任务核对 Rust 响应中的转换口径，并将其写入历史 catalog 的 `.finance-collector/source.json` 和状态目录的 `catalog.json`，字段为 `source_metadata.decimal_policy`。若曾用旧实现发布 IBKR 分钟线，请换一个配置数据根拉取。旧 catalog 可以独立读取，批任务会拒绝混写未标注或精度策略不同的 catalog。
 
-批任务没有服务端口、定时器和数据库迁移。F3 可从已封存日归档按标的和原生 ID 重放。当前只写 Parquet 和本地进度，线上流协议仍见 [行情协议](market-protocol.md)。
+批任务没有服务端口、定时器和数据库迁移。线上流协议见 [行情协议](market-protocol.md)。
