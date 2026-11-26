@@ -1,0 +1,113 @@
+[package]
+edition = "2021"
+name = "ibapi"
+version = "3.2.0"
+authors = ["Wil Boayue <wil@wsbsolutions.com>"]
+build = false
+exclude = ["justfile"]
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "A Rust implementation of the Interactive Brokers TWS API, providing a reliable and user friendly interface for TWS and IB Gateway. Designed with a focus on simplicity and performance."
+homepage = "https://github.com/wboayue/rust-ibapi/"
+documentation = "https://docs.rs/ibapi/latest/ibapi/"
+keywords = [
+    "algo-trading",
+    "interactive-brokers",
+    "tws",
+]
+categories = [
+    "finance",
+    "api-bindings",
+]
+license = "MIT"
+repository = "https://github.com/wboayue/rust-ibapi/"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+async = [
+    "dep:tokio",
+    "dep:tokio-stream",
+    "dep:futures",
+    "dep:async-trait",
+]
+default = ["async"]
+sync = ["dep:crossbeam"]
+utoipa = ["dep:utoipa"]
+
+[lib]
+name = "ibapi"
+path = "src/lib.rs"
+test = false
+doctest = false
+
+[dependencies.async-trait]
+version = "0.1.83"
+optional = true
+
+[dependencies.byteorder]
+version = "1.5.0"
+
+[dependencies.crossbeam]
+version = "0.8.4"
+optional = true
+
+[dependencies.futures]
+version = "0.3.31"
+optional = true
+
+[dependencies.log]
+version = "0.4.22"
+
+[dependencies.prost]
+version = "0.14"
+
+[dependencies.serde]
+version = "1.0.214"
+features = ["derive"]
+
+[dependencies.serde_json]
+version = "1.0"
+
+[dependencies.thiserror]
+version = "2.0"
+
+[dependencies.time]
+version = "0.3.36"
+features = [
+    "formatting",
+    "macros",
+    "local-offset",
+    "parsing",
+    "serde",
+]
+
+[dependencies.time-tz]
+version = "2.0.0"
+
+[dependencies.tokio]
+version = "1.41"
+features = [
+    "net",
+    "rt-multi-thread",
+    "sync",
+    "time",
+    "macros",
+    "io-util",
+]
+optional = true
+
+[dependencies.tokio-stream]
+version = "0.1"
+features = ["sync"]
+optional = true
+default-features = false
+
+[dependencies.utoipa]
+version = "5"
+features = ["time"]
+optional = true
