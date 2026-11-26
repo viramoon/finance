@@ -707,27 +707,30 @@ mod tests {
     #[test]
     fn decimal_constraints_preserve_exact_scale_and_canonical_zero() {
         let pattern = TextFormat::Decimal.pattern();
-        for value in [
-            "0",
-            "-0.00",
-            "9999999999.999999999999999999",
-            "-0.000000000000000001",
+        for (case, value) in [
+            ("integer zero", "0"),
+            ("signed zero", "-0.00"),
+            ("maximum precision", "9999999999.999999999999999999"),
+            ("minimum negative magnitude", "-0.000000000000000001"),
         ] {
-            assert!(pattern.regex.is_match(value), "{value}");
+            assert!(pattern.regex.is_match(value), "{case}: {value}");
             let json = &mut json!(value);
             DECIMAL_STRING.normalize(json);
-            assert!(pattern.regex.is_match(json.as_str().unwrap()), "{json}");
+            assert!(
+                pattern.regex.is_match(json.as_str().unwrap()),
+                "{case}: {json}"
+            );
         }
-        for value in [
-            "00.15",
-            "2.",
-            ".1",
-            "1e-3",
-            "+1",
-            "0.0\n",
-            "0.0000000000000000001",
+        for (case, value) in [
+            ("leading zeros", "00.15"),
+            ("missing fractional digits", "2."),
+            ("missing integer digits", ".1"),
+            ("exponent notation", "1e-3"),
+            ("explicit positive sign", "+1"),
+            ("trailing newline", "0.0\n"),
+            ("fraction beyond allowed scale", "0.0000000000000000001"),
         ] {
-            assert!(!pattern.regex.is_match(value), "{value}");
+            assert!(!pattern.regex.is_match(value), "{case}: {value}");
         }
         let mut value = json!("-0.000");
         DECIMAL_STRING.normalize(&mut value);

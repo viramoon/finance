@@ -40,7 +40,7 @@ curl 'http://127.0.0.1:8081/api/v1/backtests?limit=20'
 | `first_session`、`last_session` | 数据声明覆盖的首尾交易日，使用 `YYYY-MM-DD`。运行区间所含实际会话须落在覆盖内。 |
 | `instruments` | 声明 USD XNYS 现金权益标的，使用 `AAA.XNYS` 形式，最小价格单位一分，整股成交。 |
 | `membership` | 按生效交易日提供 `{date, first_available_ts, members}`。成分在该会话开盘前或开盘时可用，沿用至下一份点时成分。 |
-| `bars` | 每个标的和交易日最多一条 `{instrument_id, date, first_available_ts, open, high, low, close, volume}`。OHLC 用正的精确美元字符串，成交量用非负整股字符串。 |
+| `bars` | 每个标的和交易日最多一条，含 `instrument_id`、`date` 和 `first_available_ts`。`open`、`high`、`low`、`close` 用正的精确美元字符串，`volume` 用非负整股字符串。 |
 
 `first_available_ts` 使用 UTC Unix 纳秒数字字符串。按 XNYS 日历检查会话早收盘、假日与夏令时。只使用在对应交易日收盘时已经可用的闭合 bar，晚到记录计入数据血缘和缺口。预热使用请求区间之前的闭合会话。历史会话不足时作业以 `insufficient_history` 结束，指标历史遇到成分中断或缺 bar 时从连续数据重新建立。运行器先逐标的求值因子的 `depends_on`。上游任一依赖缺值时，下游因子也缺值，依赖该值的新增风险被阻止，结果记录 `missing_factor`。缺失执行价时记录延期，保留减仓意图，并在下一次合格决策时重新评估加仓。持有期在首次确认成交后开始。
 

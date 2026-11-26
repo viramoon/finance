@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "fixtures": {
+    "config/collector/replay.csv": {
+      "sha256": "a0718fa5da7f58dcafa4fdeb3105026709145acca23b64170bfac3c34a90d434",
+      "generator": "scripts/generate_synthetic_fixtures.py",
+      "seed": "fixed",
+      "source": "手工设计的三根闭合 bar，覆盖十进制精度和循环回放。"
+    },
+    "crates/finance-market-protocol/fixtures/examples.input.json": {
+      "sha256": "b5abfc5b2ce37543e46c5a093b608aebb4873ac4714a6e616276dae37a2558a5",
+      "generator": "crates/finance-market-protocol/src/bin/export-market-protocol.rs",
+      "seed": "fixed",
+      "source": "手工构造的固定输入，作为 export-market-protocol 合成样本的种子，并由导出器校验。"
+    },
+    "protocol/v1/examples.json": {
+      "sha256": "b82a278885d251be3b4e98683dbf63712d343bc5f00725675b735da3ddc64467",
+      "generator": "crates/finance-market-protocol/src/bin/export-market-protocol.rs",
+      "seed": "fixed",
+      "source": "以 crates/finance-market-protocol/fixtures/examples.input.json 为固定输入，由 export-market-protocol 校验并导出。"
+    },
+    "tests/fixtures/factor_returns.csv": {
+      "sha256": "46f724d546bcac2421c83587fba281f2c33a2996fa0876a7c1f375c23541210b",
+      "generator": "scripts/generate_synthetic_fixtures.py",
+      "seed": "fixed",
+      "source": "固定的九组因子收益，用于离线相关性和收益分析。"
+    },
+    "tests/fixtures/historical/fred_dgs10_daily.csv": {
+      "sha256": "9963741ca7a81ad05bdaa50c674785d21a3d64de27f46289e6277fb67b47107b",
+      "generator": "scripts/generate_synthetic_fixtures.py",
+      "seed": "fixed",
+      "source": "按 Graph CSV 格式手工设计，覆盖预 epoch 日期和缺值。"
+    },
+    "tests/fixtures/historical/fred_dgs10_observations.json": {
+      "sha256": "08056d1ca991a7515daa4a0d1fa01f3259a12b8ebcbe637a24d527f50addb60d",
+      "generator": "scripts/generate_synthetic_fixtures.py",
+      "seed": "fixed",
+      "source": "按 observations 响应格式手工设计，覆盖缺值和长小数。"
+    },
+    "tests/fixtures/historical/french_daily.csv": {
+      "sha256": "d64551cde851c946d947cf6be71ee34ddb8d1cc1822b7b98f82f78556c5f4f47",
+      "generator": "scripts/generate_synthetic_fixtures.py",
+      "seed": "fixed",
+      "source": "按供应商文件结构手工设计，覆盖预 epoch 数据和缺失值。"
+    },
+    "tests/fixtures/historical/french_momentum_daily.csv": {
+      "sha256": "ceafd3691ecf2d97bbc47674f7bb1fa2ce315f4d85e9ae21b74b2f2bdbb7b184",
+      "generator": "scripts/generate_synthetic_fixtures.py",
+      "seed": "fixed",
+      "source": "按供应商文件结构手工设计，覆盖缺失值和不共享日期。"
+    },
+    "tests/fixtures/historical/yahoo_gspc.json": {
+      "sha256": "0c34beaad67adf8ac92fe04cfe1b0a366465ffc09b88712b09884d1b4107b31a",
+      "generator": "scripts/generate_synthetic_fixtures.py",
+      "seed": "fixed",
+      "source": "按 Yahoo chart 响应结构手工设计，覆盖预 epoch 日期、空值和零值。"
+    },
+    "tests/fixtures/historical/yahoo_ibm.json": {
+      "sha256": "803f8bf93adcb0c227c4b268d57faf2c6997ee39a770e85543f176079aeb4544",
+      "generator": "scripts/generate_synthetic_fixtures.py",
+      "seed": "fixed",
+      "source": "按 Yahoo chart 响应结构手工设计，覆盖高精度日线、拆股和分红。"
+    }
+  }
+}

@@ -9,9 +9,9 @@ from fertile_finance.research_catalog import ResearchError, nyse
 from fertile_finance.strategy_replay import REPLAY_SCHEMA, load_strategy_replay
 
 
-FIRST = date(2024, 1, 2)
-LAST = date(2024, 1, 4)
-END = date(2024, 1, 5)
+FIRST = date.fromisoformat("2024-01-02")
+LAST = date.fromisoformat("2024-01-04")
+END = date.fromisoformat("2024-01-05")
 INSTRUMENT = "SYNTH.XNYS"
 BARS = "example.reviewed-us-daily@1.0.0"
 UNIVERSE = "example.us-cash-equities@1.0.0"

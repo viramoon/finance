@@ -23,9 +23,9 @@ const LEGACY_REQUEST_BYTES: usize = 8192;
 const STRATEGY_REQUEST_BYTES: usize = 6 * crate::strategy_bundle::MAX_BYTES + 4096;
 const SAMPLE_FIRST: i64 = 1704150060;
 const SAMPLE_LAST: i64 = SAMPLE_FIRST + 8 * 60;
-const FIRST_RESEARCH_DAY: NaiveDate = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-const LAST_RESEARCH_DAY: NaiveDate = NaiveDate::from_ymd_opt(2100, 12, 31).unwrap();
+const FIRST_RESEARCH_DAY: NaiveDate = DateTime::<Utc>::UNIX_EPOCH.naive_utc().date();
 const LAST_BUNDLE_ENDPOINT: NaiveDate = NaiveDate::from_ymd_opt(2101, 1, 1).unwrap();
+const LAST_RESEARCH_DAY: NaiveDate = LAST_BUNDLE_ENDPOINT.pred_opt().unwrap();
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
