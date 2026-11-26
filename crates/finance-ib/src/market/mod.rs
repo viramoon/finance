@@ -7,7 +7,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use finance_market_protocol::DecimalText;
 use serde::Serialize;
 
-pub use ib::PaperMarket;
+pub use ib::{PaperMarket, option_market_date};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -165,6 +165,8 @@ pub enum MarketError {
     NotEntitled,
     #[error("market request timed out")]
     Timeout,
+    #[error("market request pacing limit reached")]
+    Pacing,
     #[error("market session disconnected")]
     Disconnected,
     #[error("market transport failed")]
@@ -183,6 +185,33 @@ pub trait MarketDataSource: Send + Sync {
 
     async fn confirm(&self, query: &ContractQuery) -> Result<ConfirmedContract, MarketError>;
     async fn subscribe(&self, request: &MarketRequest) -> Result<Self::Subscription, MarketError>;
+}
+
+/// One SMART option series. Strikes are discovery hints across the chain and
+/// may not exist at this expiry or for both rights.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OptionSeries {
+    pub expiry: NaiveDate,
+    pub trading_class: String,
+    pub multiplier: DecimalText,
+    pub strikes: Vec<DecimalText>,
+}
+
+#[async_trait]
+pub trait OptionChainSource: MarketDataSource {
+    /// Discover series for an equity already confirmed in this session.
+    async fn option_series(
+        &self,
+        equity: &ConfirmedContract,
+    ) -> Result<Vec<OptionSeries>, MarketError>;
+
+    /// Confirm the listed contracts of a single series. Each call can be paced
+    /// as one metadata request and does not open market data lines.
+    async fn confirm_series(
+        &self,
+        equity: &ConfirmedContract,
+        series: &OptionSeries,
+    ) -> Result<Vec<ConfirmedContract>, MarketError>;
 }
 
 #[async_trait]

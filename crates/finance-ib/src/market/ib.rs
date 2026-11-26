@@ -1,5 +1,8 @@
 //! The read-only boundary between IB's SDK and finance market requests.
 
+#[path = "chain.rs"]
+mod chain;
+
 use super::{
     ConfirmedContract, ContractKind, ContractQuery, GreeksSource, LiquidHours, MarketDataSource,
     MarketDataType, MarketError, MarketEvent, MarketNotice, MarketRequest, MarketSubscription,
@@ -137,10 +140,12 @@ fn transport_error(error: ibapi::Error) -> MarketError {
         {
             MarketError::Timeout
         }
-        ibapi::Error::Notice(notice) if notice_kind(notice.code) == MarketNotice::NotEntitled => {
-            MarketError::NotEntitled
-        }
         ibapi::Error::Notice(notice) if notice.code == 200 => MarketError::UnconfirmedContract,
+        ibapi::Error::Notice(notice) => match request_notice_kind(&notice) {
+            MarketNotice::NotEntitled => MarketError::NotEntitled,
+            MarketNotice::Pacing => MarketError::Pacing,
+            _ => MarketError::Transport,
+        },
         _ => MarketError::Transport,
     }
 }
@@ -154,6 +159,13 @@ fn notice_kind(code: i32) -> MarketNotice {
         100 | 101 | 420 => MarketNotice::Pacing,
         _ => MarketNotice::Other,
     }
+}
+
+fn request_notice_kind(notice: &ibapi::Notice) -> MarketNotice {
+    if notice.code == 162 && notice.message.to_ascii_lowercase().contains("pacing") {
+        return MarketNotice::Pacing;
+    }
+    notice_kind(notice.code)
 }
 
 #[async_trait]
@@ -267,9 +279,13 @@ fn confirm_details(
         ContractQuery::Equity { .. } => ContractKind::Equity,
         ContractQuery::Option { .. } => ContractKind::Option(option_details(&details, now)?),
     };
+    Ok(confirmed_contract(details, kind))
+}
+
+fn confirmed_contract(details: ContractDetails, kind: ContractKind) -> ConfirmedContract {
     let liquid_hours = liquid_hours(&details.liquid_hours, &details.time_zone_id);
     let contract = details.contract;
-    Ok(ConfirmedContract {
+    ConfirmedContract {
         con_id: contract.contract_id,
         symbol: contract.symbol.as_str().to_owned(),
         primary_exchange: if contract.primary_exchange.is_empty() {
@@ -279,7 +295,7 @@ fn confirm_details(
         },
         kind,
         liquid_hours,
-    })
+    }
 }
 
 fn sdk_market_contract(confirmed: &ConfirmedContract) -> Contract {
@@ -332,20 +348,24 @@ fn option_details(
 }
 
 fn check_expiry(expiry: NaiveDate, now: DateTime<Utc>) -> Result<(), MarketError> {
+    if expiry < option_market_date(now)? {
+        return Err(MarketError::ExpiredContract);
+    }
+    Ok(())
+}
+
+/// Eastern civil date used for U.S. equity option expiries.
+pub fn option_market_date(now: DateTime<Utc>) -> Result<NaiveDate, MarketError> {
     // U.S. option dates are Eastern civil dates, including in summer.
     let now = time::OffsetDateTime::from_unix_timestamp(now.timestamp())
         .map_err(|_| MarketError::InvalidRequest)?
         .to_timezone(timezones::db::america::NEW_YORK);
-    let today = NaiveDate::from_ymd_opt(
+    NaiveDate::from_ymd_opt(
         now.year(),
         u32::from(u8::from(now.month())),
         u32::from(now.day()),
     )
-    .ok_or(MarketError::InvalidRequest)?;
-    if expiry < today {
-        return Err(MarketError::ExpiredContract);
-    }
-    Ok(())
+    .ok_or(MarketError::InvalidRequest)
 }
 
 fn liquid_hours(rows: &[String], zone: &str) -> Vec<LiquidHours> {
@@ -510,7 +530,7 @@ impl MarketSubscription for PaperSubscription {
                             if crate::invalidates_market_session(notice.code) {
                                 return Err(MarketError::Disconnected);
                             }
-                            return Ok(Some(MarketEvent::Notice(notice_kind(notice.code))));
+                            return Ok(Some(MarketEvent::Notice(request_notice_kind(&notice))));
                         }
                         Err(error) => return Err(transport_error(error)),
                     }
