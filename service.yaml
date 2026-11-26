@@ -17,7 +17,7 @@ paths:
 repository_data_policy:
   runtime_data_outside_worktree: true
   docs: docs/data-guard.md
-  rules: .data-guard/rules.json
+  rules: .data-guard/rules.json # 暂存读取 HEAD，推送读取远端跟踪默认分支，PR 读取基分支 SHA
   fixture_sources: .data-guard/sources.json
   published_history: .data-guard/published.json
 dependencies:
@@ -97,6 +97,10 @@ processes:
     working_directory: finance
     dependencies: [data_root, nautilus_source_wheel]
     queue: finance-state/backtests/jobs.sqlite3
+    strategy_bundle:
+      replay_inputs: finance-state/backtests/strategy-inputs
+      pinned_inputs: strategy_backtest_snapshots
+      mode: offline_backtest
     health: 监测 worker 进程和最近作业的终态
     restart_policy: fertile deploy/
   - name: api
@@ -105,6 +109,14 @@ processes:
     bind_host: 127.0.0.1
     port: 8081 # FINANCE_API_PORT / config.api.port 可覆盖
     dependencies: [data_root]
+    read_contract:
+      version: v1
+      documentation: docs/api.md
+      market_state: [finance-state/market-wal, finance-state/market-projection]
+      factor_snapshot: finance-state/factor-research/read-v1.json
+      cache_control: private, no-store
+      openapi_export: cargo run --locked -q -p finance-api -- export-openapi
+      stream_schema_export: cargo run --locked -q -p finance-api -- export-read-stream DIRECTORY
     health:
       live_path: /healthz/live
       ready_path: /healthz/ready
@@ -112,6 +124,14 @@ processes:
       ready: 数据根目录可读；不代表交易 ready
     restart_policy: 由 fertile deploy/ 的守护配置决定
 batch_jobs:
+  - name: ib-market-entitlements
+    command: bash scripts/check-ib-entitlements.sh
+    working_directory: finance
+    dependencies: [ib_gateway]
+    account: paper
+    opt_in_env: IB_LIVE_TEST
+    client_id_from: ib.probe_client_id
+    output: 脱敏 JSON 到标准输出
   - name: backtest-sample
     command: bash scripts/backtest-sample.sh
     output: "${FERTILE_DATA_ROOT}/finance-state/backtests/sample/latest.json"
@@ -132,4 +152,9 @@ offline_research:
   historical_registration: strategies/registry/factor-momentum-v1.json
   invocation: local_python_library
   documentation: docs/factor-research.md
+option_exposure:
+  invocation: in_process_rust_library
+  input: option_chain_snapshot
+  persistence: disabled
+  documentation: docs/option-exposure.md
 runbook: RUNBOOK.md

@@ -133,20 +133,14 @@ class DataGap:
 
 
 @dataclass
-class _PortfolioInputs:
+class _CashEquityInputs:
     assets: dict[str, Equity]
     bars: dict[date, dict[str, Bar]]
     opens: dict[date, int]
     closes: dict[date, int]
     members: dict[date, frozenset[str]]
     _entered: dict[date, dict[str, date]]
-    _target_dates: list[date]
-    _weights: dict[date, dict[str, Decimal]]
-    _factors: dict[str, dict[date, Decimal]]
-    _factor_dates: dict[str, list[date]]
     _price_dates: dict[str, list[date]]
-    _top_n: int | None
-    _target_fn: TargetFunction | None
     fixture_zero_volume: bool
 
     def _prior_date(self, day, instrument_id, dates):
@@ -168,6 +162,16 @@ class _PortfolioInputs:
             if previous is not None:
                 return self.bars[previous][instrument_id], previous
         return None, None
+
+
+@dataclass
+class _PortfolioInputs(_CashEquityInputs):
+    _target_dates: list[date]
+    _weights: dict[date, dict[str, Decimal]]
+    _factors: dict[str, dict[date, Decimal]]
+    _factor_dates: dict[str, list[date]]
+    _top_n: int | None
+    _target_fn: TargetFunction | None
 
     def resolve_targets(self, day, *, fill_missing=False, equity=None):
         """Select weights from eligible members and return the observed input gaps."""
@@ -364,6 +368,27 @@ def _prepare_factors(rows, instruments, schedule):
     return factors
 
 
+def prepare_cash_equity_inputs(assets, *, start, end, universe, min_assets, fixture_zero_volume=False):
+    _valid_date(start)
+    _valid_date(end)
+    if start > end:
+        raise ResearchError("invalid_date", "Portfolio start must be on or before end")
+    schedule = nyse().schedule
+    days = schedule.loc[start.isoformat():end.isoformat()]
+    opens = {label.date(): unix_nanos(value.value) for label, value in days["open"].items()}
+    closes = {label.date(): unix_nanos(value.value) for label, value in days["close"].items()}
+    if len(opens) < 2:
+        raise ResearchError("no_data", "Require at least two XNYS sessions")
+    instruments, bars = _prepare_assets(assets, schedule, closes, min_assets=min_assets)
+    members, entered = _prepare_universe(universe, instruments, schedule, opens)
+    price_dates = {key: [] for key in instruments}
+    for day, by_instrument in bars.items():
+        for key, bar in by_instrument.items():
+            if bar.volume.raw > 0 or fixture_zero_volume:
+                price_dates[key].append(day)
+    return _CashEquityInputs(instruments, bars, opens, closes, members, entered, price_dates, fixture_zero_volume)
+
+
 def prepare_portfolio(
     assets, *, start, end, universe, target_weights=None, factors=None, top_n=None, target_fn=None, min_assets=2,
     fixture_zero_volume=False,
@@ -379,22 +404,14 @@ def prepare_portfolio(
         raise ResearchError("invalid_parameters", "Factor ranking requires a positive integer top_n")
     if factors is None and top_n is not None:
         raise ResearchError("invalid_parameters", "top_n applies to factor ranking")
-
+    inputs = prepare_cash_equity_inputs(
+        assets, start=start, end=end, universe=universe, min_assets=min_assets, fixture_zero_volume=fixture_zero_volume,
+    )
     schedule = nyse().schedule
-    days = schedule.loc[start.isoformat():end.isoformat()]
-    opens = {label.date(): unix_nanos(value.value) for label, value in days["open"].items()}
-    closes = {label.date(): unix_nanos(value.value) for label, value in days["close"].items()}
-    if len(opens) < 2:
-        raise ResearchError("no_data", "Require at least two XNYS sessions")
-    instruments, bars = _prepare_assets(assets, schedule, closes, min_assets=min_assets)
-    members, entered = _prepare_universe(universe, instruments, schedule, opens)
-    weights = _prepare_weights(target_weights, instruments, schedule) if target_weights is not None else {}
-    scores = _prepare_factors(factors, instruments, schedule) if factors is not None else {}
-    factor_dates = {key: sorted(values) for key, values in scores.items()}
-    price_dates = {key: [] for key in instruments}
-    for day, by_instrument in bars.items():
-        for key, bar in by_instrument.items():
-            if bar.volume.raw > 0 or fixture_zero_volume:
-                price_dates[key].append(day)
-    return _PortfolioInputs(instruments, bars, opens, closes, members, entered,
-                            sorted(weights), weights, scores, factor_dates, price_dates, top_n, target_fn, fixture_zero_volume)
+    weights = _prepare_weights(target_weights, inputs.assets, schedule) if target_weights is not None else {}
+    scores = _prepare_factors(factors, inputs.assets, schedule) if factors is not None else {}
+    return _PortfolioInputs(
+        inputs.assets, inputs.bars, inputs.opens, inputs.closes, inputs.members, inputs._entered, inputs._price_dates,
+        inputs.fixture_zero_volume, sorted(weights), weights, scores,
+        {key: sorted(values) for key, values in scores.items()}, top_n, target_fn,
+    )

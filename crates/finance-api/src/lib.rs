@@ -1,9 +1,20 @@
+mod bundle_jobs;
 pub mod config;
+mod factor_read;
 pub mod jobs;
 pub mod market;
+mod market_read;
+pub mod read_stream;
 pub mod research;
 pub mod strategy_bundle;
-use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
+use axum::{
+    Json, Router,
+    extract::{Request, State},
+    http::{HeaderValue, StatusCode, header::CACHE_CONTROL},
+    middleware::{self, Next},
+    response::Response,
+    routing::get,
+};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -32,6 +43,14 @@ pub struct BacktestSummary {
     pub generated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub research: Option<research::ResearchReport>,
+    /// Immutable inputs, versions, cutoff, and economics for a StrategyBundle run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub run_manifest: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Exact positions, cash, fills, and per-recipe attribution for a StrategyBundle run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub strategy_report: Option<serde_json::Map<String, serde_json::Value>>,
 }
 impl BacktestSummary {
     fn valid(&self) -> bool {
@@ -57,6 +76,11 @@ pub struct ErrorBody {
 pub struct ErrorDetail {
     pub code: String,
     pub message: String,
+    /// JSON Pointer-shaped path from a StrategyBundle compiler diagnostic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<strategy_bundle::Location>,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct Check {
@@ -76,6 +100,8 @@ fn error(status: StatusCode, code: &str, message: &str) -> ApiError {
             error: ErrorDetail {
                 code: code.into(),
                 message: message.into(),
+                path: None,
+                location: None,
             },
         }),
     )
@@ -145,7 +171,19 @@ async fn sample(State(state): State<AppState>) -> Result<Json<BacktestSummary>, 
     }
     Ok(Json(summary))
 }
+
+async fn private_read(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+    response
+}
+
 pub fn router(state: AppState) -> Router {
+    let restricted_reads = market_read::routes()
+        .merge(factor_read::routes())
+        .layer(middleware::from_fn(private_read));
     Router::new()
         .route("/healthz/live", get(live))
         .route("/healthz/ready", get(ready))
@@ -153,6 +191,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/market/status", get(market::status))
         .route("/api/v1/backtests/datasets", get(research::datasets))
         .merge(jobs::routes())
+        .merge(restricted_reads)
         .with_state(state)
 }
 #[derive(OpenApi)]
@@ -166,7 +205,15 @@ pub fn router(state: AppState) -> Router {
         jobs::detail,
         jobs::list,
         jobs::by_key,
-        research::datasets
+        bundle_jobs::register,
+        research::datasets,
+        market_read::products,
+        market_read::wal,
+        market_read::watermarks,
+        market_read::projected,
+        market_read::gaps,
+        factor_read::list,
+        factor_read::evaluations
     ),
     components(schemas(
         BacktestSummary,
@@ -177,6 +224,13 @@ pub fn router(state: AppState) -> Router {
         market::MarketStatus,
         market::InstrumentStatus,
         jobs::JobRequest,
+        jobs::SubmitRequest,
+        jobs::JobRequestView,
+        bundle_jobs::BundleSubmission,
+        bundle_jobs::BundleRequestView,
+        bundle_jobs::StrategyDocument,
+        bundle_jobs::RegisteredStrategy,
+        strategy_bundle::Location,
         jobs::JobStatus,
         jobs::Job,
         jobs::Page,

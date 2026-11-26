@@ -6,6 +6,8 @@
 
 把行情根目录、研究目录、数据库、截图、日志、崩溃转储和备份放在 Git 工作树之外。IBKR paper 与回放各用独立数据根。开发克隆运行 `sh scripts/install-data-guard-hooks.sh` 安装暂存区和推送检查。处理阻断时先用 `python3 -B scripts/data_guard.py --show-paths range origin/main HEAD` 定位 PR 范围内的问题。清理尚未发布的违规历史。防护启用前已发布的提交可经单独评审登记历史豁免，再追加提交移除仍留在目标树中的违规文件或补齐合成 fixture 来源。合成样本复现和登记流程见 [数据入仓防护](docs/data-guard.md)。
 
+`range` 的第一个参数同时确定差异基准和硬规则版本。复现 CI 时，使用 PR 事件中的基分支 SHA 与合并提交 SHA。推送遇到 `missing-trusted-ref` 时，先获取目标远端的默认分支，更新本地跟踪引用，再重试。
+
 ## 部署、启停与回滚
 
 按 fertile tag 获取 finance 指针与配置；确认 cloudbox / stable profile 和运行模式独立，当前只使用 IBKR paper；检查配置化持久目录、备份、Gateway 与权限。先启动依赖和采集，恢复交易状态并对账，再满足 ready 后启用策略，最后开放查询 API。TBD：具体命令和对账核对表。
@@ -46,6 +48,25 @@ FERTILE_PROFILE=cloudbox cargo run --locked -p finance-api
 
 API 接受 SIGTERM 和 Ctrl-C 优雅停止；部署守护、日志收集和滚动重启以 fertile deploy/ 为准，本 PR 不部署。默认 loopback / 8081，无账户配置和 Gateway 依赖；不能把当前 ready 当成交易 ready。
 
+## 首批读契约验收
+
+用隔离数据根或直接运行进程内 HTTP 测试。出现 `market_product_not_found` 时核对 source/product 与 F3 的落盘策略。投影位置未知时查看 `local_durable` 和 `projected` 水位，必要时在同一隔离根运行一次投影。因子列表为空时核对离线快照是否已经发布。新查询读取已有 WAL 和投影，因子使用单独的可选快照文件。[查询与错误码](docs/api.md#首批读契约)
+
+```sh
+cargo test --locked --offline -p finance-api --test read_contract --test market_read --test factor_read --test read_stream
+cargo build --locked --offline -p finance-collector --bin finance-market-wal
+FINANCE_F3_TEST_PYTHON="$FINANCE_PYTHON" FINANCE_F3_TEST_WAL_BIN="$WAL_BIN" \
+  cargo test --locked --offline -p finance-api --test market_read \
+  python_projector_index_is_readable_over_http -- --include-ignored
+FINANCE_F8_TEST_PYTHON="$FINANCE_PYTHON" \
+  cargo test --locked --offline -p finance-api --test factor_read \
+  python_factor_publication_is_read_by_rust_contract -- --include-ignored
+cargo run --locked --offline -q -p finance-api -- export-openapi > /tmp/finance.openapi.json
+cargo run --locked --offline -q -p finance-api -- export-read-stream /tmp/finance-read-stream
+```
+
+`FINANCE_PYTHON` 指向已构建 Nautilus 的 Python，`WAL_BIN` 指向刚构建的 `finance-market-wal`。联测在临时数据根用合成样本验证 Python 投影、因子发布和 Rust API 读取。生成器无需启动 API 或连接数据源。取用同一 finance 提交生成的 OpenAPI、WS/SSE schema 和合成样本供下游核对。[导出与下游更新顺序](docs/api.md#openapi-与契约)
+
 ## 离线因子研究验收
 
 在仓库根目录用含研究依赖的现有 Python 环境执行。定向测试在内存生成截面和收盘价，月频登记读取仓库内原报告并核对证据哈希。
@@ -56,6 +77,16 @@ PYTHONPATH=python /path/to/research/venv/bin/python -m unittest discover -s test
 ```
 
 报告复算时固定因子版、数据版、交易会话、各段区间、分位数和成本档。用逐期参考权重及目标权重复算换手、费用及费前费后收益，再核对复利汇总。遇到未来披露诊断时核对数据源的真实发布时间和该版修订的可见区间。停止新回测选择时将相应因子版本退回 `observe_only`，记录理由并保留原报告引用。入参、状态和历史证据见 [因子研究接口](docs/factor-research.md)。
+
+## 离线期权敞口验收
+
+用锁定的 Rust 工具链在仓库根目录运行合成期权链测试。
+
+```sh
+cargo test --locked --offline -p finance-collector --test option_exposure
+```
+
+先按测试中的现货价、合约乘数、OI 和 gamma 手算单合约金额，再核对各执行价与到期日汇总以及 0DTE 分组。诊断局部估算时，查看候选范围、缺失原因、OI 业务日期和输入观察时间。flip 结果随估值价格网格和模型输入解释。该计算通过 Rust 库调用，测试直接在内存中构造数据。输入及输出约定见 [期权敞口接口](docs/option-exposure.md)。
 
 ## 行情与作业
 
@@ -72,6 +103,10 @@ scripts/finance-backtest-worker
 ```
 
 Replay 可单独运行。paper 模式下 probe 用 client ID 91，collector 用 92，93 预留给 trader，凭据由盒子上的 Gateway 读取。连接、补数、权限与 pacing 故障定位见 [IB 接入](docs/integrations/ib.md)，水位、精度和杀进程恢复见 [catalog](catalog/README.md)，worker 的资源限制、队列恢复及幂等请求见 [作业说明](docs/backtest-jobs.md)。部署守护从 fertile 的 runbook 进入。
+
+### 私有验证美股 L1 与 OPRA
+
+经授权后，在美股常规交易时段使用已登录的本机 paper Gateway，确认 Gateway 的 API 设置为只读。选择一份已知活跃的 SMART USD 美股期权，使用该合约的 `conId`，按 [产品权限验收](docs/integrations/ib.md#美股-l1-和-opra-权限验收) 运行 `scripts/check-ib-entitlements.sh`。权限探针占用现有 probe client ID 91，逐标的开一条流并在进入下一项前取消。`pending` 保留具体原因。遇到 `gateway_disconnected` 时，先恢复只读 paper 会话再重新运行探针。遇到 `cancel_failed` 时，本轮行数回收结果未知，探针关闭连接并保留已完成标的的证据。发现休市、无回调或报价不完整时，于常规交易时段复测。探针只输出脱敏摘要，原始行情和账户资料留在私有环境。
 
 ### F1 行情 WAL 与投影
 
@@ -137,6 +172,17 @@ curl -sS http://127.0.0.1:8081/api/v1/market/status
 ### 历史价量补拉
 
 在获准采集并落盘的部署上，使用 [历史价量批任务](docs/historical-pull.md) 拉取九只美股日线和 IBKR paper 只读分钟线、BTC/ETH/SOL 公共 K 线及 Binance Spot 逐笔归档。命令需显式授权，Binance 默认关闭。使用独立于工作树的配置数据根，记录 JSON 的水位和缺口，失败后用同一参数续拉。与 Gateway 的其他历史请求错开。来源口径、命令、退出状态和耗时估算见批任务文档。
+
+### 隔离验收配置策略作业
+
+使用源码构建的 Python 环境从仓库根运行以下测试。测试在临时数据根生成合成日线，通过 Axum 路由提交并在独立 worker 中执行，再查询结果。无需启动常驻服务或绑定端口。
+
+```sh
+FINANCE_STRATEGY_TEST_PYTHON=/path/to/source-built/venv/bin/python \
+  cargo test --locked -p finance-api --test config_strategy_worker -- --ignored
+```
+
+在受控环境提交配置作业时，先将已审核的回放 JSON 发布到现有数据根下的 `finance-state/backtests/strategy-inputs/`，再按 [HTTP 接口](docs/api.md#配置策略提交与结果) 提交。API 与 worker 共享同一个 `jobs.sqlite3`。排查失败时先读 `status` 与 `error`。区间、预热、点时成分或收盘 bar 缺口的检查方法见 [配置策略作业](docs/backtest-jobs.md#配置策略作业)。客户端超时后用同一幂等键确认或重试。已入队作业使用该作业关联的快照，覆盖源文件只影响随后提交的新作业。
 
 ### 隔离验收官方历史作业
 
