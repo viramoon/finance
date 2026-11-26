@@ -1,4 +1,5 @@
 pub mod config;
+pub mod market;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 pub use config::IbConfig;
@@ -52,9 +53,32 @@ pub trait Session: Send + Sync + 'static {
     }
     async fn close(&self);
 }
+/// The Gateway handle exposes only the read operations used by finance.
+///
+/// ```compile_fail
+/// fn raw_client(peer: &finance_ib::PaperPeer) {
+///     let _ = &peer.client;
+/// }
+/// ```
 pub struct PaperPeer {
-    pub client: Client,
+    client: Client,
     notices: tokio::sync::Mutex<ibapi::subscriptions::NoticeStream>,
+}
+impl PaperPeer {
+    pub fn historical_data<'a>(
+        &'a self,
+        contract: &'a ibapi::contracts::Contract,
+        bar_size: ibapi::market_data::historical::BarSize,
+    ) -> ibapi::market_data::historical::HistoricalDataBuilder<'a, Client> {
+        self.client.historical_data(contract, bar_size)
+    }
+
+    pub async fn switch_market_data_type(
+        &self,
+        mode: ibapi::market_data::MarketDataType,
+    ) -> std::result::Result<(), ibapi::Error> {
+        self.client.switch_market_data_type(mode).await
+    }
 }
 pub fn invalidates_market_session(code: i32) -> bool {
     matches!(code, 1100 | 1101 | 1102 | 1300 | 2103 | 2105 | 2110)
@@ -129,6 +153,38 @@ pub struct ConnectionManager<T: Transport> {
     config: IbConfig,
     transport: T,
     status: watch::Sender<ConnectionStatus>,
+}
+impl ConnectionManager<IbTransport> {
+    /// Open a dedicated market-client session on the configured probe client ID.
+    pub async fn open_market(
+        &self,
+    ) -> std::result::Result<market::PaperMarket, market::MarketError> {
+        // The SDK would otherwise record raw handshake and market frames.
+        if std::env::var_os("IBAPI_RECORDING_DIR").is_some_and(|path| !path.is_empty()) {
+            return Err(market::MarketError::InvalidConfiguration);
+        }
+        let (peer, _) = self
+            .open(self.config.probe_client_id)
+            .await
+            .map_err(|e| match e {
+                Error::UnsafeAccount => market::MarketError::UnsafeAccount,
+                Error::Config(_) => market::MarketError::InvalidConfiguration,
+                Error::Timeout(_) => market::MarketError::Timeout,
+                _ => market::MarketError::Transport,
+            })?;
+        match market::PaperMarket::new(
+            peer.clone(),
+            Duration::from_millis(self.config.read_timeout_ms),
+        )
+        .await
+        {
+            Ok(market) => Ok(market),
+            Err(error) => {
+                peer.close().await;
+                Err(error)
+            }
+        }
+    }
 }
 impl<T: Transport> ConnectionManager<T> {
     pub fn new(config: IbConfig, transport: T) -> Result<Self> {
