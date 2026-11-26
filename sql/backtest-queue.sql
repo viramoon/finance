@@ -10,3 +10,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE INDEX IF NOT EXISTS jobs_status_id ON jobs(status,id);
+CREATE TABLE IF NOT EXISTS job_leases (
+  job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+  expires_at_ms INTEGER NOT NULL
+);

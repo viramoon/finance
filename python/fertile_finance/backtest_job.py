@@ -47,10 +47,5 @@ if __name__ == "__main__":
     parser.add_argument("request", type=Path)
     parser.add_argument("result", type=Path)
     args = parser.parse_args()
-    # uv waits for its Python child. The worker is uv's parent.
-    parent = os.getppid()
-    die_with_parent(parent)
-    worker = int(os.environ["FINANCE_WORKER_PID"])
-    if os.getppid() == 1 or not Path(f"/proc/{worker}").exists():
-        raise SystemExit("worker already exited")
+    die_with_parent(int(os.environ["FINANCE_WORKER_PID"]))
     execute(json.loads(args.request.read_text()), args.result)

@@ -25,11 +25,13 @@ curl 'http://127.0.0.1:8081/api/v1/backtests?limit=20'
 
 ## worker 运行与恢复
 
-队列和已完成的摘要存于数据根的 finance-state/backtests/jobs.sqlite3。SQLite 的唯一键与 IMMEDIATE 事务使并发提交、去重和容量检查不可分割。子进程使用已验证的本地 wheel，执行 uv run --no-sync --active python -m fertile_finance.backtest_job。每次运行在独立临时目录生成并原子替换结果，worker 在同一事务内写入最终摘要和 succeeded 状态。失败保留 failed 或 timed_out 状态与错误代码。
+队列和已完成的摘要存于数据根的 `finance-state/backtests/jobs.sqlite3`。SQLite 的唯一键与 IMMEDIATE 事务使并发提交、去重和容量检查不可分割。worker 使用启动它的源码构建 Python 环境执行 `python -m fertile_finance.backtest_job`。每次尝试在独立临时目录生成结果，worker 在同一事务内提交最终摘要和 `succeeded` 状态。失败保留 `failed` 或 `timed_out` 状态与错误代码。
 
-同一队列只运行一个 worker，使用操作系统文件锁防止双重恢复。FINANCE_WORKER_CONCURRENCY 默认 1，范围 1～16。FINANCE_JOB_TIMEOUT_SECONDS 默认 600，范围 1～3600。FINANCE_JOB_MEMORY_MB 默认 8192，范围 128～65536，限制 Linux 执行进程的虚拟地址空间。子进程继承死亡信号，超时时 worker 终止整个执行进程组。SIGTERM 后停止领取任务，等待每个在途任务完成或到各自时限。进程守护器的优雅退出宽限应覆盖配置的单作业超时。
+同一宿主的多个 worker 可共用本地 SQLite 队列。领取时在同一写事务内递增尝试号、置为 `running` 并建立租约。只有持有作业锁且尝试号匹配的 worker 才能续租或提交结果，引擎子进程继承该锁。租约到期后，持锁者仍可完成同一次尝试，其他 worker 需等锁释放后才能恢复。共享数据根须位于支持 SQLite 和 `flock` 锁语义的本地文件系统。
 
-使用 GET 详情核对 status、attempt、summary、error。刚启动时 worker 持有独占锁，再检查 running 记录。首次中断的记录可再执行一次，第二次中断则转 failed，error=worker_lost_twice。诊断长期 running 时先查守护日志与原 worker PID，恢复方式为重启 worker；不要手动改数据库状态或删除锁文件。worker 存活由守护器检查，作业通路用提交并轮询到终态验证。
+`FINANCE_WORKER_LEASE_SECONDS` 或 `--lease-seconds` 设租约时长，默认 15 秒，范围 1～3600 秒，按时长的三分之一续租。`FINANCE_WORKER_CONCURRENCY` 按进程配置，默认 1，范围 1～16。`FINANCE_JOB_TIMEOUT_SECONDS` 默认 600，范围 1～3600。`FINANCE_JOB_MEMORY_MB` 默认 8192，范围 128～65536，限制 Linux 执行进程的虚拟地址空间。超时时 worker 终止执行进程组。SIGTERM 后停止领取任务，继续持有在途租约至作业完成或超时。进程守护器的优雅退出宽限应覆盖单作业超时。
+
+启动时自动创建 `job_leases`，已有请求和终态记录继续使用原格式。升级先排空并停止旧版 worker，再启动新版。队列升级时剩余的旧版 `running` 作业按中断恢复。租约过期且锁释放后，首次中断重排一次，第二次中断转 `failed`，错误为 `worker_lost_twice`。使用 GET 详情核对 `status`、`attempt`、`summary`、`error`。长期处于 `running` 时先核对 worker 与其引擎子进程的存活、进度及终止状态，保留数据库和锁文件以便自动恢复。
 
 如需清理历史记录，先停止 API 和 worker，确认没有 queued、running 的作业，用 sqlite3 的 .backup 备份至受保护路径。按已确认的保留截止日期在事务中仅删除终态的旧记录，运行 PRAGMA integrity_check 后再启服务。被删除记录的幂等键将释放，不应清理仍在客户端重试窗口内的作业。
 

@@ -1,6 +1,7 @@
-"""Exclusive worker ownership; SQLite transitions and result commit are atomic."""
+"""Lease queued jobs across local workers and fence result commits by attempt."""
 
 import argparse
+from contextlib import closing, nullcontext
 from dataclasses import dataclass
 import fcntl
 import json
@@ -14,11 +15,13 @@ import subprocess
 import sys
 import tempfile
 import time
+from typing import BinaryIO
 
 from .backtest_job import die_with_parent
 
 REPO = Path(__file__).resolve().parents[2]
 SCHEMA = REPO / "sql/backtest-queue.sql"
+DEFAULT_LEASE_SECONDS = 15
 
 
 def open_queue(directory: Path):
@@ -26,30 +29,125 @@ def open_queue(directory: Path):
     db = sqlite3.connect(
         directory / "jobs.sqlite3", timeout=5, isolation_level="IMMEDIATE"
     )
+    db.execute("PRAGMA foreign_keys=ON")
     db.executescript(SCHEMA.read_text())
     return db
 
 
-def recover(db):
-    # The lifetime lock ensures no live worker owns these claims.
-    with db:
-        db.execute("""UPDATE jobs SET status=CASE attempt WHEN 1 THEN 'queued' ELSE 'failed' END,
-                      error=CASE attempt WHEN 1 THEN NULL ELSE 'worker_lost_twice' END
-                      WHERE status='running'""")
+def clock_ms():
+    return time.time_ns() // 1_000_000
 
 
-def claim(db):
+def guard_path(directory, job_id):
+    return directory / f"lease-{job_id}.lock"
+
+
+def open_guard(path, *, create=False):
+    def open_local(name, flags):
+        flags |= os.O_NOFOLLOW
+        if create:
+            flags |= os.O_CREAT
+        return os.open(name, flags, 0o600)
+
+    return open(path, "rb", opener=open_local)
+
+
+def recover(db, directory):
+    # A lease without an expiry belongs to the previous single-worker format.
+    # The shared lifetime lock excludes that version during recovery.
     with db:
         db.execute("BEGIN IMMEDIATE")
-        row = db.execute(
-            "SELECT id,request,attempt FROM jobs WHERE status='queued' ORDER BY id LIMIT 1"
-        ).fetchone()
-        if row:
+        expired = db.execute(
+            """SELECT id, attempt FROM jobs LEFT JOIN job_leases ON job_id=id
+               WHERE status='running' AND (expires_at_ms IS NULL OR expires_at_ms<=?)""",
+            (clock_ms(),),
+        ).fetchall()
+        for job_id, attempt in expired:
+            path = guard_path(directory, job_id)
+            try:
+                guard = open_guard(path)
+            except FileNotFoundError:
+                guard = None
+            with guard if guard is not None else nullcontext():
+                if guard is not None:
+                    try:
+                        fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        # A paused worker or its surviving engine can still run.
+                        continue
+                for scratch in directory.glob(f"run-{job_id}-{attempt}-*"):
+                    if scratch.is_dir() and not scratch.is_symlink():
+                        shutil.rmtree(scratch)
+                path.unlink(missing_ok=True)
+                db.execute(
+                    """UPDATE jobs SET status=CASE attempt WHEN 1 THEN 'queued' ELSE 'failed' END,
+                       error=CASE attempt WHEN 1 THEN NULL ELSE 'worker_lost_twice' END
+                       WHERE id=?""",
+                    (job_id,),
+                )
+                db.execute("DELETE FROM job_leases WHERE job_id=?", (job_id,))
+
+
+@dataclass
+class Claim:
+    job_id: int
+    request: str
+    attempt: int
+    guard: BinaryIO
+
+
+def claim(db, directory, lease_seconds):
+    queued = "SELECT id,request,attempt FROM jobs WHERE status='queued' ORDER BY id LIMIT 1"
+    if db.execute(queued).fetchone() is None:
+        return None
+    guard = None
+    try:
+        with db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(queued).fetchone()
+            if row is None:
+                return None
+            job_id, request, previous_attempt = row
+            guard = open_guard(guard_path(directory, job_id), create=True)
+            fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
             db.execute(
                 "UPDATE jobs SET status='running', attempt=attempt+1 WHERE id=?",
-                (row[0],),
+                (job_id,),
             )
-    return row
+            db.execute(
+                # An older worker can requeue a job after rollback while
+                # leaving the previous lease row. The queued state and guard
+                # are authoritative for this new attempt.
+                """INSERT INTO job_leases(job_id,expires_at_ms) VALUES (?,?)
+                   ON CONFLICT(job_id) DO UPDATE SET expires_at_ms=excluded.expires_at_ms""",
+                (job_id, clock_ms() + lease_seconds * 1_000),
+            )
+    except BaseException:
+        if guard is not None:
+            guard.close()
+        raise
+    return Claim(job_id, request, previous_attempt + 1, guard)
+
+
+def renew(db, claims, lease_seconds):
+    lost = []
+    with db:
+        db.execute("BEGIN IMMEDIATE")
+        expires_at = clock_ms() + lease_seconds * 1_000
+        for job in claims:
+            if job.guard.closed:
+                lost.append(job.job_id)
+                continue
+            # Expiry allows recovery only once the guard is free. A delayed
+            # owner with the same attempt and the guard can still renew.
+            update = db.execute(
+                """UPDATE job_leases SET expires_at_ms=? WHERE job_id=?
+                   AND EXISTS (SELECT 1 FROM jobs WHERE id=job_id AND status='running' AND attempt=?)""",
+                (expires_at, job.job_id, job.attempt),
+            )
+            if not update.rowcount:
+                lost.append(job.job_id)
+    return lost
 
 
 @dataclass
@@ -60,16 +158,13 @@ class Running:
     deadline: float
 
 
-def launch(root, row, timeout, memory_mb, *, isolated=False):
-    job_id, request, attempt = row
+def launch(root, claim, timeout, memory_mb):
     scratch = tempfile.TemporaryDirectory(
-        dir=root, prefix=f"run-{job_id}-{attempt + 1}-"
+        dir=root, prefix=f"run-{claim.job_id}-{claim.attempt}-"
     )
     work = Path(scratch.name)
-    (work / "request.json").write_text(request)
+    (work / "request.json").write_text(claim.request)
     result = work / "result.json"
-    interpreter = [sys.executable] if isolated else ["uv", "run", "--no-sync", "--active", "python"]
-    # Outside isolated mode, uv may exec Python directly or remain as its parent.
     worker_pid = os.getpid()
 
     def limit_child():
@@ -83,12 +178,11 @@ def launch(root, row, timeout, memory_mb, *, isolated=False):
         OPENBLAS_NUM_THREADS="1",
         OMP_NUM_THREADS="1",
         RAYON_NUM_THREADS="2",
-        UV_NO_PROGRESS="1",
     )
     with (work / "execution.log").open("w") as log:
         process = subprocess.Popen(
             [
-                *interpreter,
+                sys.executable,
                 "-m",
                 "fertile_finance.backtest_job",
                 str(work / "request.json"),
@@ -100,18 +194,30 @@ def launch(root, row, timeout, memory_mb, *, isolated=False):
             stderr=subprocess.STDOUT,
             start_new_session=True,
             preexec_fn=limit_child,
+            # Keep the execution guard held until the engine itself exits, even
+            # if the worker has already been killed and its lease has expired.
+            pass_fds=(claim.guard.fileno(),),
         )
-    print(f"job={job_id} attempt={attempt + 1} running pid={process.pid}", flush=True)
     return Running(process, result, scratch, time.monotonic() + timeout)
 
 
-def finish(db, job_id, status, summary=None, error=None):
+def finish(db, claim, status, summary=None, error=None):
+    if claim.guard.closed:
+        return False
     with db:
-        db.execute(
-            "UPDATE jobs SET status=?,summary=?,error=? WHERE id=? AND status='running'",
-            (status, summary, error, job_id),
+        db.execute("BEGIN IMMEDIATE")
+        update = db.execute(
+            """UPDATE jobs SET status=?,summary=?,error=? WHERE id=? AND status='running'
+               AND attempt=? AND EXISTS (
+                   SELECT 1 FROM job_leases WHERE job_id=jobs.id
+               )""",
+            (status, summary, error, claim.job_id, claim.attempt),
         )
-    print(f"job={job_id} {status}", flush=True)
+        if update.rowcount:
+            db.execute("DELETE FROM job_leases WHERE job_id=?", (claim.job_id,))
+            Path(claim.guard.name).unlink(missing_ok=True)
+    print(f"job={claim.job_id} {status if update.rowcount else 'lease_lost'}", flush=True)
+    return bool(update.rowcount)
 
 
 def kill_job(process):
@@ -124,54 +230,59 @@ def kill_job(process):
 
 
 def reap(db, jobs):
-    for job_id, job in list(jobs.items()):
+    for job_id, (row, job) in list(jobs.items()):
         code = job.process.poll()
         if code is None and time.monotonic() < job.deadline:
             continue
-        if code is None:
-            kill_job(job.process)
-            finish(db, job_id, "timed_out", error="job_timeout")
-        elif code:
-            # The job reads only local market data and configuration. Forward
-            # its final diagnostic lines rather than accumulating unbounded logs.
-            log = job.result.parent / "execution.log"
-            with log.open("rb") as file:
-                file.seek(max(0, log.stat().st_size - 2048))
-                print(file.read().decode(errors="replace"), file=sys.stderr, flush=True)
-            finish(db, job_id, "failed", error="engine_failed")
-        else:
-            try:
-                result = json.loads(job.result.read_text())
-                research_error = result.get("research_error")
-                if research_error is not None and research_error not in {
-                    "invalid_instrument", "no_data", "invalid_date", "invalid_source", "invalid_bar",
-                    "missing_sessions", "insufficient_history", "invalid_parameters", "execution_audit_failed",
-                }:
-                    raise ValueError("invalid research error")
-                if research_error is None and not isinstance(result["pnl"], str):
-                    raise ValueError("invalid pnl")
-            except (OSError, ValueError, KeyError, TypeError):
-                finish(db, job_id, "failed", error="invalid_result")
-            else:
-                if research_error is not None:
-                    finish(db, job_id, "failed", error=research_error)
-                else:
-                    finish(db, job_id, "succeeded", json.dumps(result))
-        job.scratch.cleanup()
         del jobs[job_id]
+        with row.guard:
+            status, summary, error = job_result(job, code)
+            job.scratch.cleanup()
+            finish(db, row, status, summary, error)
 
 
-def run_worker(root, concurrency, timeout, memory_mb, *, isolated=False):
+def job_result(job, code):
+    if code is None:
+        kill_job(job.process)
+        return "timed_out", None, "job_timeout"
+    if code:
+        # The job reads only local market data and configuration. Forward
+        # its final diagnostic lines rather than accumulating unbounded logs.
+        log = job.result.parent / "execution.log"
+        with log.open("rb") as file:
+            file.seek(max(0, log.stat().st_size - 2048))
+            print(file.read().decode(errors="replace"), file=sys.stderr, flush=True)
+        return "failed", None, "engine_failed"
+    try:
+        result = json.loads(job.result.read_text())
+        if not isinstance(result, dict):
+            raise ValueError("invalid result")
+        research_error = result.get("research_error")
+        if research_error is not None and research_error not in {
+            "invalid_instrument", "no_data", "invalid_date", "invalid_source", "invalid_bar",
+            "missing_sessions", "insufficient_history", "invalid_parameters", "execution_audit_failed",
+        }:
+            raise ValueError("invalid research error")
+        if research_error is None and not isinstance(result["pnl"], str):
+            raise ValueError("invalid pnl")
+    except (OSError, ValueError, KeyError, TypeError):
+        return "failed", None, "invalid_result"
+    if research_error is not None:
+        return "failed", None, research_error
+    return "succeeded", json.dumps(result), None
+
+
+def run_worker(
+    root, concurrency, timeout, memory_mb, *, isolated=False, lease_seconds=DEFAULT_LEASE_SECONDS,
+):
     directory = root / "finance-state/backtests"
     (root / "finance-state").mkdir(exist_ok=True)
     directory.mkdir(exist_ok=True)
-    with (directory / "worker.lock").open("a+") as lock, open_queue(directory) as db:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        recover(db)
-        # Interrupted attempts write only here; their output was never committed.
-        for path in directory.glob("run-*-*-*"):
-            if path.is_dir() and not path.is_symlink():
-                shutil.rmtree(path)
+    with (directory / "worker.lock").open("a+") as lock, closing(open_queue(directory)) as db:
+        # Current workers share this lock. A previous-version worker takes it
+        # exclusively and would otherwise reclaim every running job it sees.
+        fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        recover(db, directory)
         jobs = {}
         stopping = False
 
@@ -182,25 +293,47 @@ def run_worker(root, concurrency, timeout, memory_mb, *, isolated=False):
         signal.signal(signal.SIGTERM, stop)
         signal.signal(signal.SIGINT, stop)
         print("finance-backtest-worker ready", flush=True)
+        heartbeat_interval = lease_seconds / 3
+        recovery_interval = min(1, heartbeat_interval)
+        next_heartbeat = time.monotonic() + heartbeat_interval
+        next_recovery = time.monotonic() + recovery_interval
         try:
             while not stopping or (jobs and not isolated):
+                if time.monotonic() >= next_heartbeat:
+                    if jobs:
+                        lost = renew(db, (row for row, _ in jobs.values()), lease_seconds)
+                        for job_id in lost:
+                            row, job = jobs.pop(job_id)
+                            with row.guard:
+                                kill_job(job.process)
+                                job.scratch.cleanup()
+                            print(f"job={job_id} lease_lost", flush=True)
+                    next_heartbeat = time.monotonic() + heartbeat_interval
                 reap(db, jobs)
+                if not stopping and time.monotonic() >= next_recovery:
+                    recover(db, directory)
+                    next_recovery = time.monotonic() + recovery_interval
                 while not stopping and len(jobs) < concurrency:
-                    row = claim(db)
+                    row = claim(db, directory, lease_seconds)
                     if row is None:
                         break
                     try:
-                        jobs[row[0]] = launch(directory, row, timeout, memory_mb, isolated=isolated)
+                        job = launch(directory, row, timeout, memory_mb)
                     except (OSError, subprocess.SubprocessError) as exc:
                         print(f"job launch failed: {exc}", file=sys.stderr)
-                        finish(db, row[0], "failed", error="launch_failed")
+                        with row.guard:
+                            finish(db, row, "failed", error="launch_failed")
+                    else:
+                        jobs[row.job_id] = (row, job)
+                        print(f"job={row.job_id} attempt={row.attempt} running pid={job.process.pid}", flush=True)
                 time.sleep(0.1)
         finally:
-            for job_id, job in jobs.items():
-                kill_job(job.process)
-                job.scratch.cleanup()
-                if isolated and stopping:
-                    finish(db, job_id, "failed", error="worker_stopped")
+            for row, job in jobs.values():
+                with row.guard:
+                    kill_job(job.process)
+                    job.scratch.cleanup()
+                    if isolated and stopping:
+                        finish(db, row, "failed", error="worker_stopped")
 
 
 def main():
@@ -215,8 +348,13 @@ def main():
         "--memory-mb", default=os.getenv("FINANCE_JOB_MEMORY_MB", "8192"), type=int
     )
     parser.add_argument(
+        "--lease-seconds",
+        default=os.getenv("FINANCE_WORKER_LEASE_SECONDS", str(DEFAULT_LEASE_SECONDS)),
+        type=int,
+    )
+    parser.add_argument(
         "--isolated", action="store_true",
-        help="run jobs with this interpreter and stop active jobs on shutdown",
+        help="require explicit data roots and stop active jobs on shutdown",
     )
     args = parser.parse_args()
     if args.isolated and not all(
@@ -229,12 +367,16 @@ def main():
         not root.is_absolute()
         or not 1 <= args.concurrency <= 16
         or not 1 <= args.timeout <= 3600
+        or not 1 <= args.lease_seconds <= 3600
         or not 128 <= args.memory_mb <= 65536
     ):
         parser.error(
-            "invalid data root, concurrency (1..16), timeout (1..3600) or memory cap (128..65536 MiB)"
+            "invalid data root, concurrency (1..16), timeout or lease (1..3600 s), or memory cap (128..65536 MiB)"
         )
-    run_worker(root, args.concurrency, args.timeout, args.memory_mb, isolated=args.isolated)
+    run_worker(
+        root, args.concurrency, args.timeout, args.memory_mb,
+        isolated=args.isolated, lease_seconds=args.lease_seconds,
+    )
 
 
 if __name__ == "__main__":
