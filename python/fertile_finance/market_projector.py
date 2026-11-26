@@ -23,13 +23,13 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from fertile_finance.collector_store import atomic_json, atomic_publish, ensure_dir, fsync_dir
-from fertile_finance.market_protocol import Correction, Event, Kind, U64Text
+from fertile_finance.market_protocol import ContextKind, Correction, Event, Kind, U64Text
 
 
 _TOKEN = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 _MAX_BATCH = 4096
 _INDEX_NAME = "projection.sqlite3"
-_MARKET_KINDS = frozenset((Kind.BAR_CLOSED, Kind.TRADE, Kind.SNAPSHOT, Kind.DELTA))
+_MARKET_KINDS = frozenset((Kind.BAR_CLOSED, Kind.TRADE, Kind.SNAPSHOT, Kind.DELTA, ContextKind.PERPETUAL_CONTEXT))
 
 _PARQUET_SCHEMA = pa.schema([
     ("wal_position", pa.uint64()),
