@@ -60,7 +60,7 @@ class Running:
     deadline: float
 
 
-def launch(root, row, timeout, memory_mb):
+def launch(root, row, timeout, memory_mb, *, isolated=False):
     job_id, request, attempt = row
     scratch = tempfile.TemporaryDirectory(
         dir=root, prefix=f"run-{job_id}-{attempt + 1}-"
@@ -68,7 +68,8 @@ def launch(root, row, timeout, memory_mb):
     work = Path(scratch.name)
     (work / "request.json").write_text(request)
     result = work / "result.json"
-    # The spawned uv may exec Python directly or remain as its parent.
+    interpreter = [sys.executable] if isolated else ["uv", "run", "--no-sync", "--active", "python"]
+    # Outside isolated mode, uv may exec Python directly or remain as its parent.
     worker_pid = os.getpid()
 
     def limit_child():
@@ -87,11 +88,7 @@ def launch(root, row, timeout, memory_mb):
     with (work / "execution.log").open("w") as log:
         process = subprocess.Popen(
             [
-                "uv",
-                "run",
-                "--no-sync",
-                "--active",
-                "python",
+                *interpreter,
                 "-m",
                 "fertile_finance.backtest_job",
                 str(work / "request.json"),
@@ -117,17 +114,22 @@ def finish(db, job_id, status, summary=None, error=None):
     print(f"job={job_id} {status}", flush=True)
 
 
+def kill_job(process):
+    if process.poll() is None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    process.wait()
+
+
 def reap(db, jobs):
     for job_id, job in list(jobs.items()):
         code = job.process.poll()
         if code is None and time.monotonic() < job.deadline:
             continue
         if code is None:
-            try:
-                os.killpg(job.process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            job.process.wait()
+            kill_job(job.process)
             finish(db, job_id, "timed_out", error="job_timeout")
         elif code:
             # The job reads only local market data and configuration. Forward
@@ -159,7 +161,7 @@ def reap(db, jobs):
         del jobs[job_id]
 
 
-def run_worker(root, concurrency, timeout, memory_mb):
+def run_worker(root, concurrency, timeout, memory_mb, *, isolated=False):
     directory = root / "finance-state/backtests"
     (root / "finance-state").mkdir(exist_ok=True)
     directory.mkdir(exist_ok=True)
@@ -180,18 +182,25 @@ def run_worker(root, concurrency, timeout, memory_mb):
         signal.signal(signal.SIGTERM, stop)
         signal.signal(signal.SIGINT, stop)
         print("finance-backtest-worker ready", flush=True)
-        while not stopping or jobs:
-            reap(db, jobs)
-            while not stopping and len(jobs) < concurrency:
-                row = claim(db)
-                if row is None:
-                    break
-                try:
-                    jobs[row[0]] = launch(directory, row, timeout, memory_mb)
-                except (OSError, subprocess.SubprocessError) as exc:
-                    print(f"job launch failed: {exc}", file=sys.stderr)
-                    finish(db, row[0], "failed", error="launch_failed")
-            time.sleep(0.1)
+        try:
+            while not stopping or (jobs and not isolated):
+                reap(db, jobs)
+                while not stopping and len(jobs) < concurrency:
+                    row = claim(db)
+                    if row is None:
+                        break
+                    try:
+                        jobs[row[0]] = launch(directory, row, timeout, memory_mb, isolated=isolated)
+                    except (OSError, subprocess.SubprocessError) as exc:
+                        print(f"job launch failed: {exc}", file=sys.stderr)
+                        finish(db, row[0], "failed", error="launch_failed")
+                time.sleep(0.1)
+        finally:
+            for job_id, job in jobs.items():
+                kill_job(job.process)
+                job.scratch.cleanup()
+                if isolated and stopping:
+                    finish(db, job_id, "failed", error="worker_stopped")
 
 
 def main():
@@ -205,7 +214,16 @@ def main():
     parser.add_argument(
         "--memory-mb", default=os.getenv("FINANCE_JOB_MEMORY_MB", "8192"), type=int
     )
+    parser.add_argument(
+        "--isolated", action="store_true",
+        help="run jobs with this interpreter and stop active jobs on shutdown",
+    )
     args = parser.parse_args()
+    if args.isolated and not all(
+        Path(os.getenv(name, "")).is_absolute()
+        for name in ("FERTILE_DATA_ROOT", "FERTILE_RESEARCH_ROOT")
+    ):
+        parser.error("isolated worker requires explicit absolute data and research roots")
     root = Path(os.getenv("FERTILE_DATA_ROOT", "/home/box/fertile/data"))
     if (
         not root.is_absolute()
@@ -216,7 +234,7 @@ def main():
         parser.error(
             "invalid data root, concurrency (1..16), timeout (1..3600) or memory cap (128..65536 MiB)"
         )
-    run_worker(root, args.concurrency, args.timeout, args.memory_mb)
+    run_worker(root, args.concurrency, args.timeout, args.memory_mb, isolated=args.isolated)
 
 
 if __name__ == "__main__":
