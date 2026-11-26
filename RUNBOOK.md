@@ -104,9 +104,9 @@ FINANCE_F3_TEST_PYTHON="$FINANCE_PYTHON" \
 cargo run --locked -p finance-collector --bin finance-hyperliquid -- /path/to/reviewed-hyperliquid.yaml
 ```
 
-进程没有监听端口，SIGTERM/SIGINT 停止采集、清除流基线并刷新已暂存 WAL。记录模式下，用 `finance-market-wal --data-root "$FERTILE_DATA_ROOT" watermarks --source hyperliquid --product perp-public` 查持久水位，将子命令换为 `quality` 查质量报告。核对首张新快照的 `book_restored_from_snapshot` 和历史缺口的 `history_unrecoverable`。发生 WebSocket 订阅失败时检查三种频道的连接与确认，采集器按上限退避重试。遇到策略绑定或存储错误，检查数据根、许可与单写者，策略改变按 [F3 规则](docs/market-wal.md#生产者与许可) 处理。
+进程没有监听端口，SIGTERM/SIGINT 停止采集、清除流基线并刷新已暂存 WAL。记录模式下，用 `finance-market-wal --data-root "$FERTILE_DATA_ROOT" watermarks --source hyperliquid --product perp-public` 查持久水位，将子命令换为 `quality` 查质量报告。核对首张新快照的 `book_restored_from_snapshot` 和历史缺口的 `history_unrecoverable`。发生 WebSocket 订阅或帧校验失败时检查连接与订阅确认，采集器按上限退避重试。若重连后仅收到与断线前时间戳相同或更早的簿，当前簿继续等待新快照。遇到策略绑定或存储错误，检查数据根、许可与单写者，策略改变按 [F3 规则](docs/market-wal.md#生产者与许可) 处理。
 
-离线验收使用 `cargo test --locked --offline -p finance-collector --test hyperliquid` 与 `PYTHONPATH=python "$FINANCE_PYTHON" -m unittest discover -s tests -p 'test_hyperliquid*.py' -v`。Rust 测试用 `finance-hyperliquid CONFIG --replay FILE` 重放合成报文。该模式读取 UTF-8 JSON Lines，`event` 为 `metadata`、`connected`、`disconnected` 或 `frame`，每行都含十进制字符串 `receive_ts`（UTC 纳秒）。`metadata` 和 `frame` 行的 `data` 是原始 JSON 文本字符串。回放使用隔离数据根。完整语义见 [Hyperliquid 行情接口](docs/integrations/hyperliquid.md)。
+离线验收使用 `cargo test --locked --offline -p finance-collector --test hyperliquid` 与 `PYTHONPATH=python "$FINANCE_PYTHON" -m unittest discover -s tests -p 'test_hyperliquid*.py' -v`。Rust 测试用 `finance-hyperliquid CONFIG --replay FILE` 重放合成报文。该模式读取 UTF-8 JSON Lines，`event` 为 `metadata`、`connected`、`disconnected` 或 `frame`，每行都含十进制字符串 `receive_ts`（UTC 纳秒）。`metadata` 和 `frame` 行的 `data` 是原始 JSON 文本字符串。回放使用隔离数据根。行情帧校验失败后，回放丢弃该连接剩余帧，直到下一条 `connected`。完整语义见 [Hyperliquid 行情接口](docs/integrations/hyperliquid.md)。
 
 ### 在盒子上验证 paper 行情恢复
 

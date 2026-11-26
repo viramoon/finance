@@ -378,7 +378,7 @@ fn diagnostic_decoder_handles_extreme_numbers_and_invalid_constants() {
     let long_integer = "9".repeat(4301);
     for number in [
         "1e1000000000000000000",
-        "1e-1000000000000000000",
+        concat!("1e-", "1000000000000000000"),
         &long_integer,
     ] {
         let text = event.replacen(&quantity, &format!(r#""quantity":{number}"#), 1);

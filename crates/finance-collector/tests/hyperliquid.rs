@@ -1,7 +1,15 @@
-use std::{collections::BTreeMap, fs, path::Path, process::Command};
+use std::{
+    collections::BTreeMap,
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::Path,
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
 
 use finance_collector::{
-    hyperliquid::{Config, Hyperliquid, PRODUCT, SOURCE, TransportEvent},
+    hyperliquid::{Config, Hyperliquid, PRODUCT, RejectedFrame, SOURCE, TransportEvent},
     market_ingress::{GapCause, RecoveryOutcome, read_quality, wal_root},
     market_wal::WalReader,
 };
@@ -46,14 +54,7 @@ fn replay(root: &Path, commands: impl IntoIterator<Item = Value>) {
     let settings = root.join("hyperliquid.json");
     let input = root.join("transport.jsonl");
     fs::write(&settings, config(true).to_string()).unwrap();
-    fs::write(
-        &input,
-        commands
-            .into_iter()
-            .map(|value| format!("{value}\n"))
-            .collect::<String>(),
-    )
-    .unwrap();
+    write_transport(&input, commands);
     let result = Command::new(env!("CARGO_BIN_EXE_finance-hyperliquid"))
         .arg(settings)
         .arg("--replay")
@@ -68,6 +69,21 @@ fn replay(root: &Path, commands: impl IntoIterator<Item = Value>) {
         String::from_utf8_lossy(&result.stderr)
     );
     assert!(result.stdout.is_empty());
+}
+
+fn write_transport(path: &Path, commands: impl IntoIterator<Item = Value>) {
+    fs::write(
+        path,
+        commands
+            .into_iter()
+            .map(|value| format!("{value}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+}
+
+fn old_btc_book(ns: u64) -> Value {
+    payload("frame", ns, INITIAL.lines().next().unwrap())
 }
 
 fn events(root: &Path) -> Vec<Event> {
@@ -100,6 +116,7 @@ fn replayed_three_coins_restore_snapshot_and_report_unknown_history() {
             .into_iter()
             .chain(frames(INITIAL, 10))
             .chain([control("disconnected", 100), control("connected", 300)])
+            .chain([old_btc_book(309)])
             .chain(frames(RECONNECTED, 310)),
     );
 
@@ -111,14 +128,12 @@ fn replayed_three_coins_restore_snapshot_and_report_unknown_history() {
         &PRODUCT.parse().unwrap(),
     )
     .unwrap();
-    for (index, (coin, bid)) in [
-        ("BTC", Some("123.4")),
-        ("ETH", Some("54.12")),
-        ("SOL", None),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    let expected_books = [
+        ("BTC", &[("123.4", "0.00003")][..], &[][..]),
+        ("ETH", &[("54.12", "0.1001")], &[("54.13", "0.0001")]),
+        ("SOL", &[], &[("9.1237", "0.07")]),
+    ];
+    for (index, (coin, bids, asks)) in expected_books.into_iter().enumerate() {
         let id = format!("{coin}-USD-PERP.HYPERLIQUID");
         let book: Vec<_> = published
             .iter()
@@ -138,10 +153,16 @@ fn replayed_three_coins_restore_snapshot_and_report_unknown_history() {
         let Message::Snapshot(snapshot) = &book[4].message else {
             panic!("missing replacement snapshot")
         };
-        assert_eq!(snapshot.bids.first().map(|level| level.price.as_str()), bid);
-        assert!(snapshot.bids.len() <= 1);
-        if coin == "BTC" {
-            assert!(snapshot.asks.is_empty());
+        assert_eq!(
+            book[4].exchange_ts.unwrap().get(),
+            1_700_000_000_301_000_000
+        );
+        for (levels, expected) in [(&snapshot.bids, bids), (&snapshot.asks, asks)] {
+            let actual: Vec<_> = levels
+                .iter()
+                .map(|level| (level.price.as_str(), level.quantity.as_str()))
+                .collect();
+            assert_eq!(actual, expected, "{coin}");
         }
         assert_eq!(book.len(), 5);
         assert!(book.iter().all(|event| event.native_id.is_none()));
@@ -271,11 +292,19 @@ fn reopened_writer_resumes_with_a_new_epoch_and_skips_committed_overlap() {
         temp.path(),
         [payload("metadata", 200, META), control("connected", 300)]
             .into_iter()
+            .chain([old_btc_book(309)])
             .chain(frames(RECONNECTED, 310)),
     );
     let after = events(temp.path());
     assert_eq!(&after[..before.len()], &before);
     assert_successors(&after);
+    assert_eq!(
+        after
+            .iter()
+            .filter(|event| matches!(event.message, Message::Snapshot(_)))
+            .count(),
+        6
+    );
     assert!(after[before.len()].epoch > before[0].epoch);
     assert_eq!(
         after
@@ -391,4 +420,154 @@ fn rejects_bad_metadata_policy_and_non_exact_prices_before_publishing() {
             .display_events()
             .all(|event| matches!(event.message, Message::Reset(_)))
     );
+}
+
+#[test]
+fn invalid_trade_batch_cannot_publish_its_valid_prefix() {
+    let root = tempfile::tempdir().unwrap();
+    let mut adapter = Hyperliquid::open(
+        root.path(),
+        serde_json::from_value(config(false)).unwrap(),
+        META,
+        BASE,
+    )
+    .unwrap();
+    adapter
+        .apply(TransportEvent::Connected {
+            receive_ts: BASE.into(),
+        })
+        .unwrap();
+    let mut frame: Value = serde_json::from_str(INITIAL.lines().nth(3).unwrap()).unwrap();
+    frame["data"][1]["sz"] = json!("0");
+    let error = adapter
+        .apply(TransportEvent::Frame {
+            data: frame.to_string(),
+            receive_ts: (BASE + 10).into(),
+        })
+        .unwrap_err();
+    assert!(error.is::<RejectedFrame>());
+    assert!(
+        adapter
+            .ingress()
+            .display_events()
+            .all(|event| matches!(event.message, Message::Reset(_)))
+    );
+}
+
+#[test]
+fn live_collector_replaces_bad_transport_and_recovers_fresh_book() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let config_path = root.join("hyperliquid.json");
+    fs::write(&config_path, config(true).to_string()).unwrap();
+    let fresh = RECONNECTED.lines().nth(1).unwrap();
+    let mut invalid: Value = serde_json::from_str(fresh).unwrap();
+    invalid["data"]["levels"][0][0]["px"] = json!("123.41");
+    write_transport(
+        &root.join("first.jsonl"),
+        [
+            payload("metadata", 0, META),
+            control("connected", 1),
+            old_btc_book(10),
+            payload("frame", 20, &invalid.to_string()),
+            // The line already buffered behind the rejection belongs to the closed transport.
+            payload("frame", 21, fresh),
+        ],
+    );
+    write_transport(
+        &root.join("second.jsonl"),
+        [
+            payload("metadata", 200, META),
+            control("connected", 201),
+            old_btc_book(210),
+            payload("frame", 220, fresh),
+        ],
+    );
+    let driver = root.join("stub-python");
+    fs::write(
+        &driver,
+        r#"#!/bin/sh
+set -eu
+test "$*" = "-m fertile_finance.hyperliquid_transport BTC ETH SOL"
+cd "$FERTILE_DATA_ROOT"
+if ! test -e first.started; then
+    : > first.started
+    /bin/cat first.jsonl
+    exec /bin/sleep 8
+fi
+: > second.started
+/bin/cat second.jsonl
+attempts=0
+while ! test -e finish && test "$attempts" -lt 80; do
+    /bin/sleep 0.1
+    attempts=$((attempts + 1))
+done
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&driver, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_finance-hyperliquid"))
+        .arg(config_path)
+        .env_clear()
+        .env("FERTILE_DATA_ROOT", root)
+        .env("FINANCE_PYTHON", driver)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let mut recovered = false;
+    while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
+        if events(root).iter().any(|event| {
+            event.receive_ts.get() == BASE + 220 && matches!(event.message, Message::Snapshot(_))
+        }) {
+            recovered = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    // The fixture holds its second connection open until recovery is observed.
+    let still_running = child.try_wait().unwrap().is_none();
+    fs::write(root.join("finish"), "").unwrap();
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(recovered && still_running, "{stderr}");
+    assert!(
+        !output.status.success() && stderr.contains("Hyperliquid transport ended"),
+        "{stderr}"
+    );
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        stderr.matches("invalid Hyperliquid market frame").count(),
+        1
+    );
+    assert!(root.join("second.started").is_file());
+    let published = events(root);
+    assert_successors(&published);
+    let snapshots: Vec<_> = published
+        .iter()
+        .filter(|event| matches!(event.message, Message::Snapshot(_)))
+        .map(|event| event.receive_ts.get())
+        .collect();
+    assert_eq!(snapshots, [BASE + 10, BASE + 220]);
+    let gap = published
+        .iter()
+        .find_map(|event| match &event.message {
+            Message::Gap(gap) if event.channel.as_str() == "book" => Some(gap),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        (gap.from_ts.get(), gap.to_ts.get()),
+        (BASE + 11, BASE + 219)
+    );
+    assert_eq!(gap.reason.as_str(), "continuity_unknown");
+    let reports = read_quality(root, &SOURCE.parse().unwrap(), &PRODUCT.parse().unwrap()).unwrap();
+    let recovery: Vec<_> = reports
+        .iter()
+        .filter(|report| report.outcome == Some(RecoveryOutcome::BookRestoredFromSnapshot))
+        .collect();
+    assert_eq!(recovery.len(), 1);
+    assert_eq!(recovery[0].to_ts.get(), BASE + 220);
 }

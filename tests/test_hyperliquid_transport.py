@@ -123,3 +123,35 @@ class HyperliquidTransportTests(unittest.IsolatedAsyncioTestCase):
             live._on_message(b'{"channel":"pong"}')
         with self.assertRaisesRegex(transport.SessionLost, "receive queue exceeded"):
             await live.receive()
+
+    async def test_invalid_numeric_token_reconnects_without_logging_payload(self):
+        first = ReplaySession(_FIXTURES / "ws-initial.jsonl")
+        good = first.frames[0]
+        huge_exponent = b"1e" + b"9" * 32
+        bad = good.removesuffix(b"}") + b',"unused":' + huge_exponent + b"}"
+        first.frames = [good, bad, good]
+        second = ReplaySession(_FIXTURES / "ws-reconnected.jsonl")
+        expected_fresh = second.frames[1].decode()
+        events = []
+
+        def emit(kind, _, **fields):
+            events.append((kind, fields))
+
+        sleep = AsyncMock(side_effect=[None, asyncio.CancelledError])
+        errors = io.StringIO()
+        with redirect_stderr(errors), self.assertRaises(asyncio.CancelledError):
+            await transport.run(
+                _COINS, connect=AsyncMock(side_effect=[first, second]),
+                load_metadata=(_FIXTURES / "meta.json").read_text, emit=emit, sleep=sleep,
+            )
+        self.assertEqual([kind for kind, _ in events if kind != "frame"], [
+            "metadata", "connected", "disconnected", "connected", "disconnected",
+        ])
+        self.assertEqual(events[2], ("frame", {"data": good.decode()}))
+        self.assertEqual(events[3][0], "disconnected")
+        self.assertIn(("frame", {"data": expected_fresh}), events[5:])
+        self.assertEqual([len(session.sent) for session in (first, second)], [9, 9])
+        self.assertTrue(first.closed and second.closed)
+        self.assertEqual([call.args for call in sleep.await_args_list], [(1,), (2,)])
+        self.assertIn("invalid WebSocket JSON", errors.getvalue())
+        self.assertNotIn(huge_exponent.decode(), errors.getvalue())

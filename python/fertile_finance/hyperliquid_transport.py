@@ -2,7 +2,7 @@
 
 import argparse
 import asyncio
-from decimal import Decimal
+from decimal import Decimal, DecimalException
 from http.client import HTTPException, HTTPSConnection
 import json
 import sys
@@ -116,7 +116,7 @@ async def _stream_session(session, coins, emit):
         try:
             frame = payload.decode("utf-8")
             envelope = json.loads(frame, parse_float=Decimal)
-        except (ValueError, RecursionError):
+        except (ValueError, DecimalException, RecursionError):
             raise SessionLost("invalid WebSocket JSON") from None
         if not isinstance(envelope, dict):
             raise SessionLost("invalid WebSocket envelope")

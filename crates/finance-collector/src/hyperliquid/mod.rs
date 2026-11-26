@@ -4,6 +4,7 @@ mod wire;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
+    fmt,
     path::Path,
 };
 
@@ -51,7 +52,7 @@ impl Coin {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub coins: BTreeSet<Coin>,
@@ -180,6 +181,44 @@ fn instrument(coin: Coin, size_decimals: u32, policy: &ProductPolicy) -> Result<
     Ok(instrument)
 }
 
+fn configured_instruments(
+    coins: impl IntoIterator<Item = Coin>,
+    policy: &ProductPolicy,
+    metadata: &str,
+) -> Result<BTreeMap<Coin, Instrument>> {
+    let metadata: Metadata = decode(metadata, "metadata")?;
+    coins
+        .into_iter()
+        .map(|coin| {
+            let mut definitions = metadata
+                .universe
+                .iter()
+                .filter(|asset| asset.name == coin.as_str());
+            let definition = definitions
+                .next()
+                .with_context(|| format!("missing metadata for {}", coin.as_str()))?;
+            ensure!(
+                !definition.is_delisted && definitions.next().is_none(),
+                "invalid metadata for {}",
+                coin.as_str()
+            );
+            Ok((coin, instrument(coin, definition.sz_decimals, policy)?))
+        })
+        .collect()
+}
+
+/// A venue frame failed validation before any of its rows reached ingress.
+#[derive(Debug)]
+pub struct RejectedFrame;
+
+impl fmt::Display for RejectedFrame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("invalid Hyperliquid market frame")
+    }
+}
+
+impl std::error::Error for RejectedFrame {}
+
 pub struct Hyperliquid {
     ingress: MarketIngress,
     policy: ProductPolicy,
@@ -194,31 +233,20 @@ pub struct Hyperliquid {
 impl Hyperliquid {
     pub fn open(data_root: &Path, config: Config, metadata: &str, receive_ts: u64) -> Result<Self> {
         config.validate()?;
-        let metadata: Metadata = decode(metadata, "metadata")?;
-        let mut assets = BTreeMap::new();
-        for coin in config.coins {
-            let mut definitions = metadata
-                .universe
-                .iter()
-                .filter(|asset| asset.name == coin.as_str());
-            let definition = definitions
-                .next()
-                .with_context(|| format!("missing metadata for {}", coin.as_str()))?;
-            ensure!(
-                !definition.is_delisted && definitions.next().is_none(),
-                "invalid metadata for {}",
-                coin.as_str()
-            );
-            assets.insert(
-                coin,
-                Asset {
-                    instrument: instrument(coin, definition.sz_decimals, &config.policy)?,
-                    streams: Default::default(),
-                    last_book_time: None,
-                    trade_ids: TradeIds::default(),
-                },
-            );
-        }
+        let mut assets = configured_instruments(config.coins, &config.policy, metadata)?
+            .into_iter()
+            .map(|(coin, instrument)| {
+                (
+                    coin,
+                    Asset {
+                        instrument,
+                        streams: Default::default(),
+                        last_book_time: None,
+                        trade_ids: TradeIds::default(),
+                    },
+                )
+            })
+            .collect();
         let policy = config.policy;
         let capability = Capability {
             schema_version: SchemaVersion::V2,
@@ -259,6 +287,19 @@ impl Hyperliquid {
             connected_since: None,
             dedup_window,
         })
+    }
+
+    /// A replacement transport may refetch metadata while the current writer remains open.
+    pub fn verify_metadata(&self, metadata: &str) -> Result<()> {
+        let refreshed =
+            configured_instruments(self.assets.keys().copied(), &self.policy, metadata)?;
+        ensure!(
+            refreshed
+                .into_iter()
+                .all(|(coin, instrument)| self.assets[&coin].instrument == instrument),
+            "Hyperliquid instrument metadata changed during recovery"
+        );
+        Ok(())
     }
 
     pub fn instruments(&self) -> impl Iterator<Item = &Instrument> {
@@ -379,15 +420,77 @@ impl Hyperliquid {
             self.connected_since.is_some(),
             "Hyperliquid frame outside a connected session"
         );
+        let epoch = self.epoch()?;
+        // Validate an entire frame before touching the dedup cache, WAL or coverage state.
+        let updates = self
+            .prepare_updates(frame, receive_ts, epoch)
+            .map_err(|_| RejectedFrame)?;
+        for Update {
+            coin,
+            channel,
+            event,
+            trade_id,
+        } in updates
+        {
+            if let Some(id) = trade_id {
+                let dedup = &mut self.assets.get_mut(&coin).expect("mapped coin").trade_ids;
+                dedup.expire(receive_ts, self.dedup_window);
+                if dedup.seen.contains(&id) {
+                    continue;
+                }
+            }
+            let exchange_ts = event.exchange_ts;
+            self.publish(coin, channel, event)?;
+            let asset = self.assets.get_mut(&coin).expect("mapped coin");
+            if let Some(id) = trade_id {
+                asset.trade_ids.insert(receive_ts, id);
+            }
+            if channel == Channel::Book {
+                asset.last_book_time = exchange_ts.map(|ts| ts.get() / NS_PER_MS);
+            }
+        }
+        Ok(())
+    }
+
+    fn prepare_updates(&self, frame: &str, receive_ts: u64, epoch: u64) -> Result<Vec<Update>> {
+        let prepare = |coin, channel, message, exchange_ts, trade_id: Option<(u64, u64)>| {
+            let asset = self.assets.get(&coin).context("unexpected market coin")?;
+            let native_id = trade_id
+                .map(|(time, tid)| format!("{}:{time}:{tid}", coin.as_str()).parse())
+                .transpose()?;
+            let event = event(
+                &self.policy,
+                &asset.instrument,
+                channel,
+                epoch,
+                1,
+                Observation {
+                    message,
+                    exchange_ts,
+                    receive_ts,
+                    native_id,
+                },
+            );
+            event.validate_against(&asset.instrument, &self.capability)?;
+            Ok(Update {
+                coin,
+                channel,
+                event,
+                trade_id,
+            })
+        };
         match decode(frame, "WebSocket frame")? {
             Frame::Book(book) => {
-                let coin = book.coin;
-                let asset = self.assets.get(&coin).context("unexpected book coin")?;
+                let asset = self
+                    .assets
+                    .get(&book.coin)
+                    .context("unexpected book coin")?;
+                let recovering = asset.streams[Channel::Book as usize].gap_from_ts.is_some();
                 if asset
                     .last_book_time
-                    .is_some_and(|latest| book.time < latest)
+                    .is_some_and(|latest| book.time < latest || (recovering && book.time == latest))
                 {
-                    return Ok(());
+                    return Ok(Vec::new());
                 }
                 let [bids, asks] = book.levels;
                 let snapshot = BookSnapshot {
@@ -400,91 +503,52 @@ impl Hyperliquid {
                         .map(TryInto::try_into)
                         .collect::<Result<_>>()?,
                 };
-                self.publish(
-                    coin,
+                Ok(vec![prepare(
+                    book.coin,
                     Channel::Book,
-                    Observation {
-                        message: Message::Snapshot(snapshot),
-                        exchange_ts: Some(nanos(book.time)?),
-                        receive_ts,
-                        native_id: None,
-                    },
-                )?;
-                self.assets
-                    .get_mut(&coin)
-                    .expect("mapped coin")
-                    .last_book_time = Some(book.time);
+                    Message::Snapshot(snapshot),
+                    Some(nanos(book.time)?),
+                    None,
+                )?])
             }
-            Frame::Trades(trades) => {
-                for raw in trades {
-                    let coin = raw.coin;
-                    let id = (raw.time, raw.tid);
-                    let asset = self
-                        .assets
-                        .get_mut(&coin)
-                        .context("unexpected trade coin")?;
-                    asset.trade_ids.expire(receive_ts, self.dedup_window);
-                    if asset.trade_ids.seen.contains(&id) {
-                        continue;
-                    }
-                    self.publish(
+            Frame::Trades(trades) => trades
+                .into_iter()
+                .map(|raw| {
+                    let (coin, time, tid) = (raw.coin, raw.time, raw.tid);
+                    prepare(
                         coin,
                         Channel::Trades,
-                        Observation {
-                            message: Message::Trade(raw.try_into()?),
-                            exchange_ts: Some(nanos(id.0)?),
-                            receive_ts,
-                            native_id: Some(
-                                format!("{}:{}:{}", coin.as_str(), id.0, id.1).parse()?,
-                            ),
-                        },
-                    )?;
-                    self.assets
-                        .get_mut(&coin)
-                        .expect("mapped coin")
-                        .trade_ids
-                        .insert(receive_ts, id);
-                }
-            }
-            Frame::Context(context) => self.publish(
+                        Message::Trade(raw.try_into()?),
+                        Some(nanos(time)?),
+                        Some((time, tid)),
+                    )
+                })
+                .collect(),
+            Frame::Context(context) => Ok(vec![prepare(
                 context.coin,
                 Channel::Context,
-                Observation {
-                    message: Message::PerpetualContext(context.ctx.into()),
-                    exchange_ts: None,
-                    receive_ts,
-                    native_id: None,
-                },
-            )?,
+                Message::PerpetualContext(context.ctx.into()),
+                None,
+                None,
+            )?]),
             Frame::Error => bail!("Hyperliquid refused a public subscription"),
-            Frame::Other => {}
+            Frame::Other => Ok(Vec::new()),
         }
-        Ok(())
     }
 
-    fn publish(&mut self, coin: Coin, channel: Channel, observation: Observation) -> Result<()> {
-        let epoch = self.epoch()?;
-        let asset = self
-            .assets
-            .get_mut(&coin)
-            .context("unexpected context coin")?;
+    fn publish(&mut self, coin: Coin, channel: Channel, mut market: Event) -> Result<()> {
+        let epoch = market.epoch.get();
+        let asset = self.assets.get_mut(&coin).expect("mapped coin");
         let stream = &mut asset.streams[channel as usize];
-        let receive_ts = observation.receive_ts;
+        let receive_ts = market.receive_ts.get();
         let from = stream.gap_from_ts;
         let has_gap = from.is_some_and(|start| start < receive_ts);
         let seq = stream
             .seq
             .checked_add(if has_gap { 2 } else { 1 })
             .context("Hyperliquid sequence exhausted")?;
-        let market = event(
-            &self.policy,
-            &asset.instrument,
-            channel,
-            epoch,
-            seq,
-            observation,
-        );
-        market.validate_against(&asset.instrument, &self.capability)?;
+        market.seq = seq.into();
+        market.cursor = cursor(epoch, seq);
 
         if let Some(from) = from.filter(|_| has_gap) {
             let to = receive_ts - 1;
@@ -592,6 +656,13 @@ fn restore_recent(data_root: &Path, assets: &mut BTreeMap<Coin, Asset>, now: u64
     Ok(())
 }
 
+struct Update {
+    coin: Coin,
+    channel: Channel,
+    event: Event,
+    trade_id: Option<(u64, u64)>,
+}
+
 struct Observation {
     message: Message,
     exchange_ts: Option<u64>,
@@ -624,12 +695,16 @@ fn event(
         first_available_ts: observed.receive_ts.into(),
         epoch: epoch.into(),
         seq: seq.into(),
-        cursor: format!("{epoch}:{seq}").parse().expect("nonempty cursor"),
+        cursor: cursor(epoch, seq),
         revision: 0.into(),
         license: policy.license.clone(),
         native_id: observed.native_id,
         message: observed.message,
     }
+}
+
+fn cursor(epoch: u64, seq: u64) -> NonEmptyText {
+    format!("{epoch}:{seq}").parse().expect("nonempty cursor")
 }
 
 fn quality(
