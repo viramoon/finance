@@ -18,8 +18,10 @@ Gateway 可能仍能响应 server time，但交易所行情连接已经中断。
 
 ```sh
 cargo run --locked -p finance-ib -- probe
-IB_LIVE_TEST=1 cargo test --locked -p finance-ib --test paper -- --ignored --nocapture
+IB_LIVE_TEST=1 cargo test --locked -p finance-ib --test paper opt_in_paper_probe -- --ignored --exact --nocapture
 ```
+
+`--test paper` 只运行探针。分钟线的真实 Gateway 验证使用独立测试目标 `paper_historical_minute`，须另行确认数据拉取与本地记录授权。运行参数见 [历史价量拉取](../historical-pull.md)。
 
 无法连接时检查 TCP 端点和 Gateway 日志；认证或双因素未完成时完成 paper 登录后重试。混合/实盘账户立即退出，修复 Gateway 会话后重新启动，不能以更换 profile 替代账户校验。连接超时和 server time 读超时均产生非零退出码。成功 probe 只表示当前连接与身份检查成功；订阅权限、连续采集、补数以及真实交易时段的数据新鲜度须另行验证。
 

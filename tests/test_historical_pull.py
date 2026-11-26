@@ -20,6 +20,12 @@ MINUTE = NS_PER_MINUTE
 FIRST = 28_546_201 * MINUTE
 INSTRUMENT = "SPY.ARCA"
 CHECKPOINT = "fertile_finance.historical_pull.atomic_json"
+EXPECTED_IBKR_PRECISION = {
+    "input": "ibapi-3.2.0-binary64",
+    "price_increment": "0.0001",
+    "volume_increment": "0.00000001",
+    "rounding": "nearest_ties_even",
+}
 
 
 def bar(ts, instrument=INSTRUMENT):
@@ -161,18 +167,59 @@ class HistoricalPullTests(unittest.TestCase):
         def fake_rust(cmd, **kwargs):
             calls.append(cmd)
             self.assertEqual(kwargs["env"]["FERTILE_DATA_ROOT"], str(self.root))
+            self.assertEqual(cmd[:3], ["fake-ib", "historical-minute", "--allow-download"])
             self.assertEqual(int(cmd[-2]) * 10**9, utc_ns(early, 14, 30))
             self.assertEqual(int(cmd[-1]) * 10**9, early_close)
-            instrument = EQUITY_INSTRUMENTS[cmd[2]]
-            minute_rows = [bar(ts, instrument) for ts in range(utc_ns(early, 14, 31), early_close + 1, MINUTE)]
-            return CompletedProcess(cmd, 0, json.dumps(minute_rows).encode())
+            instrument = EQUITY_INSTRUMENTS[cmd[3]]
+            minute_rows = [bar(ts, instrument) | {"close": "10.0123", "volume": "100.00000001"}
+                           for ts in range(utc_ns(early, 14, 31), early_close + 1, MINUTE)]
+            response = {"precision": EXPECTED_IBKR_PRECISION, "bars": minute_rows}
+            return CompletedProcess(cmd, 0, json.dumps(response).encode())
 
         report = pull_bars(self.root, IbkrMinute("fake-ib", self.root, run=fake_rust),
                            EQUITY_INSTRUMENTS, start, end, now_ns=end)
         self.assertEqual(report["status"], "complete")
-        self.assertEqual([cmd[2] for cmd in calls], list(EQUITY_INSTRUMENTS))
-        catalog = ParquetDataCatalog(self.root / "catalog/historical/ibkr-minute/1-MINUTE-LAST")
-        self.assertEqual(len(catalog.bars()), 9 * 210)
+        self.assertEqual([cmd[3] for cmd in calls], list(EQUITY_INSTRUMENTS))
+        catalog = self.root / "catalog/historical/ibkr-minute/1-MINUTE-LAST"
+        state = self.root / "finance-state/historical/ibkr-minute/1-MINUTE-LAST"
+        rows = ParquetDataCatalog(catalog).bars()
+        self.assertEqual(len(rows), 9 * 210)
+        self.assertTrue(all(row.close.as_decimal() == Decimal("10.0123")
+                            and row.volume.as_decimal() == Decimal("100.00000001") for row in rows))
+        provenance = json.loads((catalog / ".finance-collector/source.json").read_text())
+        self.assertEqual(provenance["source_metadata"], {"decimal_policy": EXPECTED_IBKR_PRECISION})
+        self.assertEqual(json.loads((state / "catalog.json").read_text()), provenance)
+
+    def test_ibkr_rejects_old_or_mismatched_binary_before_bar_publication(self):
+        at = utc_ns(date(2024, 11, 29), 14, 31)
+        bars = [bar(at) | {"close": "10.0123", "volume": "100.00000001"}]
+        catalog = self.root / "catalog/historical/ibkr-minute/1-MINUTE-LAST"
+        for payload in (bars, {"precision": EXPECTED_IBKR_PRECISION | {"price_increment": "0.01"}, "bars": bars}):
+            with self.subTest(payload=payload):
+                def fake_rust(cmd, **kwargs):
+                    return CompletedProcess(cmd, 0, json.dumps(payload).encode())
+
+                provider = IbkrMinute("fake-ib", self.root, run=fake_rust)
+                with self.assertRaisesRegex(ValueError, "precision policy does not match"):
+                    pull_bars(self.root, provider, ["SPY"], at, at, now_ns=at)
+                self.assertEqual(ParquetDataCatalog(catalog).bars(), [])
+
+    def test_ibkr_refuses_to_relabel_legacy_catalog_before_fetch(self):
+        at = utc_ns(date(2024, 11, 29), 14, 31)
+        catalog = self.root / "catalog/historical/ibkr-minute/1-MINUTE-LAST"
+        state = self.root / "finance-state/historical/ibkr-minute/1-MINUTE-LAST"
+        with open_store(catalog, state, "1-MINUTE-LAST", "ibkr-minute", historical=True) as store:
+            store.merge_history([bar(at)])
+
+        def fake_rust(*args, **kwargs):
+            raise AssertionError("unlabelled legacy catalog must be rejected before requesting")
+
+        provider = IbkrMinute("fake-ib", self.root, run=fake_rust)
+        with self.assertRaisesRegex(ValueError, "different source metadata"):
+            pull_bars(self.root, provider, ["SPY"], at, at, now_ns=at)
+        provenance = json.loads((catalog / ".finance-collector/source.json").read_text())
+        self.assertNotIn("source_metadata", provenance)
+        self.assertEqual([row.ts_event for row in ParquetDataCatalog(catalog).bars()], [at])
 
     def test_equity_daily_does_not_request_an_open_session(self):
         day = date(2024, 11, 29)

@@ -65,17 +65,21 @@ def checkpoint(state, marks):
     atomic_json(state / "watermarks.json", marks)
 
 
-def check_provenance(catalog, state, source, spec):
+def check_provenance(catalog, state, source, spec, source_metadata=None):
     marker = catalog / ".finance-collector/source.json"
     binding = state / "catalog.json"
     if marker.exists():
         metadata = json.loads(marker.read_text())
         if (metadata["source"], metadata["spec"]) != (source, spec):
             raise ValueError("catalog belongs to another source or bar spec; select a separate data root")
+        if metadata.get("source_metadata") != source_metadata:
+            raise ValueError("catalog uses different source metadata; select a separate data root")
     else:
         if binding.exists() or any((catalog / "data/bar").glob("*/*.parquet")):
             raise ValueError("existing catalog or state without matching provenance")
         metadata = {"source": source, "spec": spec, "id": str(uuid4())}
+        if source_metadata is not None:
+            metadata["source_metadata"] = source_metadata
         atomic_json(marker, metadata)
     if binding.exists():
         if json.loads(binding.read_text()) != metadata:
@@ -206,7 +210,7 @@ class Store:
 
 
 @contextmanager
-def open_store(catalog, state, spec, source="replay", *, historical=False):
+def open_store(catalog, state, spec, source="replay", *, historical=False, source_metadata=None):
     if not catalog.is_absolute() or not state.is_absolute():
         raise ValueError("catalog and state paths must be absolute")
     private = catalog / ".finance-collector"
@@ -221,7 +225,7 @@ def open_store(catalog, state, spec, source="replay", *, historical=False):
     with (private / "writer.lock").open("a") as lock, (state / "writer.lock").open("a") as state_lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         fcntl.flock(state_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        check_provenance(catalog, state, source, spec)
+        check_provenance(catalog, state, source, spec, source_metadata)
         # Only this writer owns active/. Ignore uncommitted files after a hard kill.
         staging = private / "active"
         if staging.exists():

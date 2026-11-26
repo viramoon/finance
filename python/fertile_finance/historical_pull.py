@@ -23,6 +23,13 @@ NS_PER_SECOND = 1_000_000_000
 NS_PER_MINUTE = 60 * NS_PER_SECOND
 NS_PER_MILLISECOND = 1_000_000
 
+IBKR_MINUTE_PRECISION = {
+    "input": "ibapi-3.2.0-binary64",
+    "price_increment": "0.0001",
+    "volume_increment": "0.00000001",
+    "rounding": "nearest_ties_even",
+}
+
 
 class HistoricalBarSource(Protocol):
     """Finite counterpart to BarSource.backfill with the same closed-bar rows."""
@@ -60,6 +67,7 @@ class IbkrMinute:
     name = "ibkr-minute"
     spec = "1-MINUTE-LAST"
     window_ns = NS_PER_DAY
+    catalog_metadata = {"decimal_policy": IBKR_MINUTE_PRECISION}
 
     def __init__(self, binary, root, *, run=subprocess.run):
         self.binary = binary
@@ -77,11 +85,16 @@ class IbkrMinute:
             yield from range(first_close, min(end, closes) + 1, NS_PER_MINUTE)
 
     def backfill(self, symbol, start, end):
-        command = [self.binary, "historical-minute", symbol,
+        command = [self.binary, "historical-minute", "--allow-download", symbol,
                    str((start - NS_PER_MINUTE) // NS_PER_SECOND), str(end // NS_PER_SECOND)]
         env = {**os.environ, "FERTILE_DATA_ROOT": str(self.root)}
         result = self.run(command, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, check=True)
-        return json.loads(result.stdout)
+        payload = json.loads(result.stdout)
+        if not isinstance(payload, dict) or payload.get("precision") != IBKR_MINUTE_PRECISION:
+            raise ValueError("finance-ib historical-minute precision policy does not match this puller")
+        if not isinstance(payload.get("bars"), list):
+            raise ValueError("finance-ib historical-minute response must contain a bar array")
+        return payload["bars"]
 
 
 def ceil_slot(ts, step):
@@ -185,7 +198,8 @@ def pull_bars(data_root, source: HistoricalBarSource, symbols, start, end, *, no
     catalog = history_path(root, "catalog", "historical", source.name, source.spec)
     state = history_path(root, "finance-state", "historical", source.name, source.spec)
     instruments = {}
-    with open_store(catalog, state, source.spec, source.name, historical=True) as store:
+    with open_store(catalog, state, source.spec, source.name, historical=True,
+                    source_metadata=getattr(source, "catalog_metadata", None)) as store:
         for symbol in symbols:
             instrument = source.instrument(symbol)
             cursor = history_path(state, f"{instrument}-{start}-{end}.json")

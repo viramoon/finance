@@ -8,7 +8,7 @@ use ibapi::{
     market_data::{TradingHours, historical},
 };
 use pacing::Pacer;
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, RoundingStrategy};
 use serde::Serialize;
 use std::{collections::BTreeMap, path::Path, time::Duration};
 use time::OffsetDateTime;
@@ -17,6 +17,22 @@ const MINUTE: i64 = 60;
 const NANOS: i64 = 1_000_000_000;
 const DAY: i64 = 24 * 60 * MINUTE;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Stored numeric precision for the nine USD SMART stock/ETF minute series.
+#[derive(Serialize)]
+pub struct MinuteDecimalPolicy {
+    input: &'static str,
+    price_increment: Decimal,
+    volume_increment: Decimal,
+    rounding: &'static str,
+}
+
+pub const MINUTE_DECIMAL_POLICY: MinuteDecimalPolicy = MinuteDecimalPolicy {
+    input: "ibapi-3.2.0-binary64",
+    price_increment: Decimal::from_parts(1, 0, 0, false, 4),
+    volume_increment: Decimal::from_parts(1, 0, 0, false, 8),
+    rounding: "nearest_ties_even",
+};
 
 pub struct MinuteRequest {
     symbol: String,
@@ -180,6 +196,8 @@ fn read_bars(
 
 fn closed_bars(request: &MinuteRequest, raw: Vec<historical::Bar>) -> Result<Vec<MinuteBar>> {
     let instrument = format!("{}.{}", request.symbol, request.venue);
+    let price_scale = MINUTE_DECIMAL_POLICY.price_increment.scale();
+    let volume_scale = MINUTE_DECIMAL_POLICY.volume_increment.scale();
     let mut bars = BTreeMap::new();
     for raw in raw {
         let historical::BarTimestamp::DateTime(start) = raw.date else {
@@ -193,27 +211,32 @@ fn closed_bars(request: &MinuteRequest, raw: Vec<historical::Bar>) -> Result<Vec
         if end <= request.start || end > request.end {
             continue;
         }
-        let open = decoded_decimal(raw.open)?;
-        let high = decoded_decimal(raw.high)?;
-        let low = decoded_decimal(raw.low)?;
-        let close = decoded_decimal(raw.close)?;
-        let volume = decoded_decimal(raw.volume)?;
+        let open = sdk_decimal(raw.open, price_scale)?;
+        let high = sdk_decimal(raw.high, price_scale)?;
+        let low = sdk_decimal(raw.low, price_scale)?;
+        let close = sdk_decimal(raw.close, price_scale)?;
+        let volume = sdk_decimal(raw.volume, volume_scale)?;
         if low <= Decimal::ZERO
             || low > open.min(close)
             || high < open.max(close)
             || volume < Decimal::ZERO
-            || volume >= Decimal::from(1u64 << 53)
         {
             return Err(Error::Gateway("invalid IB minute OHLCV values".into()));
+        }
+        let low = round_to_scale(low, price_scale);
+        if low.is_zero() {
+            return Err(Error::Gateway(
+                "IB minute price rounds to zero at declared precision".into(),
+            ));
         }
         let bar = MinuteBar {
             instrument: instrument.clone(),
             ts_ns: end * NANOS,
-            open: open.to_string(),
-            high: high.to_string(),
+            open: round_to_scale(open, price_scale).to_string(),
+            high: round_to_scale(high, price_scale).to_string(),
             low: low.to_string(),
-            close: close.to_string(),
-            volume: volume.to_string(),
+            close: round_to_scale(close, price_scale).to_string(),
+            volume: round_to_scale(volume, volume_scale).to_string(),
         };
         if bars.get(&end).is_some_and(|existing| existing != &bar) {
             return Err(Error::Gateway("conflicting IB minute bars".into()));
@@ -223,16 +246,27 @@ fn closed_bars(request: &MinuteRequest, raw: Vec<historical::Bar>) -> Result<Vec
     Ok(bars.into_values().collect())
 }
 
-// ibapi 3.2.0 exposes OHLC and volume as f64, including the volume which
-// is decimal text on the wire. Use the shortest round-trip representation
-// at this boundary and perform all validation and output in decimal.
-fn decoded_decimal(value: f64) -> Result<Decimal> {
+// ibapi 3.2.0 exposes OHLC and volume as f64 and does not expose the wire
+// text of volume. Decode the SDK value once through its shortest decimal
+// representation. The declared rounding and validation use Decimal only.
+fn sdk_decimal(value: f64, scale: u32) -> Result<Decimal> {
     let decimal = Decimal::from_str_exact(&value.to_string())
         .map_err(|_| Error::Gateway("unrepresentable IB minute decimal".into()))?;
-    if decimal.to_string().parse::<f64>().ok() != Some(value) {
-        return Err(Error::Gateway("IB minute decimal did not roundtrip".into()));
+    // Below 2^52 increments, spacing between binary64 values is less
+    // than one grid step. Reject magnitudes where this guarantee is lost.
+    let bound = Decimal::from_i128_with_scale(1 << 52, scale);
+    if decimal.abs() >= bound {
+        return Err(Error::Gateway(
+            "IB minute magnitude exceeds the declared binary64 precision".into(),
+        ));
     }
     Ok(decimal)
+}
+
+fn round_to_scale(value: Decimal, scale: u32) -> Decimal {
+    value
+        .round_dp_with_strategy(scale, RoundingStrategy::MidpointNearestEven)
+        .normalize()
 }
 
 #[cfg(test)]
@@ -323,6 +357,57 @@ mod tests {
             invalid.volume = volume;
             assert!(closed_bars(&request, vec![invalid]).is_err());
         }
+    }
+
+    #[test]
+    fn sdk_minute_decimals_follow_declared_increments_and_ties_to_even() {
+        let mut first = bar(START);
+        first.open = 13.12345;
+        first.high = 14.12355;
+        first.low = 12.123449;
+        first.close = 13.123451;
+        first.volume = 1000.250000015;
+        let mut second = bar(START + MINUTE);
+        second.volume = 1000.250000005;
+
+        let bars = closed_bars(&request("AAPL"), vec![first, second]).unwrap();
+        assert_eq!(bars[0].open, "13.1234");
+        assert_eq!(bars[0].high, "14.1236");
+        assert_eq!(bars[0].low, "12.1234");
+        assert_eq!(bars[0].close, "13.1235");
+        assert_eq!(bars[0].volume, "1000.25000002");
+        assert_eq!(bars[1].volume, "1000.25");
+        assert_eq!(
+            serde_json::to_value(MINUTE_DECIMAL_POLICY).unwrap(),
+            serde_json::json!({
+                "input": "ibapi-3.2.0-binary64",
+                "price_increment": "0.0001",
+                "volume_increment": "0.00000001",
+                "rounding": "nearest_ties_even",
+            })
+        );
+    }
+
+    #[test]
+    fn sdk_minute_rejects_unreliable_grid_and_invalid_rows_before_rounding() {
+        let request = request("SPY");
+        for volume in [45_035_997.0, -0.000000001] {
+            let mut invalid = bar(START);
+            invalid.volume = volume;
+            assert!(closed_bars(&request, vec![invalid]).is_err());
+        }
+        let mut invalid = bar(START);
+        invalid.high = 450_359_962_738.0;
+        assert!(closed_bars(&request, vec![invalid]).is_err());
+
+        let mut inverted = bar(START);
+        inverted.open = 13.1234;
+        inverted.low = 13.12344;
+        assert!(closed_bars(&request, vec![inverted]).is_err());
+
+        let mut zero_price = bar(START);
+        zero_price.low = 0.00004;
+        assert!(closed_bars(&request, vec![zero_price]).is_err());
     }
 
     #[test]

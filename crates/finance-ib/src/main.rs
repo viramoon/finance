@@ -1,4 +1,7 @@
-use finance_ib::{ConnectionManager, IbConfig, IbTransport, historical::MinuteRequest};
+use finance_ib::{
+    ConnectionManager, IbConfig, IbTransport,
+    historical::{MINUTE_DECIMAL_POLICY, MinuteRequest},
+};
 use std::{env, path::PathBuf, process::ExitCode, time::Instant};
 
 #[tokio::main]
@@ -15,9 +18,13 @@ async fn main() -> ExitCode {
         .as_slice()
     {
         ["probe"] => probe().await,
-        ["historical-minute", symbol, start, end] => historical_minute(symbol, start, end).await,
+        ["historical-minute", "--allow-download", symbol, start, end] => {
+            historical_minute(symbol, start, end).await
+        }
         _ => {
-            eprintln!("usage: finance-ib probe | historical-minute SYMBOL START_UNIX END_UNIX");
+            eprintln!(
+                "usage: finance-ib probe | historical-minute --allow-download SYMBOL START_UNIX END_UNIX"
+            );
             ExitCode::FAILURE
         }
     }
@@ -64,8 +71,7 @@ async fn historical_minute(symbol: &str, start: &str, end: &str) -> ExitCode {
         Ok(bars) => {
             println!(
                 "{}",
-                serde_json::to_string(&bars)
-                    .expect("historical bar strings and timestamps serialize")
+                serde_json::json!({"precision": MINUTE_DECIMAL_POLICY, "bars": bars})
             );
             ExitCode::SUCCESS
         }

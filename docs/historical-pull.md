@@ -57,8 +57,14 @@ export FERTILE_DATA_ROOT=/path/to/authorized/history-data
 | Hyperliquid / Binance K 线 | 单次窗口上限分别为 5,000 / 1,000 根。Hyperliquid 只提供最近约 5,000 根，分钟线约 3 天半，远端保留期以实际返回为准。Binance 三个标的 30 天分钟线约 132 个请求。先试一天，用请求数和实际响应耗时估算。 |
 | Binance 逐笔 | 每个标的每个可用 UTC 日获取校验和及 ZIP。下载、解压和 Parquet 时间取决于成交量与带宽，先试最近已归档的一个 UTC 日。 |
 
-IBKR 历史任务使用 [paper 连接保护](integrations/ib.md) 及 probe client ID（默认 91），须与 probe 错开。一个 Gateway 的所有 F11 请求应使用同一配置数据根，以使用同一持久 pacing 锁。与实时 collector 回补等其他历史请求错开，避免共享 Gateway 的请求额度叠加。Rust 直连入口为 `finance-ib historical-minute SYMBOL START_UNIX END_UNIX`，以 UTC 秒接收 `(START_UNIX, END_UNIX]` 的 bar 闭合时间范围并输出 JSON 数组。Linux 下使用单调时钟、启动标识和磁盘预约跨进程限速。单次历史读取限时 45 秒，请求失败后从批任务游标重跑。使用源码锁定的 ibapi 3.2.0，SDK 给出的 OHLCV 在边界一次转成可往返的十进制文本。SDK 解码前的额外量价精度无法从此接口恢复。
+IBKR 历史任务使用 [paper 连接保护](integrations/ib.md) 及 probe client ID（默认 91），须与 probe 错开。一个 Gateway 的所有 F11 请求应使用同一配置数据根，以使用同一持久 pacing 锁。与实时 collector 回补等其他历史请求错开，避免共享 Gateway 的请求额度叠加。Rust 直连入口为 `finance-ib historical-minute --allow-download SYMBOL START_UNIX END_UNIX`，以 UTC 秒接收 `(START_UNIX, END_UNIX]` 的闭合时间范围。缺少授权参数时在读取连接配置前退出。成功输出一个 JSON 对象，`precision` 是转换口径，`bars` 是闭合 bar 数组。Linux 下使用单调时钟、启动标识和磁盘预约跨进程限速。单次历史读取限时 45 秒，请求失败后从批任务游标重跑。
 
-真实 Gateway 的集成测试 `opt_in_paper_historical_minute` 默认忽略。仅在获准部署上设置 `IB_HISTORY_PAPER_TEST=1`，在 `IB_HISTORY_START_UNIX`、`IB_HISTORY_END_UNIX` 中填入已闭合且有成交的 SPY 常规交易时段，再运行 `cargo test --locked -p finance-ib --test paper opt_in_paper_historical_minute -- --ignored`。准备已登录的只读 paper Gateway 和已存在的外部 `FERTILE_DATA_ROOT`。
+真实 Gateway 的集成测试 `opt_in_paper_historical_minute` 默认忽略。仅在获准部署上设置 `IB_HISTORY_PAPER_TEST=1`，在 `IB_HISTORY_START_UNIX`、`IB_HISTORY_END_UNIX` 中填入已闭合且有成交的 SPY 常规交易时段，再运行 `cargo test --locked -p finance-ib --test paper_historical_minute opt_in_paper_historical_minute -- --ignored --exact`。准备已登录的只读 paper Gateway 和已存在的外部 `FERTILE_DATA_ROOT`。
+
+## IBKR 分钟线精度
+
+锁定的 ibapi 3.2.0 公开历史接口以 binary64 提供 OHLC 和成交量。线上 protobuf 的成交量是十进制文本，SDK 的公开历史 bar 无法取得该原文。F11 为九只 USD 美股和 ETF 声明历史存储网格，价格步长 `0.0001` USD，成交量步长 `0.00000001` 股。部署时须确认 Gateway 按股返回美股历史成交量。适配器保留该单位。场所订单最小价位另由标的定义。SDK 值经最短十进制表示进入 Decimal，按最接近网格、正中取偶舍入一次，输出十进制字符串。输入绝对值达到 `2^52` 个声明步长、非有限值或舍入到零的价格会被拒绝。该口径只覆盖 SDK 已交付的值。
+
+批任务核对 Rust 响应中的转换口径，并将其写入历史 catalog 的 `.finance-collector/source.json` 和状态目录的 `catalog.json`，字段为 `source_metadata.decimal_policy`。若曾用旧实现发布 IBKR 分钟线，请换一个配置数据根拉取。旧 catalog 可以独立读取，批任务会拒绝混写未标注或精度策略不同的 catalog。
 
 批任务没有服务端口、定时器和数据库迁移。F3 可从已封存日归档按标的和原生 ID 重放。当前只写 Parquet 和本地进度，线上流协议仍见 [行情协议](market-protocol.md)。
