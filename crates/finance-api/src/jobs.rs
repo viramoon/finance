@@ -16,7 +16,7 @@ use utoipa::ToSchema;
 const CAPACITY: i64 = 128;
 const SAMPLE_FIRST: i64 = 1704150060;
 const SAMPLE_LAST: i64 = SAMPLE_FIRST + 8 * 60;
-const FIRST_RESEARCH_DAY: NaiveDate = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+const FIRST_RESEARCH_DAY: NaiveDate = NaiveDate::from_epoch_days(0).unwrap();
 const LAST_RESEARCH_DAY: NaiveDate = NaiveDate::from_ymd_opt(2100, 12, 31).unwrap();
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]

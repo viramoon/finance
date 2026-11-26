@@ -1,3 +1,4 @@
+import csv
 from dataclasses import replace
 from decimal import Decimal, localcontext
 import json
@@ -83,9 +84,10 @@ class StrategyEvaluationTest(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "synthetic.csv"
-            source.write_text("date,open,high,low,close,volume\n" + "".join(
-                f"{day},{close},{close},{close},{close},100\n" for day, close in rows
-            ))
+            with source.open("w", encoding="utf-8", newline="") as csv_file:
+                writer = csv.writer(csv_file, lineterminator="\n")
+                writer.writerow(("date", "open", "high", "low", "close", "volume"))
+                writer.writerows((day, close, close, close, close, 100) for day, close in rows)
             catalog = root / "catalog"
             import_catalog(catalog, source, instrument=INSTRUMENT, source="Deterministic fixture",
                            kind="fixture", asset_type="stock")
