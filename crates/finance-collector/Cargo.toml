@@ -3,6 +3,7 @@ name = "finance-collector"
 version = "0.0.0"
 edition = "2024"
 publish = false
+default-run = "finance-collector"
 
 [dependencies]
 anyhow = "1"
@@ -16,8 +17,11 @@ serde_yaml = "0.9"
 tempfile = "3"
 tokio = { version = "1", features = ["macros","rt-multi-thread","signal","net","time","process","io-util","sync"] }
 finance-ib = { path = "../finance-ib" }
+finance-market-protocol = { path = "../finance-market-protocol" }
 ibapi = "=3.2.0"
 rust_decimal = "1"
+rustix = { version = "1.1", features = ["fs"] }
+sha2 = "0.10"
 time = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }

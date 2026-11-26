@@ -215,3 +215,5 @@ print(result.sample_start, result.sample_end, result.observations, result.correl
 ## 月频因子研究案例
 
 [时序因子动量](../strategies/2026-11-25-factor-momentum/README.md) 演示有符号的因子名义、月 RF 抵押和独立账本对账。该研究读取本地公开归档并复用月频覆盖规则，运行入口和数据校验见研究目录。
+
+[离线因子研究接口](../docs/factor-research.md)说明 PIT 定义和截面、带费前费后明细的评估、按版本的研究状态，以及月频动量 `research_only` 登记的只读入口。
