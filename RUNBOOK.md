@@ -48,6 +48,25 @@ FERTILE_PROFILE=cloudbox cargo run --locked -p finance-api
 
 API 接受 SIGTERM 和 Ctrl-C 优雅停止；部署守护、日志收集和滚动重启以 fertile deploy/ 为准，本 PR 不部署。默认 loopback / 8081，无账户配置和 Gateway 依赖；不能把当前 ready 当成交易 ready。
 
+## 首批读契约验收
+
+用隔离数据根或直接运行进程内 HTTP 测试。出现 `market_product_not_found` 时核对 source/product 与 F3 的落盘策略。投影位置未知时查看 `local_durable` 和 `projected` 水位，必要时在同一隔离根运行一次投影。因子列表为空时核对离线快照是否已经发布。新查询读取已有 WAL 和投影，因子使用单独的可选快照文件。[查询与错误码](docs/api.md#首批读契约)
+
+```sh
+cargo test --locked --offline -p finance-api --test read_contract --test market_read --test factor_read --test read_stream
+cargo build --locked --offline -p finance-collector --bin finance-market-wal
+FINANCE_F3_TEST_PYTHON="$FINANCE_PYTHON" FINANCE_F3_TEST_WAL_BIN="$WAL_BIN" \
+  cargo test --locked --offline -p finance-api --test market_read \
+  python_projector_index_is_readable_over_http -- --include-ignored
+FINANCE_F8_TEST_PYTHON="$FINANCE_PYTHON" \
+  cargo test --locked --offline -p finance-api --test factor_read \
+  python_factor_publication_is_read_by_rust_contract -- --include-ignored
+cargo run --locked --offline -q -p finance-api -- export-openapi > /tmp/finance.openapi.json
+cargo run --locked --offline -q -p finance-api -- export-read-stream /tmp/finance-read-stream
+```
+
+`FINANCE_PYTHON` 指向已构建 Nautilus 的 Python，`WAL_BIN` 指向刚构建的 `finance-market-wal`。联测在临时数据根用合成样本验证 Python 投影、因子发布和 Rust API 读取。生成器无需启动 API 或连接数据源。取用同一 finance 提交生成的 OpenAPI、WS/SSE schema 和合成样本供下游核对。[导出与下游更新顺序](docs/api.md#openapi-与契约)
+
 ## 离线因子研究验收
 
 在仓库根目录用含研究依赖的现有 Python 环境执行。定向测试在内存生成截面和收盘价，月频登记读取仓库内原报告并核对证据哈希。
@@ -84,6 +103,10 @@ scripts/finance-backtest-worker
 ```
 
 Replay 可单独运行。paper 模式下 probe 用 client ID 91，collector 用 92，93 预留给 trader，凭据由盒子上的 Gateway 读取。连接、补数、权限与 pacing 故障定位见 [IB 接入](docs/integrations/ib.md)，水位、精度和杀进程恢复见 [catalog](catalog/README.md)，worker 的资源限制、队列恢复及幂等请求见 [作业说明](docs/backtest-jobs.md)。部署守护从 fertile 的 runbook 进入。
+
+### 私有验证美股 L1 与 OPRA
+
+经授权后，在美股常规交易时段使用已登录的本机 paper Gateway，确认 Gateway 的 API 设置为只读。选择一份已知活跃的 SMART USD 美股期权，使用该合约的 `conId`，按 [产品权限验收](docs/integrations/ib.md#美股-l1-和-opra-权限验收) 运行 `scripts/check-ib-entitlements.sh`。权限探针占用现有 probe client ID 91，逐标的开一条流并在进入下一项前取消。`pending` 保留具体原因。遇到 `gateway_disconnected` 时，先恢复只读 paper 会话再重新运行探针。遇到 `cancel_failed` 时，本轮行数回收结果未知，探针关闭连接并保留已完成标的的证据。发现休市、无回调或报价不完整时，于常规交易时段复测。探针只输出脱敏摘要，原始行情和账户资料留在私有环境。
 
 ### F1 行情 WAL 与投影
 

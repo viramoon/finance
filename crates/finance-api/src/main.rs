@@ -1,5 +1,12 @@
-use finance_api::{ApiDoc, AppState, config::Settings, router};
-use std::{collections::BTreeMap, error::Error, net::Ipv4Addr, path::PathBuf};
+use finance_api::{ApiDoc, AppState, config::Settings, read_stream, router};
+use finance_market_protocol::{SchemaVersion, schema_export::close_event_envelopes};
+use serde_json::{Value, json};
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    net::Ipv4Addr,
+    path::{Path, PathBuf},
+};
 use utoipa::OpenApi;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -15,8 +22,36 @@ async fn main() -> Result<(), Box<dyn Error>> {
         {
             spec.info.license = None;
         }
-        println!("{}", spec.to_pretty_json()?);
+        let mut spec = serde_json::to_value(spec)?;
+        close_event_envelopes(
+            &mut spec,
+            "/components/schemas/Event",
+            "/components/schemas/MarketMessage",
+        )?;
+        // REST reads both versions from the same WAL. The common envelope and
+        // kind union alone do not express which version is valid for each kind.
+        spec.pointer_mut("/components/schemas/Event/allOf")
+            .and_then(Value::as_array_mut)
+            .ok_or("missing REST event envelope schema")?
+            .push(json!({"oneOf": [
+                {"properties": {
+                    "schema_version": {"const": SchemaVersion::V1},
+                    "kind": {"not": {"const": "perpetual_context"}}
+                }},
+                {"properties": {
+                    "schema_version": {"const": SchemaVersion::V2},
+                    "kind": {"const": "perpetual_context"},
+                    "asset_kind": {"const": "perpetual"},
+                    "revision": {"const": "0"}
+                }}
+            ]}));
+        println!("{}", serde_json::to_string_pretty(&spec)?);
         return Ok(());
+    }
+    if let [command, output] = args.as_slice()
+        && command == "export-read-stream"
+    {
+        return read_stream::export(Path::new(output));
     }
     if let [command, data_root, research_root, port] = args.as_slice()
         && command == "serve-isolated"
@@ -40,7 +75,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     if !args.is_empty() {
         return Err(
-            "usage: finance-api [export-openapi|serve-isolated DATA_ROOT RESEARCH_ROOT PORT]"
+            "usage: finance-api [export-openapi|export-read-stream DIRECTORY|serve-isolated DATA_ROOT RESEARCH_ROOT PORT]"
                 .into(),
         );
     }
