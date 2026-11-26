@@ -11,6 +11,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 import zlib
 
@@ -23,6 +24,9 @@ INSTALLER = "scripts/install-data-guard-hooks.sh"
 HOOKS = (".githooks/pre-commit", ".githooks/pre-push")
 GENERATOR = "scripts/generate_synthetic_fixtures.py"
 MARKER = b"SYNTHETIC_BODY_MUST_STAY_PRIVATE"
+
+with patch.object(sys, "path", [str(REPO), *sys.path]):
+    from scripts import data_guard
 
 
 def png():
@@ -50,6 +54,9 @@ def forbidden_examples():
         ("missing.csv", b"symbol,price\nDEMO,12.34\n" + MARKER, b"fixture-source-required"),
         ("table.md", b"time,price,volume\n2025-01-01,1.00,2\n2025-01-02,2.00,3\n" + MARKER,
          b"fixture-source-required"),
+        ("renamed-quotes.txt", b"symbol,venue,event_time,bid,ask,bid_size,ask_size\n"
+         b"DEMO,SIM,2025-01-01T00:00:00Z,11.00,11.25,2,3\n"
+         + MARKER + b",SIM,2025-01-01T00:00:01Z,11.25,11.50,2,3\n", b"fixture-source-required"),
         ("quotes.txt", b'{"bars":[{"open":"1","high":"2","low":"1","close":"2"}],"note":"'
          + MARKER + b'"}', b"fixture-source-required"),
         ("looks-like-csv.csv", b"PAR1" + MARKER + b"PAR1", b"blocked-magic"),
@@ -71,18 +78,73 @@ def forbidden_examples():
 
 class FixtureGenerationTest(unittest.TestCase):
     def test_committed_synthetic_fixtures_are_reproducible_and_registered(self):
-        sources = json.loads((REPO / SOURCES).read_bytes())["fixtures"]
+        self.verify_fixtures(REPO)
+
+    def fixture_file(self, root, name):
+        candidate = root / name
+        self.assertTrue(candidate.is_relative_to(root), "fixture path escapes its root")
+        path = root
+        for part in candidate.relative_to(root).parts:
+            path /= part
+            self.assertFalse(path.is_symlink(), "fixture path uses a symbolic link")
+        self.assertTrue(path.is_file(), "fixture or generator is missing")
+        return path
+
+    def verify_fixtures(self, repo):
+        sources = data_guard.parse_sources(self.fixture_file(repo, SOURCES).read_bytes())
+        fixtures = {path: self.fixture_file(repo, path) for path in sources}
+        generator = self.fixture_file(repo, GENERATOR)
         with tempfile.TemporaryDirectory() as directory:
-            subprocess.run([sys.executable, REPO / GENERATOR, directory],
+            subprocess.run([sys.executable, generator, directory],
                            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             output = Path(directory)
-            produced = {str(path.relative_to(output)) for path in output.rglob("*") if path.is_file()}
+            produced = {
+                path.relative_to(output).as_posix() for path in output.rglob("*")
+                if path.is_symlink() or path.is_file()
+            }
             self.assertEqual(produced, {path for path, info in sources.items() if info["generator"] == GENERATOR})
             for path, info in sources.items():
-                original = (REPO / path).read_bytes()
+                original = fixtures[path].read_bytes()
                 self.assertEqual(hashlib.sha256(original).hexdigest(), info["sha256"], path)
                 if path in produced:
-                    self.assertTrue(original == (output / path).read_bytes(), path)
+                    self.assertTrue(original == self.fixture_file(output, path).read_bytes(), path)
+
+    def assert_manifest_rejected_before_reading_fixtures(self, repo, path, error, message):
+        manifest = repo / SOURCES
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest.write_text(json.dumps({"version": 1, "fixtures": {path: {
+            "sha256": hashlib.sha256(MARKER).hexdigest(),
+            "generator": GENERATOR,
+            "seed": "fixed",
+            "source": "Synthetic fixture for the verifier regression.",
+        }}}), encoding="utf-8")
+        contents = manifest.read_bytes()
+        with patch.object(Path, "read_bytes", autospec=True, return_value=contents) as read:
+            with patch.object(subprocess, "run") as run:
+                with self.assertRaisesRegex(error, message):
+                    self.verify_fixtures(repo)
+            read.assert_called_once_with(manifest)
+            run.assert_not_called()
+
+    def test_fixture_verifier_rejects_absolute_and_parent_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "work"
+            for path in (str(repo.parent / "synthetic.csv"), "../synthetic.csv", "..\\synthetic.csv"):
+                with self.subTest(path=path):
+                    self.assert_manifest_rejected_before_reading_fixtures(
+                        repo, path, data_guard.GuardError, "^invalid-sources$"
+                    )
+
+    def test_fixture_verifier_rejects_symlink_escape(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "work"
+            repo.mkdir()
+            (root / "synthetic.csv").write_bytes(MARKER)
+            (repo / "link").symlink_to(root, target_is_directory=True)
+            self.assert_manifest_rejected_before_reading_fixtures(
+                repo, "link/synthetic.csv", AssertionError, "fixture path uses a symbolic link"
+            )
 
 
 class GitGuardTest(unittest.TestCase):
@@ -255,6 +317,21 @@ class GitGuardTest(unittest.TestCase):
         self.register(path, b"PAR1" + MARKER)
         self.stage(path, b"PAR1" + MARKER)
         self.rejected(self.check("staged", success=False), b"blocked-magic")
+
+    def test_pre_commit_requires_generator_content_to_be_staged(self):
+        fixture = "tests/fixtures/intent.csv"
+        generator = "make_fixture.py"
+        data = b"price,volume\n1.00,2\n"
+        self.stage(fixture, data)
+        self.write(generator, b'print("price,volume\\n1.00,2")\n')
+        self.register(fixture, data, generator)
+        self.git("add", "-N", generator)
+        self.rejected(self.git("commit", "-qm", "Attempt", success=False), b"fixture-source-missing")
+        self.git("add", generator)
+        self.git("commit", "-qm", "Commit the fixture with its generator")
+        self.git("rm", "--cached", generator)
+        self.git("add", "-N", generator)
+        self.rejected(self.git("commit", "-qm", "Attempt", success=False), b"fixture-source-missing")
 
     def test_missing_or_malformed_policy_is_rejected_without_details(self):
         self.stage(RULES, b'{"version":1,"version":' + MARKER + b"}")

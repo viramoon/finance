@@ -29,6 +29,8 @@ MARKET_FIELDS = (
 )
 TABLE_HEADERS = (
     {"open", "high", "low", "close"},
+    {"symbol", "bid", "ask"},
+    {"bid", "ask", "bid_size", "ask_size"},
     {"price", "volume"},
     {"symbol", "price"},
     {"timestamp", "price"},
@@ -69,21 +71,32 @@ def git(*args, optional=False):
     raise GuardError("git-read-failed")
 
 
-def read_tree(commit=None):
-    if commit is None:
-        rows = git("ls-files", "--stage", "-z")
-    else:
-        rows = git("ls-tree", "-r", "-z", commit)
+def read_tree(commit):
     tree = {}
-    for row in rows.split(b"\0")[:-1]:
+    for row in git("ls-tree", "-r", "-z", commit).split(b"\0")[:-1]:
         metadata, path = row.split(b"\t", 1)
-        if commit is None:
-            mode, oid, stage = metadata.split()
-            if stage != b"0":
-                raise GuardError("unmerged-index")
-        else:
-            mode, _, oid = metadata.split()
+        mode, _, oid = metadata.split()
         tree[os.fsdecode(path)] = Entry(mode, oid)
+    return tree
+
+
+def read_staged_tree(head, before):
+    # This diff describes the tree Git would commit, including deletions and
+    # excluding intent-to-add entries from both blob and provenance checks.
+    revision = [head] if head else []
+    diff = git("diff", "--cached", "--ita-invisible-in-index", "--ignore-submodules=none",
+               "--raw", "--no-abbrev", "--no-renames", "-z", *revision, "--")
+    fields = diff.split(b"\0")[:-1]
+    tree = before.copy()
+    for metadata, name in zip(fields[::2], fields[1::2], strict=True):
+        _, mode, _, oid, status = metadata.split()
+        if status == b"U":
+            raise GuardError("unmerged-index")
+        path = os.fsdecode(name)
+        if status == b"D":
+            del tree[path]
+        else:
+            tree[path] = Entry(mode, oid)
     return tree
 
 
@@ -113,12 +126,18 @@ def unique_object(pairs):
     return result
 
 
-def policy_file(tree, path, error):
+def policy_blob(tree, path, error):
     entry = tree.get(path)
     if not entry or entry.mode not in REGULAR_MODES or blob_size(entry) > MAX_POLICY_BYTES:
         raise GuardError(error)
+    return blob(entry)
+
+
+def parse_policy(data, error):
+    if len(data) > MAX_POLICY_BYTES:
+        raise GuardError(error)
     try:
-        value = json.loads(blob(entry).decode("utf-8"), object_pairs_hook=unique_object)
+        value = json.loads(data.decode("utf-8"), object_pairs_hook=unique_object)
     except (ValueError, RecursionError):
         raise GuardError(error) from None
     if not isinstance(value, dict) or type(value.get("version")) is not int or value["version"] != 1:
@@ -134,7 +153,7 @@ def valid_path(path):
 
 def load_rules(tree):
     error = "invalid-rules"
-    raw = policy_file(tree, RULES, error)
+    raw = parse_policy(policy_blob(tree, RULES, error), error)
     if raw.keys() != {"version", *Rules.__annotations__}:
         raise GuardError(error)
     size = raw["max_blob_bytes"]
@@ -178,10 +197,14 @@ def load_rules(tree):
 
 
 def load_sources(tree, required):
-    error = "invalid-sources"
     if SOURCES not in tree and not required:
         return {}
-    raw = policy_file(tree, SOURCES, error)
+    return parse_sources(policy_blob(tree, SOURCES, "invalid-sources"))
+
+
+def parse_sources(data):
+    error = "invalid-sources"
+    raw = parse_policy(data, error)
     if raw.keys() != {"version", "fixtures"} or not isinstance(raw["fixtures"], dict):
         raise GuardError(error)
     for path, record in raw["fixtures"].items():
@@ -346,13 +369,11 @@ def main():
 
     try:
         if args.mode == "staged":
-            tree = read_tree()
-            changed = git("diff", "--cached", "--ita-invisible-in-index",
-                          "--name-only", "--no-renames", "--diff-filter=ACMRT", "-z")
-            paths = [os.fsdecode(path) for path in changed.split(b"\0")[:-1]]
-            head = commit_id("HEAD", optional=True) if SOURCES in paths else None
+            head = commit_id("HEAD", optional=True)
             before = read_tree(head) if head else {}
-            inspect_tree(tree, before, paths, load_rules(tree), report, require_sources=True)
+            tree = read_staged_tree(head, before)
+            inspect_tree(tree, before, changed_paths(before, tree), load_rules(tree),
+                         report, require_sources=True)
         else:
             if git("rev-parse", "--is-shallow-repository").strip() != b"false":
                 raise GuardError("incomplete-history")
