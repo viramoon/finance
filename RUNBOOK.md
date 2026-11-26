@@ -93,13 +93,21 @@ mkdir -p "$FINANCE_ISOLATED_DATA"
   --port 18081 --instrument IBM.XNYS --start 2024-01-02 --end 2024-12-31
 ```
 
-运行器在环回地址启动专用 API 和 worker，通过 HTTP 提交并轮询。省略 `--port` 时自动选用高位端口。队列位于所选数据根的 `finance-state/backtests/jobs.sqlite3`。标准输出为终态作业 JSON，运行结束后 API、worker 和端口均释放。核对 `summary.research.windows` 中依序返回的 `50y`、`10y`、`5y`、`longest_sample`，并记录每行实际首尾、覆盖状态和观测数。覆盖不足时 `metrics` 为 `null`，最长样本的 `requested_years` 为 `null`。官方 HTTP 作业 Sharpe 仍使用 `rf=0`。French 和 FRED 归档供研究读取，不自动参与该作业的 Sharpe。更多进程和队列说明见 [作业手册](docs/backtest-jobs.md#隔离运行官方历史作业)。
+运行器在环回地址启动专用 API 和 worker，通过 HTTP 提交并轮询。省略 `--port` 时自动选用高位端口。队列位于所选数据根的 `finance-state/backtests/jobs.sqlite3`。标准输出为终态作业 JSON，运行结束后 API、worker 和端口均释放。核对 `summary.research.windows` 中依序返回的 `50y`、`10y`、`5y`、`longest_sample`，并记录每行实际首尾、覆盖状态和观测数。覆盖不足时 `metrics` 为 `null`，最长样本的 `requested_years` 为 `null`。更多进程和队列说明见 [作业手册](docs/backtest-jobs.md#隔离运行官方历史作业)。
+
+**官方作业不使用 FRED。** 四窗口验收无须 FRED series ID 或 Graph CSV 的 `cosd`、`coed`。本次已导入的 2024 年 `DGS10` 共 261 条，是公开历史归档示例，其区间不影响验收。Ken French 日频也无须提供，官方 Sharpe 固定使用 `rf_source="rf=0"`。本次 French 文件的观测截止日为 2026-09-30，实际写入 1970-01-02 至 2026-09-30，共 14,308 条，另丢弃 12,030 条早于 1970 年的记录。Yahoo 和 SPY 的截止日应从各自存档独立核对。
 
 ## 手工保存公开历史数据
 
 先确认 Yahoo、Ken French Data Library、FRED 及底层提供商允许所需的下载、使用和本地归档，并确认有网络访问。以下是有许可的人工步骤。CI 使用仓库内构造的小样本。下载文件存放在仓库之外。若服务端拒绝请求，检查数据许可与端点要求。
 
 从 finance 仓库根使用源码构建的 Python。示例下载 IBM 和 SPY 日线、French FF3、FF5 2x3 和动量日序列、以及 FRED 的 DGS10 日序列。若取得的是 FRED observations API JSON，可保存在本地后交给同一加载器读取。示例 Graph CSV 不需 API 密钥。
+
+Yahoo 下载入口为 `python -m fertile_finance.download_yahoo_daily --help`。其 URL 使用 `yahoo_chart_url(symbol, start, end)` 的符号和日期约定，例如 `yahoo_chart_url("SPY", date(2024, 1, 1), date(2024, 12, 31))`。CLI 的 `--symbol` 是 Yahoo 代码，`--start` 和 `--end` 为含首尾的纽约当地日期。日线请求同时包含分红、拆股和调整收盘价。
+
+默认 User-Agent 为 `fertile-finance/0.0.0 (historical daily archive)`，可通过 `--user-agent` 指定实际客户端标识。先请求 `query1.finance.yahoo.com`，遇到 HTTP 429、408、5xx 或连接失败时，下一次尝试切到同一路径的 `query2.finance.yahoo.com`，之后在两者间交替。总计最多尝试 4 次，连接与读取的 socket 超时为 15 秒。重试前按 1、2、4 秒退避，合法的 `Retry-After` 秒数或 HTTP 日期要求更久时取较长等待。累计退避等待最多 30 秒，超过预算即退出。成功报告实际使用的 URL。请指定已存在的归档目录和新文件名。
+
+连续拒绝或超过预算时，命令退出非零。保留报错中的脱敏状态码、尝试端点和 `Retry-After`、`Date` 响应头，可按供应商要求稍后再试。归档和仓库均不应保存完整错误页。使用文档列出的端点和有失败检查的命令。供应商持续拒绝时，将对应数据和验收项保持为未验证。
 
 ```sh
 export FINANCE_PYTHON=/path/to/source-built/venv/bin/python
@@ -108,23 +116,12 @@ export FERTILE_DATA_ROOT=/path/to/new/data-root
 export PYTHONPATH=python
 mkdir -p "$FINANCE_HISTORY_ARCHIVE"
 
-finance_yahoo_url=$("$FINANCE_PYTHON" - <<'PY'
-from datetime import date
-from fertile_finance.yahoo_daily import yahoo_chart_url
-
-print(yahoo_chart_url("IBM", date(2024, 1, 1), date(2024, 12, 31)))
-PY
-)
-curl --fail --location "$finance_yahoo_url" -o "$FINANCE_HISTORY_ARCHIVE/yahoo-IBM.json"
-
-finance_spy_url=$("$FINANCE_PYTHON" - <<'PY'
-from datetime import date
-from fertile_finance.yahoo_daily import yahoo_chart_url
-
-print(yahoo_chart_url("SPY", date(2024, 1, 1), date(2024, 12, 31)))
-PY
-)
-curl --fail --location "$finance_spy_url" -o "$FINANCE_HISTORY_ARCHIVE/yahoo-SPY.json"
+"$FINANCE_PYTHON" -m fertile_finance.download_yahoo_daily \
+  --symbol IBM --start 2024-01-01 --end 2024-12-31 \
+  --output "$FINANCE_HISTORY_ARCHIVE/yahoo-IBM.json"
+"$FINANCE_PYTHON" -m fertile_finance.download_yahoo_daily \
+  --symbol SPY --start 2024-01-01 --end 2024-12-31 \
+  --output "$FINANCE_HISTORY_ARCHIVE/yahoo-SPY.json"
 
 curl --fail --location 'https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_Factors_daily_CSV.zip' \
   -o "$FINANCE_HISTORY_ARCHIVE/french-factors.zip"
@@ -169,6 +166,40 @@ PY
 
 核对报告里的实际写入首尾、记录数与预 1970 丢弃范围。导入 Yahoo 时，同时核对写入的缺失行情行数 `missing_quote_rows` 和跳过的全空非会话行数 `skipped_missing_non_sessions`。读取约定见 [Python 研究接口](python/README.md#历史数据接口)。
 
+### 可选扩展 FRED 归档以对齐 SPY 样本
+
+独立研究如需将 `DGS10` 归档与旧 SPY 最长行情样本对齐，使用 `cosd=1993-01-29`（本机旧 SPY 起点约为该日），将 `coed` 设为已核实的 SPY 归档实际末日。下例用 `2024-12-31` 演示设置末日，并导入新的独立数据根。核对 FRED 元数据中的日频和百分比单位。DGS10 是美国 10 年期国债恒定期限市场收益率，按日观测，存档保留年化百分比报价。记录 FRED 实际覆盖首尾及缺值。这个选做区间不参与官方四窗口的覆盖判定或 Sharpe。
+
+```sh
+export FINANCE_FRED_FIRST_DATE=1993-01-29
+export FINANCE_SPY_LAST_SESSION=2024-12-31  # 改为核实的 SPY 归档末日
+export FINANCE_FRED_DATA_ROOT=/path/to/isolated/fred-spy-span
+export FINANCE_FRED_SPY_CSV="$FINANCE_HISTORY_ARCHIVE/fred-DGS10-spy-span.csv"
+curl --fail --location --get 'https://fred.stlouisfed.org/graph/fredgraph.csv' \
+  --data-urlencode 'id=DGS10' --data-urlencode "cosd=$FINANCE_FRED_FIRST_DATE" \
+  --data-urlencode "coed=$FINANCE_SPY_LAST_SESSION" --output "$FINANCE_FRED_SPY_CSV"
+```
+
+下载成功并核对归档后，按研究需要导入。
+
+```sh
+"$FINANCE_PYTHON" - <<'PY'
+from datetime import date
+import os
+from pathlib import Path
+
+from fertile_finance.historical_catalog import HistoricalCatalog
+from fertile_finance.research_factors import load_fred
+
+series = load_fred(Path(os.environ["FINANCE_FRED_SPY_CSV"]), series_id="DGS10")
+catalog = HistoricalCatalog(Path(os.environ["FINANCE_FRED_DATA_ROOT"]))
+start = date.fromisoformat(os.environ["FINANCE_FRED_FIRST_DATE"])
+end = date.fromisoformat(os.environ["FINANCE_SPY_LAST_SESSION"])
+print(catalog.write_fred(series, start=start, end=end))
+print("Missing DGS10 values:", sum(row.value is None for row in series.rows))
+PY
+```
+
 ### 迁移旧 SPY 数据和准备官方输入
 
 旧 SPY 迁移先对停写的旧 catalog 或备份执行 `--dry-run`，将 Yahoo 请求日期改为旧数据实际区间。核对报告后去掉 `--dry-run`，在独立数据根重导。完整命令、标的和时间抽查约定见 [历史数据目录](catalog/README.md#既有-spy-固定-2100-utc-数据)。
@@ -176,6 +207,7 @@ PY
 官方作业的输入使用 `convert_research_csv` 从 Yahoo 文件或 `HistoricalCatalog` 显式导出。保留 CSV 及其血缘报告，独立核验价格和拆股口径，再用 `research_catalog --raw-split-free-reviewed` 导入到独立研究根。命令见 [准备数据](docs/historical-backtest.md#准备数据)。
 
 ```sh
+"$FINANCE_PYTHON" -m fertile_finance.download_yahoo_daily --help
 "$FINANCE_PYTHON" -m fertile_finance.isolated_historical_job --help
 "$FINANCE_PYTHON" -B -m fertile_finance.migrate_spy --help
 "$FINANCE_PYTHON" -m fertile_finance.convert_research_csv --help

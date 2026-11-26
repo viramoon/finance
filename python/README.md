@@ -28,6 +28,7 @@ FERTILE_DATA_ROOT="$(mktemp -d)" PYTHONPATH=python \
 
 | 模块 | 用途 |
 | --- | --- |
+| `fertile_finance.download_yahoo_daily` | 将公开 Yahoo chart 日线下载到指定文件，有限退避并报告实际 URL |
 | `fertile_finance.isolated_historical_job` | 在独立数据根、研究根和环回端口上通过官方 HTTP API 执行一次作业 |
 | `fertile_finance.migrate_spy` | 核对旧 SPY 固定 21:00 UTC 时点并用本地 Yahoo 存档重导，支持 `--dry-run` |
 | `fertile_finance.convert_research_csv` | 从 Yahoo 文件或历史数据根生成官方导入 CSV，输出源 quote 血缘和 SHA-256 |
@@ -73,7 +74,7 @@ yahoo_chart_url(symbol: str, start: date, end: date) -> str
 load_yahoo_daily(path: str | Path, *, adjustment_as_of: date, pre_epoch="reject") -> YahooDaily
 ```
 
-`yahoo_chart_url` 接收含首尾的纽约当地日期，生成 `period1` 含起点、`period2` 不含终点的 `interval=1d` 请求，同时请求分红、拆股和调整收盘价。`adjustment_as_of` 是存档的观测截止日期，应覆盖文件内的行情及事件日期。
+`yahoo_chart_url` 接收 Yahoo 标的代码和含首尾的纽约当地日期，生成 `period1` 含起点、`period2` 不含终点的 `interval=1d` 请求，同时请求分红、拆股和调整收盘价。公开归档下载命令和重试策略见 [手工保存公开历史数据](../RUNBOOK.md#手工保存公开历史数据)。`adjustment_as_of` 是存档的观测截止日期，应覆盖文件内的行情及事件日期。
 
 `YahooDaily` 提供 `symbol`、`series_id`、`asset_type`、`currency`、`listing_venue`、`adjustment_as_of`、`bars`、`dividends`、`splits` 和 `dropped_pre_epoch`。行情记录包含 `session`、源 `open/high/low/close/volume`、源 `adjusted_close`、`adjustment_factor` 和 `adjustment_as_of`。`DailyBar.is_missing_quote` 标记 OHLCV 全空的行，`YahooDaily.missing_quote_rows` 统计解析后这类行的数量，包含待写入时跳过的非会话日全空行。分红提供 `session`、`source_timestamp` 和源币种 `amount`。拆股提供 `session`、`source_timestamp`、`numerator` 和 `denominator`。两类事件都提供可空的源事件键 `source_id`，时间以 Unix 秒返回。读取 catalog 后，行情还提供会话收盘时间戳。`DailyBar.adjusted()` 返回标明历史复权口径的派生记录，源调整收盘价缺失时返回 `None`，源 OHLCV 仍可读取。缺值规则、复权口径与时点限制见 [目录约定](../catalog/README.md#存储-schema-与价格口径)。
 
