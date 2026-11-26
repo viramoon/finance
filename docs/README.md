@@ -21,7 +21,7 @@
 | [frontend](https://github.com/viramoon/frontend) | React + TypeScript + Vite 单页应用；只调用 web |
 | [agent](https://github.com/viramoon/agent) | 独立的开发流程知识库；通用 skill、prompt、工作流、评估和复盘 |
 
-fertile 以 git submodule 引入 finance、web、frontend；agent 是独立仓库，不是 submodule。常驻业务服务只有 finance（trader / collector / api）和 web；frontend 构建产物由 web 托管，不单独起服务。
+fertile 以 git submodule 引入 finance、web、frontend，agent 单独维护。finance 提供可独立运行的 collector、finance-projector、回测 worker 和 API，trader 入口由后续 issue 实现。web 托管 frontend 的构建产物。进程部署由 fertile 管理。[架构与进程边界](architecture.md)
 
 - **发布**：只有 fertile 对外带版本号。发布时更新各子模块指针 → 集成检查 → bump `VERSION` → 打 `vX.Y.Z` → 由发版脚本自动生成 `RELEASES.md` 条目（包含子模块 PR / issue），并自动给子模块打内部 tag `fertile-vX.Y.Z`。子模块不对外发版。Maas · Ruler 只按 fertile tag 部署和回滚。规则唯一入口是 [fertile docs/release.md](https://github.com/viramoon/fertile/blob/main/docs/release.md)，本次只记录脚本设计。
 - **部署**：服务部署以 [fertile deploy/](https://github.com/viramoon/fertile/tree/main/deploy) 为唯一准绳。agent 的 deploy-map.yaml 只管 skill / prompt / 工作流分发，涉及服务只引用 fertile。
@@ -38,6 +38,7 @@ fertile 以 git submodule 引入 finance、web、frontend；agent 是独立仓�
 - [IBKR 接入](integrations/ib.md)
 - [HTTP 与代码导出](api.md)
 - [行情标的、事件与流协议](market-protocol.md)
+- [本地行情 WAL、投影与封段接口](market-wal.md)
 - [StrategyBundle v1 配置与编译](strategy-bundle.md)
 - [离线因子评价与研究登记](factor-research.md)
 - [技术栈决策](adr/ADR-0001-tech-stack.md)

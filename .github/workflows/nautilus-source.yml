@@ -74,6 +74,12 @@ jobs:
           grep -q '^BUILD_CACHE_HIT=true$' second-build.log
           echo "GitHub cache hit: ${{ steps.compiled.outputs.cache-hit }}" >> "$GITHUB_STEP_SUMMARY"
           grep '^BUILD_SECONDS=' first-build.log second-build.log >> "$GITHUB_STEP_SUMMARY"
+      - name: 行情 WAL 与 Parquet 投影端到端验证
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/finance-api-target
+        run: |
+          FINANCE_F3_TEST_PYTHON="$FINANCE_BUILD_ROOT/venv/bin/python" \
+            cargo test --locked -p finance-collector --test market_wal_projector -- --include-ignored
       - name: 批任务与 HTTP 端到端验证
         env:
           FERTILE_DATA_ROOT: ${{ runner.temp }}/finance-data
