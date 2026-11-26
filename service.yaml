@@ -19,6 +19,7 @@ repository_data_policy:
   docs: docs/data-guard.md
   rules: .data-guard/rules.json
   fixture_sources: .data-guard/sources.json
+  published_history: .data-guard/published.json
 dependencies:
   ib_gateway:
     host: 127.0.0.1
