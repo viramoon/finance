@@ -9,7 +9,7 @@ use std::time::Duration;
 use futures::stream::Stream;
 use futures::StreamExt;
 use log::{debug, warn};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, OnceCell};
 
 use super::common::{filter_notice, process_decode_result, DecoderContext, ProcessingResult, RoutedItem, SubscriptionItem};
 use super::StreamDecoder;
@@ -83,6 +83,8 @@ pub struct Subscription<T> {
     context: DecoderContext,
     /// Shared across clones — one `cancel()` call disables future cancel sends from any clone.
     cancelled: Arc<AtomicBool>,
+    /// Shared result so another checked call cannot mistake a failed send for success.
+    cancel_result: Arc<OnceCell<Result<(), Error>>>,
     /// Shared across clones — set once a snapshot-end sentinel is observed, so drop/cancel
     /// skips the redundant cancel for an already-completed snapshot (mirrors the sync side).
     snapshot_ended: Arc<AtomicBool>,
@@ -130,6 +132,7 @@ impl<T> Clone for Subscription<T> {
             order_id: self.order_id,
             context: self.context.clone(),
             cancelled: self.cancelled.clone(),
+            cancel_result: self.cancel_result.clone(),
             snapshot_ended: self.snapshot_ended.clone(),
             // Clone gets a fresh stream_ended — independent BroadcastStream position.
             stream_ended: AtomicBool::new(false),
@@ -166,6 +169,7 @@ impl<T> Subscription<T> {
             order_id,
             context,
             cancelled: Arc::new(AtomicBool::new(false)),
+            cancel_result: Arc::new(OnceCell::new()),
             snapshot_ended: Arc::new(AtomicBool::new(false)),
             stream_ended: AtomicBool::new(false),
             message_bus: Some(message_bus),
@@ -219,6 +223,7 @@ impl<T> Subscription<T> {
             order_id: None,
             context: DecoderContext::default(),
             cancelled: Arc::new(AtomicBool::new(false)),
+            cancel_result: Arc::new(OnceCell::new()),
             snapshot_ended: Arc::new(AtomicBool::new(false)),
             stream_ended: AtomicBool::new(false),
             message_bus: None,
@@ -419,26 +424,35 @@ impl<T: Send + 'static> Stream for Subscription<T> {
 impl<T> Subscription<T> {
     /// Cancel the subscription
     pub async fn cancel(&self) {
+        if let Err(error) = self.try_cancel().await {
+            warn!("error sending cancel message: {error}");
+        }
+    }
+
+    /// Cancel the subscription and report local encoding or write errors.
+    /// A successful write does not acknowledge cancellation at the server.
+    pub async fn try_cancel(&self) -> Result<(), Error> {
         // Snapshot subscriptions self-terminate after the snapshot-end sentinel;
         // their request is already complete, so skip the redundant cancel.
         if self.snapshot_ended.load(Ordering::Relaxed) {
-            return;
+            return Ok(());
         }
 
-        if self.cancelled.load(Ordering::Relaxed) {
-            return;
-        }
-
-        self.cancelled.store(true, Ordering::Relaxed);
-
-        if let (Some(message_bus), Some(cancel_fn)) = (&self.message_bus, &self.cancel_fn) {
-            let id = self.request_id.or(self.order_id);
-            if let Ok(message) = cancel_fn(self.context.server_version, id, Some(&self.context)) {
-                if let Err(e) = message_bus.send_message(message).await {
-                    warn!("error sending cancel message: {e}")
+        self.cancel_result
+            .get_or_init(|| async {
+                // A dropped clone or an interrupted checked send gives no write result.
+                if self.cancelled.swap(true, Ordering::Relaxed) {
+                    return Err(Error::Simple("cancellation send did not complete".into()));
                 }
-            }
-        }
+                if let (Some(message_bus), Some(cancel_fn)) = (&self.message_bus, &self.cancel_fn) {
+                    let id = self.request_id.or(self.order_id);
+                    let message = cancel_fn(self.context.server_version, id, Some(&self.context))?;
+                    message_bus.send_message(message).await?;
+                }
+                Ok(())
+            })
+            .await
+            .clone()
     }
 }
 
@@ -452,11 +466,9 @@ impl<T> Drop for Subscription<T> {
         }
 
         // Check if already cancelled
-        if self.cancelled.load(Ordering::Relaxed) {
+        if self.cancelled.swap(true, Ordering::Relaxed) {
             return;
         }
-
-        self.cancelled.store(true, Ordering::Relaxed);
 
         // Try to send cancel message if we have the necessary components
         if let (Some(message_bus), Some(cancel_fn)) = (&self.message_bus, &self.cancel_fn) {

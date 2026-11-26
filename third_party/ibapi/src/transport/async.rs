@@ -3,6 +3,9 @@
 mod io;
 pub(crate) use io::{AsyncStream, AsyncTcpSocket};
 
+#[cfg(feature = "test-support")]
+pub mod market_replay;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

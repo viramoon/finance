@@ -99,6 +99,10 @@ pub mod accounts;
 /// It manages the routing of messages between TWS and the application.
 pub mod client;
 
+/// In-memory Gateway fixtures for subscription regression tests.
+#[cfg(feature = "test-support")]
+pub use transport::r#async::market_replay as replay;
+
 pub(crate) mod transport;
 
 /// Connection management

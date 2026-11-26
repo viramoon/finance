@@ -37,6 +37,7 @@ async = [
 ]
 default = ["async"]
 sync = ["dep:crossbeam"]
+test-support = ["async"]
 utoipa = ["dep:utoipa"]
 
 [lib]

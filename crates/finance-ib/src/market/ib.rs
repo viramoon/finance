@@ -16,7 +16,7 @@ use ibapi::{
     },
     market_data::{
         MarketDataType as IbDataType,
-        realtime::{TickTypes, generic_tick},
+        realtime::{ExactTickTypes, TickTypes, generic_tick},
     },
     prelude::StreamExt,
     subscriptions::{Subscription, SubscriptionItem},
@@ -201,7 +201,7 @@ impl MarketDataSource for PaperMarket {
         if interest_right.is_some() {
             builder = builder.generic_ticks(&[generic_tick::OPTION_OPEN_INTEREST]);
         }
-        let subscription = timeout(self.timeout, builder.subscribe())
+        let subscription = timeout(self.timeout, builder.subscribe_exact())
             .await
             .map_err(|_| {
                 // The SDK may have sent the request before yielding a handle.
@@ -445,12 +445,25 @@ fn liquid_hours_row(row: &str, tz: &Tz) -> Option<Vec<LiquidHours>> {
 
 /// A single cancellable request. `request_id` is unique within the paper session.
 pub struct PaperSubscription {
-    subscription: Option<Subscription<TickTypes>>,
+    subscription: Option<Subscription<ExactTickTypes>>,
     peer: Arc<PaperPeer>,
     invalidated: Arc<AtomicBool>,
     request_id: i32,
     interest_right: Option<OptionRight>,
     pending: Option<MarketEvent>,
+}
+
+struct CancelWrite<'a> {
+    invalidated: &'a AtomicBool,
+    sent: bool,
+}
+
+impl Drop for CancelWrite<'_> {
+    fn drop(&mut self) {
+        if !self.sent {
+            self.invalidated.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 #[async_trait]
@@ -499,11 +512,15 @@ impl MarketSubscription for PaperSubscription {
     async fn cancel(&mut self) -> Result<(), MarketError> {
         self.pending = None;
         if let Some(subscription) = self.subscription.take() {
-            // The SDK sends a cancellation but exposes no Gateway acknowledgement.
-            subscription.cancel().await;
-            check_session(&self.peer, &self.invalidated)?;
+            // A failed or interrupted write leaves the line allocation uncertain.
+            let mut write = CancelWrite {
+                invalidated: &self.invalidated,
+                sent: false,
+            };
+            subscription.try_cancel().await.map_err(transport_error)?;
+            write.sent = true;
         }
-        Ok(())
+        check_session(&self.peer, &self.invalidated)
     }
 }
 
@@ -522,49 +539,89 @@ fn nonnegative_decimal(value: f64) -> Option<DecimalText> {
     decimal(value).filter(|decimal| decimal.value() >= 0.into())
 }
 
+fn quantity(value: Option<String>) -> Option<DecimalText> {
+    let value: DecimalText = value?.try_into().ok()?;
+    (value.value() >= 0.into()).then_some(value)
+}
+
+fn generic_interest(value: f64) -> Option<DecimalText> {
+    // TickGeneric uses binary64 on the wire. Recover its exact integer when
+    // representable, without a rounded f64 display string for large counts.
+    if value >= 0.0 && value < u128::MAX as f64 && value.fract() == 0.0 {
+        return (value as u128).to_string().try_into().ok();
+    }
+    None
+}
+
 fn tick_events(
-    tick: TickTypes,
+    tick: ExactTickTypes,
     interest_right: Option<OptionRight>,
     now: DateTime<Utc>,
 ) -> (Option<MarketEvent>, Option<MarketEvent>) {
     let single = match tick {
-        TickTypes::MarketDataType(data_type) => Some(MarketEvent::DataType(match data_type {
-            IbDataType::Realtime => Some(MarketDataType::Realtime),
-            IbDataType::Frozen => Some(MarketDataType::Frozen),
-            IbDataType::Delayed => Some(MarketDataType::Delayed),
-            IbDataType::DelayedFrozen => Some(MarketDataType::DelayedFrozen),
-            IbDataType::Unknown => None,
-        })),
-        TickTypes::Price(tick) => quote_event(&tick.tick_type, tick.price, now),
-        TickTypes::Size(tick) => quote_event(&tick.tick_type, tick.size, now)
-            .or_else(|| interest_event(&tick.tick_type, tick.size, interest_right, now)),
-        TickTypes::PriceSize(tick) => {
-            let price = quote_event(&tick.price_tick_type, tick.price, now);
-            let size = quote_event(&tick.size_tick_type, tick.size, now);
+        ExactTickTypes::Other(TickTypes::MarketDataType(data_type)) => {
+            Some(MarketEvent::DataType(match data_type {
+                IbDataType::Realtime => Some(MarketDataType::Realtime),
+                IbDataType::Frozen => Some(MarketDataType::Frozen),
+                IbDataType::Delayed => Some(MarketDataType::Delayed),
+                IbDataType::DelayedFrozen => Some(MarketDataType::DelayedFrozen),
+                IbDataType::Unknown => None,
+            }))
+        }
+        ExactTickTypes::Price { tick, size } => {
+            let price = quote_event(&tick.tick_type, positive_decimal(tick.price), now);
+            let size = size
+                .and_then(|(tick_type, size)| quote_event(&tick_type, quantity(Some(size)), now));
             return if price.is_some() {
                 (price, size)
             } else {
                 (size, None)
             };
         }
-        TickTypes::Generic(tick) => {
-            interest_event(&tick.tick_type, tick.value, interest_right, now)
+        ExactTickTypes::Size { tick_type, size } => {
+            let value = quantity(size);
+            if let Some((field, delayed)) = quote_field(&tick_type) {
+                Some(MarketEvent::Quote {
+                    field,
+                    value,
+                    delayed,
+                    received_at: now,
+                })
+            } else {
+                interest_event(&tick_type, value, interest_right, now)
+            }
         }
-        TickTypes::OptionComputation(tick) => option_greeks(tick, now)
+        ExactTickTypes::Generic { tick_type, value } => interest_event(
+            &tick_type,
+            value.and_then(generic_interest),
+            interest_right,
+            now,
+        ),
+        ExactTickTypes::Other(TickTypes::OptionComputation(tick)) => option_greeks(tick, now)
             .map(Box::new)
             .map(MarketEvent::Greeks),
-        TickTypes::String(_) | TickTypes::SnapshotEnd | TickTypes::RequestParameters(_) => None,
+        ExactTickTypes::Other(_) => None,
     };
     (single, None)
 }
 
 fn quote_event(
     tick_type: &TickType,
-    value: f64,
+    value: Option<DecimalText>,
     received_at: DateTime<Utc>,
 ) -> Option<MarketEvent> {
+    let (field, delayed) = quote_field(tick_type)?;
+    Some(MarketEvent::Quote {
+        field,
+        value,
+        delayed,
+        received_at,
+    })
+}
+
+fn quote_field(tick_type: &TickType) -> Option<(QuoteField, bool)> {
     use QuoteField::*;
-    let (field, delayed) = match tick_type {
+    Some(match tick_type {
         TickType::Bid => (BidPrice, false),
         TickType::Ask => (AskPrice, false),
         TickType::Last => (LastPrice, false),
@@ -578,22 +635,12 @@ fn quote_event(
         TickType::DelayedAskSize => (AskSize, true),
         TickType::DelayedLastSize => (LastSize, true),
         _ => return None,
-    };
-    let value = match field {
-        BidPrice | AskPrice | LastPrice => positive_decimal(value),
-        BidSize | AskSize | LastSize => nonnegative_decimal(value),
-    };
-    Some(MarketEvent::Quote {
-        field,
-        value,
-        delayed,
-        received_at,
     })
 }
 
 fn interest_event(
     tick_type: &TickType,
-    value: f64,
+    value: Option<DecimalText>,
     interest_right: Option<OptionRight>,
     received_at: DateTime<Utc>,
 ) -> Option<MarketEvent> {
@@ -602,8 +649,7 @@ fn interest_event(
         (TickType::OptionCallOpenInterest, OptionRight::Call)
         | (TickType::OptionPutOpenInterest, OptionRight::Put) => Some(MarketEvent::OpenInterest {
             right,
-            // ibapi defaults a missing or malformed SDK size to zero.
-            value: positive_decimal(value).filter(|decimal| decimal.value().fract().is_zero()),
+            value: value.filter(|decimal| decimal.value().fract().is_zero()),
             received_at,
         }),
         _ => None,
@@ -641,10 +687,14 @@ fn option_greeks(tick: OptionComputation, received_at: DateTime<Utc>) -> Option<
 }
 
 #[cfg(test)]
+#[path = "replay_tests.rs"]
+mod replay_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::market::MarketSession;
-    use ibapi::market_data::realtime::{TickPriceSize, TickSize};
+    use ibapi::market_data::realtime::TickPrice;
 
     // Deterministic synthetic fixtures. Contract IDs, prices and hours are
     // hand-authored to exercise SDK mapping boundaries. No recordings or seed.
@@ -797,18 +847,23 @@ mod tests {
             (IbDataType::Unknown, None),
         ] {
             assert_eq!(
-                tick_events(TickTypes::MarketDataType(native), None, now),
+                tick_events(
+                    ExactTickTypes::Other(TickTypes::MarketDataType(native)),
+                    None,
+                    now
+                ),
                 (Some(MarketEvent::DataType(expected)), None)
             );
         }
         let (price, size) = tick_events(
-            TickTypes::PriceSize(TickPriceSize {
-                price_tick_type: TickType::DelayedBid,
-                price: 5.125,
-                size_tick_type: TickType::DelayedBidSize,
-                size: 2.25,
-                ..TickPriceSize::default()
-            }),
+            ExactTickTypes::Price {
+                tick: TickPrice {
+                    tick_type: TickType::DelayedBid,
+                    price: 5.125,
+                    ..TickPrice::default()
+                },
+                size: Some((TickType::DelayedBidSize, "2.25".into())),
+            },
             None,
             now,
         );
@@ -835,9 +890,17 @@ mod tests {
     fn option_observations_preserve_precision_and_report_missing_measurements() {
         let now = utc("2040-01-20T15:00:00Z");
         let right = Some(OptionRight::Put);
-        let size = |tick_type, size| TickTypes::Size(TickSize { tick_type, size });
+        let size = |tick_type, size: Option<&str>| ExactTickTypes::Size {
+            tick_type,
+            size: size.map(str::to_owned),
+        };
         assert_eq!(
-            tick_events(size(TickType::OptionPutOpenInterest, 123.0), right, now).0,
+            tick_events(
+                size(TickType::OptionPutOpenInterest, Some("123")),
+                right,
+                now
+            )
+            .0,
             Some(MarketEvent::OpenInterest {
                 right: OptionRight::Put,
                 value: Some("123".parse().unwrap()),
@@ -845,10 +908,14 @@ mod tests {
             })
         );
         assert_eq!(
-            tick_events(size(TickType::OptionCallOpenInterest, 123.0), right, now),
+            tick_events(
+                size(TickType::OptionCallOpenInterest, Some("123")),
+                right,
+                now
+            ),
             (None, None)
         );
-        for value in [-1.0, 0.0, 1.5, f64::NAN] {
+        for value in [Some("-1"), None, Some("1.5"), Some("NaN")] {
             assert_eq!(
                 tick_events(size(TickType::OptionPutOpenInterest, value), right, now).0,
                 Some(MarketEvent::OpenInterest {
@@ -858,6 +925,20 @@ mod tests {
                 })
             );
         }
+        assert_eq!(
+            tick_events(size(TickType::OptionPutOpenInterest, Some("0")), right, now).0,
+            Some(MarketEvent::OpenInterest {
+                right: OptionRight::Put,
+                value: Some("0".parse().unwrap()),
+                received_at: now,
+            })
+        );
+        assert_eq!(
+            generic_interest(1_000_000_000_000_000_128.0)
+                .unwrap()
+                .as_str(),
+            "1000000000000000128"
+        );
         let greeks = option_greeks(
             OptionComputation {
                 field: TickType::DelayedModelOption,

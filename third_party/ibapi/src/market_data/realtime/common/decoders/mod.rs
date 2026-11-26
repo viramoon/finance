@@ -5,6 +5,8 @@ use crate::messages::ResponseMessage;
 use crate::proto::decoders::{optional_f64, optional_string_f64, parse_f64, ts};
 use crate::Error;
 
+#[cfg(feature = "async")]
+use crate::market_data::realtime::ExactTickTypes;
 use crate::market_data::realtime::{
     Bar, BidAsk, BidAskAttribute, DepthMarketDataDescription, MarketDepth, MarketDepthL2, MidPoint, TickAttribute, TickGeneric, TickPrice,
     TickPriceSize, TickRequestParameters, TickSize, TickString, TickType, TickTypes, Trade, TradeAttribute,
@@ -65,6 +67,35 @@ pub(crate) fn decode_tick_request_parameters(message: &mut ResponseMessage) -> R
 
 pub(crate) fn decode_market_data_type(message: &mut ResponseMessage) -> Result<MarketDataType, Error> {
     decode_market_data_type_proto(message.require_proto()?)
+}
+
+#[cfg(feature = "async")]
+pub(crate) fn decode_exact_tick_price(message: &ResponseMessage) -> Result<ExactTickTypes, Error> {
+    let msg = crate::proto::TickPrice::decode(message.require_proto()?)?;
+    let tick = price_tick(&msg);
+    let size = match size_tick_type(&tick.tick_type) {
+        TickType::Unknown => None,
+        size_tick_type => msg.size.map(|size| (size_tick_type, size)),
+    };
+    Ok(ExactTickTypes::Price { tick, size })
+}
+
+#[cfg(feature = "async")]
+pub(crate) fn decode_exact_tick_size(message: &ResponseMessage) -> Result<ExactTickTypes, Error> {
+    let msg = crate::proto::TickSize::decode(message.require_proto()?)?;
+    Ok(ExactTickTypes::Size {
+        tick_type: TickType::from(msg.tick_type.unwrap_or_default()),
+        size: msg.size,
+    })
+}
+
+#[cfg(feature = "async")]
+pub(crate) fn decode_exact_tick_generic(message: &ResponseMessage) -> Result<ExactTickTypes, Error> {
+    let msg = crate::proto::TickGeneric::decode(message.require_proto()?)?;
+    Ok(ExactTickTypes::Generic {
+        tick_type: TickType::from(msg.tick_type.unwrap_or_default()),
+        value: msg.value,
+    })
 }
 
 // === Protobuf decoders ===
@@ -173,21 +204,21 @@ pub(crate) fn decode_tick_request_parameters_proto(bytes: &[u8]) -> Result<TickR
     })
 }
 
-pub(crate) fn decode_tick_price_proto(bytes: &[u8]) -> Result<TickTypes, Error> {
-    let msg = crate::proto::TickPrice::decode(bytes)?;
-
-    let tick_type = TickType::from(msg.tick_type.unwrap_or_default());
-    let price = msg.price.unwrap_or_default();
-    let size = optional_string_f64(&msg.size);
+fn price_tick(msg: &crate::proto::TickPrice) -> TickPrice {
     let attr_mask = msg.attr_mask.unwrap_or_default();
+    TickPrice {
+        tick_type: TickType::from(msg.tick_type.unwrap_or_default()),
+        price: msg.price.unwrap_or_default(),
+        attributes: TickAttribute {
+            can_auto_execute: attr_mask & 0x1 != 0,
+            past_limit: attr_mask & 0x2 != 0,
+            pre_open: attr_mask & 0x4 != 0,
+        },
+    }
+}
 
-    let attributes = TickAttribute {
-        can_auto_execute: attr_mask & 0x1 != 0,
-        past_limit: attr_mask & 0x2 != 0,
-        pre_open: attr_mask & 0x4 != 0,
-    };
-
-    let size_tick_type = match tick_type {
+fn size_tick_type(tick_type: &TickType) -> TickType {
+    match tick_type {
         TickType::Bid => TickType::BidSize,
         TickType::Ask => TickType::AskSize,
         TickType::Last => TickType::LastSize,
@@ -195,18 +226,20 @@ pub(crate) fn decode_tick_price_proto(bytes: &[u8]) -> Result<TickTypes, Error> 
         TickType::DelayedAsk => TickType::DelayedAskSize,
         TickType::DelayedLast => TickType::DelayedLastSize,
         _ => TickType::Unknown,
-    };
+    }
+}
 
-    match (size_tick_type, size) {
-        (TickType::Unknown, _) | (_, None) => Ok(TickTypes::Price(TickPrice {
-            tick_type,
-            price,
-            attributes,
-        })),
+pub(crate) fn decode_tick_price_proto(bytes: &[u8]) -> Result<TickTypes, Error> {
+    let msg = crate::proto::TickPrice::decode(bytes)?;
+    let tick = price_tick(&msg);
+    let size = optional_string_f64(&msg.size);
+
+    match (size_tick_type(&tick.tick_type), size) {
+        (TickType::Unknown, _) | (_, None) => Ok(TickTypes::Price(tick)),
         (size_tick_type, Some(size)) => Ok(TickTypes::PriceSize(TickPriceSize {
-            price_tick_type: tick_type,
-            price,
-            attributes,
+            price_tick_type: tick.tick_type,
+            price: tick.price,
+            attributes: tick.attributes,
             size_tick_type,
             size,
         })),

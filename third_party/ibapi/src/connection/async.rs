@@ -63,7 +63,7 @@ impl AsyncConnection<AsyncTcpSocket> {
         notice_sender: broadcast::Sender<Notice>,
     ) -> Result<Self, Error> {
         let socket = AsyncTcpSocket::connect(address, tcp_no_delay).await?;
-        let connection = Self::with_socket(socket, client_id, startup_callback, notice_sender);
+        let connection = Self::with_socket(socket, client_id, startup_callback, notice_sender, MessageRecorder::from_env());
         connection.establish_connection().await?;
         Ok(connection)
     }
@@ -75,6 +75,7 @@ impl<S: AsyncStream> AsyncConnection<S> {
         client_id: i32,
         startup_callback: Option<Arc<dyn Fn(StartupMessage) + Send + Sync>>,
         notice_sender: broadcast::Sender<Notice>,
+        recorder: MessageRecorder,
     ) -> Self {
         Self {
             client_id,
@@ -84,7 +85,7 @@ impl<S: AsyncStream> AsyncConnection<S> {
                 ..Default::default()
             }),
             server_version_cache: AtomicI32::new(0),
-            recorder: MessageRecorder::from_env(),
+            recorder,
             connection_handler: ConnectionHandler::default(),
             startup_callback,
             notice_sender,
@@ -97,7 +98,7 @@ impl<S: AsyncStream> AsyncConnection<S> {
     #[cfg(test)]
     pub(crate) fn stubbed(socket: S, client_id: i32) -> Self {
         let (notice_sender, _) = broadcast::channel(crate::transport::r#async::BROADCAST_CHANNEL_CAPACITY);
-        Self::with_socket(socket, client_id, None, notice_sender)
+        Self::with_socket(socket, client_id, None, notice_sender, MessageRecorder::new(false, String::new()))
     }
 
     /// Pin a post-handshake server version on a stubbed connection so
@@ -106,6 +107,14 @@ impl<S: AsyncStream> AsyncConnection<S> {
     #[cfg(test)]
     pub(crate) fn set_server_version_for_test(&self, server_version: i32) {
         self.server_version_cache.store(server_version, Ordering::Release);
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn replay(socket: S, client_id: i32, server_version: i32) -> Self {
+        let (notices, _) = broadcast::channel(crate::transport::r#async::BROADCAST_CHANNEL_CAPACITY);
+        let connection = Self::with_socket(socket, client_id, None, notices, MessageRecorder::new(false, String::new()));
+        connection.server_version_cache.store(server_version, Ordering::Release);
+        connection
     }
 
     fn handshake_context(&self) -> StartupHandshakeContext<'_> {

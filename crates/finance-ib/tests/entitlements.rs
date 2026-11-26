@@ -45,6 +45,7 @@ struct SyntheticSource {
     active: Arc<AtomicBool>,
     cancellations: Arc<AtomicUsize>,
     fault: Fault,
+    uniform_data_types: Option<[MarketDataType; 2]>,
 }
 
 struct SyntheticLine {
@@ -91,7 +92,7 @@ impl MarketDataSource for SyntheticSource {
         };
         let start = Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap();
         let end = Utc.with_ymd_and_hms(2100, 1, 1, 0, 0, 0).unwrap();
-        let interval = if symbol == "GOOGL" {
+        let interval = if symbol == "GOOGL" && self.uniform_data_types.is_none() {
             LiquidHours::Closed { start, end }
         } else {
             LiquidHours::Open { start, end }
@@ -119,23 +120,25 @@ impl MarketDataSource for SyntheticSource {
             }
         }
         assert!(!self.active.swap(true, Ordering::SeqCst));
-        let events = match symbol {
-            "SPY" => quotes(MarketDataType::Frozen),
-            "AAPL" => quotes(MarketDataType::Delayed),
-            "MSFT" => quotes(MarketDataType::DelayedFrozen),
-            "NVDA" => vec![(
+        let events = match (self.uniform_data_types, symbol) {
+            (Some([_, opra]), PRIVATE_OPTION) => quotes(opra),
+            (Some([equity, _]), _) => quotes(equity),
+            (None, "SPY") => quotes(MarketDataType::Frozen),
+            (None, "AAPL") => quotes(MarketDataType::Delayed),
+            (None, "MSFT") => quotes(MarketDataType::DelayedFrozen),
+            (None, "NVDA") => vec![(
                 Duration::ZERO,
                 MarketEvent::Notice(MarketNotice::NotEntitled),
             )],
-            "AMZN" | "GOOGL" => Vec::new(),
-            "META" => vec![
+            (None, "AMZN" | "GOOGL") => Vec::new(),
+            (None, "META") => vec![
                 (
                     Duration::ZERO,
                     MarketEvent::DataType(Some(MarketDataType::Realtime)),
                 ),
                 (Duration::ZERO, quote(QuoteField::BidPrice, BID, false)),
             ],
-            "TSLA" => {
+            (None, "TSLA") => {
                 let mut events = quotes(MarketDataType::Realtime);
                 events.push((
                     Duration::from_secs(7),
@@ -143,7 +146,7 @@ impl MarketDataSource for SyntheticSource {
                 ));
                 events
             }
-            PRIVATE_OPTION => {
+            (None, PRIVATE_OPTION) => {
                 let mut events = quotes(MarketDataType::Realtime);
                 events.extend([
                     (
@@ -180,7 +183,7 @@ impl MarketDataSource for SyntheticSource {
             active: self.active.clone(),
             cancellations: self.cancellations.clone(),
             fault: self.fault,
-            ends: symbol == "TSLA",
+            ends: self.uniform_data_types.is_none() && symbol == "TSLA",
         })
     }
 }
@@ -354,6 +357,87 @@ async fn product_probe_reports_actual_types_and_only_redacted_evidence() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn product_verdicts_report_delayed_and_delayed_frozen_quotes() {
+    let source = SyntheticSource {
+        uniform_data_types: Some([MarketDataType::Delayed, MarketDataType::DelayedFrozen]),
+        ..SyntheticSource::default()
+    };
+    let report = probe_products(
+        &source,
+        ProbeOptions {
+            opra_con_id: Some(OPRA_CON_ID),
+            equity_l1_permission_confirmed: true,
+            opra_permission_confirmed: true,
+        },
+        REQUEST_TIME,
+    )
+    .await;
+    assert_eq!(report.failure, None);
+    for (product, mode, reason) in [
+        (Product::EquityL1, 3, Reason::DelayedQuote),
+        (Product::Opra, 4, Reason::DelayedFrozenQuote),
+    ] {
+        let result = report
+            .products
+            .iter()
+            .find(|row| row.product == product)
+            .unwrap();
+        assert_eq!(result.verdict, Verdict::Delayed);
+        assert!(!result.probes.is_empty());
+        assert!(result.probes.iter().all(|probe| {
+            probe.bid_ask_valid
+                && probe.market_data_type == Some(mode)
+                && probe.verdict == Verdict::Delayed
+                && probe.reason == reason
+        }));
+    }
+    let json = serde_json::to_value(report).unwrap();
+    assert_eq!(json["products"][0]["verdict"], "delayed");
+    assert_eq!(json["products"][1]["verdict"], "delayed");
+}
+
+#[tokio::test(start_paused = true)]
+async fn realtime_quotes_require_each_products_own_permission_confirmation() {
+    for equity_confirmed in [true, false] {
+        let source = SyntheticSource {
+            uniform_data_types: Some([MarketDataType::Realtime; 2]),
+            ..SyntheticSource::default()
+        };
+        let report = probe_products(
+            &source,
+            ProbeOptions {
+                opra_con_id: Some(OPRA_CON_ID),
+                equity_l1_permission_confirmed: equity_confirmed,
+                opra_permission_confirmed: !equity_confirmed,
+            },
+            REQUEST_TIME,
+        )
+        .await;
+        assert_eq!(report.failure, None);
+        for (product, confirmed) in report
+            .products
+            .iter()
+            .zip([equity_confirmed, !equity_confirmed])
+        {
+            let (verdict, reason) = if confirmed {
+                (Verdict::Passed, Reason::RealtimeQuote)
+            } else {
+                (Verdict::Pending, Reason::PermissionUnconfirmed)
+            };
+            assert_eq!(product.account_permission_confirmed, confirmed);
+            assert_eq!(product.verdict, verdict);
+            assert!(!product.probes.is_empty());
+            assert!(product.probes.iter().all(|probe| {
+                probe.bid_ask_valid
+                    && probe.market_data_type == Some(1)
+                    && probe.verdict == verdict
+                    && probe.reason == reason
+            }));
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn realtime_callback_does_not_attest_consolidated_and_unselected_opra_is_pending() {
     let source = SyntheticSource::default();
     let report = probe_products(&source, ProbeOptions::default(), REQUEST_TIME).await;
@@ -478,6 +562,14 @@ fn entitlements_cli_redacts_configuration_failure() {
     assert_eq!(report["failure"], "invalid_configuration");
     assert_eq!(report["products"][0]["verdict"], "pending");
     assert_eq!(report["products"][1]["verdict"], "pending");
+    assert_eq!(
+        report["products"][0]["probes"][0]["reason"],
+        "invalid_configuration"
+    );
+    assert_eq!(
+        report["products"][1]["probes"][0]["reason"],
+        "option_not_selected"
+    );
 }
 
 #[test]

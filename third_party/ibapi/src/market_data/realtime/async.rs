@@ -200,10 +200,21 @@ impl Client {
         snapshot: bool,
         regulatory_snapshot: bool,
     ) -> Result<Subscription<TickTypes>, Error> {
+        self.subscribe_market_data_with_decoder(contract, generic_ticks, snapshot, regulatory_snapshot)
+            .await
+    }
+
+    pub(crate) async fn subscribe_market_data_with_decoder<T: StreamDecoder<T> + Send + 'static>(
+        &self,
+        contract: &Contract,
+        generic_ticks: &[&str],
+        snapshot: bool,
+        regulatory_snapshot: bool,
+    ) -> Result<Subscription<T>, Error> {
         let builder = self.request();
         let request = encoders::encode_request_market_data(builder.request_id(), contract, generic_ticks, snapshot, regulatory_snapshot)?;
 
-        builder.send::<TickTypes>(request).await
+        builder.send::<T>(request).await
     }
 }
 

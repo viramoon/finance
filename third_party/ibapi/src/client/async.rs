@@ -120,7 +120,7 @@ impl Client {
         Client::new(connection_metadata, message_bus)
     }
 
-    fn new(connection_metadata: ConnectionMetadata, message_bus: Arc<dyn AsyncMessageBus>) -> Result<Client, Error> {
+    pub(crate) fn new(connection_metadata: ConnectionMetadata, message_bus: Arc<dyn AsyncMessageBus>) -> Result<Client, Error> {
         let client = Client {
             server_version: connection_metadata.server_version,
             connection_time: connection_metadata.connection_time,

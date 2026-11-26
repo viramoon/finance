@@ -331,13 +331,18 @@ impl ProbeReport {
     }
 
     fn unavailable(options: ProbeOptions, reason: Reason) -> Self {
+        let opra_reason = if options.opra_con_id.is_some() {
+            reason
+        } else {
+            Reason::OptionNotSelected
+        };
         Self::new(
             options,
             EQUITIES
                 .iter()
                 .map(|equity| ProbeEvidence::pending(equity.instrument_id, reason))
                 .collect(),
-            ProbeEvidence::pending(OPRA_TARGET, reason),
+            ProbeEvidence::pending(OPRA_TARGET, opra_reason),
             Some(reason),
         )
     }
@@ -513,4 +518,83 @@ fn target_failure(
     )
     .then_some(reason);
     (evidence, stop)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::market::MarketEvent;
+
+    #[test]
+    fn synthetic_diagnostics_distinguish_pending_reasons_and_explicit_denial() {
+        for (session, callbacks, failure, verdict, reason) in [
+            (
+                MarketSession::Unknown,
+                vec![],
+                None,
+                Verdict::Pending,
+                Reason::MarketHoursUnknown,
+            ),
+            (
+                MarketSession::Open,
+                vec![MarketEvent::DataType(None)],
+                None,
+                Verdict::Pending,
+                Reason::UnknownMarketDataType,
+            ),
+            (
+                MarketSession::Open,
+                vec![MarketEvent::Notice(MarketNotice::CompetingSession)],
+                Some(Reason::StreamEnded),
+                Verdict::Pending,
+                Reason::CompetingSession,
+            ),
+            (
+                MarketSession::Open,
+                vec![MarketEvent::Notice(MarketNotice::Pacing)],
+                Some(Reason::StreamEnded),
+                Verdict::Pending,
+                Reason::Pacing,
+            ),
+            (
+                MarketSession::Open,
+                vec![],
+                Some(Reason::StreamEnded),
+                Verdict::Pending,
+                Reason::StreamEnded,
+            ),
+            (
+                MarketSession::Closed,
+                vec![],
+                Some(MarketError::NotEntitled.into()),
+                Verdict::NotEntitled,
+                Reason::NotEntitled,
+            ),
+        ] {
+            let mut observation = MarketObservation::default();
+            for callback in callbacks {
+                observation.apply(callback);
+            }
+            assert_eq!(
+                assess(true, session, &observation.evidence(), failure),
+                (verdict, reason),
+            );
+        }
+    }
+
+    #[test]
+    fn delayed_fallback_notice_prevents_realtime_pass_with_valid_quotes() {
+        // Fixed synthetic summary from a request with a type-1 callback and valid sides.
+        let evidence = MarketEvidence {
+            market_data_type: Some(MarketDataType::Realtime),
+            bid_ask_valid: true,
+            notice: Some(MarketNotice::DelayedAvailable),
+            saw_type_callback: true,
+            ..MarketEvidence::default()
+        };
+        assert_eq!(
+            assess(true, MarketSession::Open, &evidence, None),
+            (Verdict::Pending, Reason::DelayedFallbackAvailable),
+        );
+    }
 }

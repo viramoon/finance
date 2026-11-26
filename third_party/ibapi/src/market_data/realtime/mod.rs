@@ -391,6 +391,57 @@ impl StreamDecoder<TickTypes> for TickTypes {
     }
 }
 
+/// L1 updates that preserve decimal quantity strings from the wire.
+#[cfg(feature = "async")]
+#[derive(Debug)]
+pub enum ExactTickTypes {
+    /// A price and, when provided, its corresponding quantity.
+    Price {
+        /// The price update. The wire price is a double.
+        tick: TickPrice,
+        /// The size tick type and original protobuf string.
+        size: Option<(TickType, String)>,
+    },
+    /// A standalone quantity update.
+    Size {
+        /// Type of size tick (bid size, ask size, last size, etc.).
+        tick_type: TickType,
+        /// The original protobuf string, if present.
+        size: Option<String>,
+    },
+    /// A generic update with an optional wire double.
+    Generic {
+        /// Type of generic tick.
+        tick_type: TickType,
+        /// The double value, if present.
+        value: Option<f64>,
+    },
+    /// Other market data callbacks, including the actual data type.
+    Other(TickTypes),
+}
+
+#[cfg(feature = "async")]
+impl StreamDecoder<ExactTickTypes> for ExactTickTypes {
+    const RESPONSE_MESSAGE_IDS: &[IncomingMessages] = TickTypes::RESPONSE_MESSAGE_IDS;
+
+    fn decode(context: &DecoderContext, message: &mut ResponseMessage) -> Result<Self, Error> {
+        match message.message_type() {
+            IncomingMessages::TickPrice => common::decoders::decode_exact_tick_price(message),
+            IncomingMessages::TickSize => common::decoders::decode_exact_tick_size(message),
+            IncomingMessages::TickGeneric => common::decoders::decode_exact_tick_generic(message),
+            _ => TickTypes::decode(context, message).map(Self::Other),
+        }
+    }
+
+    fn cancel_message(server_version: i32, request_id: Option<i32>, context: Option<&DecoderContext>) -> Result<Vec<u8>, Error> {
+        TickTypes::cancel_message(server_version, request_id, context)
+    }
+
+    fn is_snapshot_end(&self) -> bool {
+        matches!(self, Self::Other(TickTypes::SnapshotEnd))
+    }
+}
+
 /// Price tick data.
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Default)]

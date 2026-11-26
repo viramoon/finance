@@ -1,9 +1,10 @@
 use std::time::Duration;
 
 use crate::contracts::Contract;
+#[cfg(feature = "async")]
+use crate::market_data::realtime::ExactTickTypes;
 use crate::market_data::realtime::TickTypes;
 use crate::Error;
-
 
 /// Builder for creating market data subscriptions with a fluent interface
 #[must_use = "MarketDataBuilder does nothing until you call .subscribe()"]
@@ -206,6 +207,15 @@ impl<'a> MarketDataBuilder<'a, crate::client::r#async::Client> {
 
         self.client
             .subscribe_market_data(self.contract, &generic_ticks, self.snapshot, self.regulatory_snapshot)
+            .await
+    }
+
+    /// Subscribe to market data while retaining the original decimal quantity strings.
+    pub async fn subscribe_exact(self) -> Result<crate::subscriptions::Subscription<ExactTickTypes>, Error> {
+        let generic_ticks: Vec<&str> = self.generic_ticks.iter().map(|s| s.as_str()).collect();
+
+        self.client
+            .subscribe_market_data_with_decoder(self.contract, &generic_ticks, self.snapshot, self.regulatory_snapshot)
             .await
     }
 
