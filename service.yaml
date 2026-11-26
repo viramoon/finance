@@ -14,6 +14,11 @@ paths:
   catalog: /home/box/fertile/data/catalog
   state: /home/box/fertile/data/finance-state
   logs: /home/box/fertile/logs/finance
+repository_data_policy:
+  runtime_data_outside_worktree: true
+  docs: docs/data-guard.md
+  rules: .data-guard/rules.json
+  fixture_sources: .data-guard/sources.json
 dependencies:
   ib_gateway:
     host: 127.0.0.1
