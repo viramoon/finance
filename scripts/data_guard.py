@@ -14,9 +14,11 @@ import sys
 
 RULES = ".data-guard/rules.json"
 SOURCES = ".data-guard/sources.json"
+PUBLISHED = ".data-guard/published.json"
 MAX_POLICY_BYTES = 256 * 1024
 REGULAR_MODES = {b"100644", b"100755"}
-OID = re.compile(rb"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+OID_PATTERN = r"(?:[0-9a-f]{40}|[0-9a-f]{64})"
+OID = re.compile(OID_PATTERN.encode("ascii"))
 CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 VALUE = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
 DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[T ].*)?")
@@ -60,9 +62,10 @@ class Rules:
     fixture_suffixes: tuple[str, ...]
 
 
-def git(*args, optional=False, cwd=None):
+def git(*args, optional=False, cwd=None, input=None):
     result = subprocess.run(
-        ["git", *args], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=GIT_ENV, cwd=cwd
+        ["git", *args], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        env=GIT_ENV, cwd=cwd, input=input,
     )
     if result.returncode == 0:
         return result.stdout
@@ -113,7 +116,7 @@ def staged_trees(*, cwd=None):
 
 
 def changed_paths(before, after):
-    return sorted(path for path, entry in after.items() if before.get(path) != entry)
+    return sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
 
 
 def blob_size(entry, *, cwd=None):
@@ -150,6 +153,34 @@ def parse_policy(data, error):
     if not isinstance(value, dict) or type(value.get("version")) is not int or value["version"] != 1:
         raise GuardError(error)
     return value
+
+
+def published_path(path):
+    return path == PUBLISHED or path.startswith(PUBLISHED + "/")
+
+
+def load_published(tree):
+    if not any(published_path(path) for path in tree):
+        return ()
+    error = "invalid-published"
+    raw = parse_policy(policy_blob(tree, PUBLISHED, error), error)
+    if raw.keys() != {"version", "commits"} or not isinstance(raw["commits"], dict):
+        raise GuardError(error)
+    for commit, reason in raw["commits"].items():
+        if not re.fullmatch(OID_PATTERN, commit) or not isinstance(reason, str) or not reason.strip():
+            raise GuardError(error)
+    return tuple(raw["commits"])
+
+
+def published_exclusions(tree):
+    commits = [commit.encode("ascii") for commit in load_published(tree)]
+    if not commits:
+        return []
+    objects = git("cat-file", "--batch-check=%(objectname) %(objecttype)",
+                  input=b"\n".join(commits) + b"\n").splitlines()
+    # A missing object, non-commit, or abbreviated lookup grants no exemption.
+    return [b"^" + commit for commit, obj in zip(commits, objects, strict=True)
+            if obj == commit + b" commit"]
 
 
 def valid_path(path):
@@ -313,6 +344,8 @@ def inspect_blob(path, entry, rules, source):
 
 
 def inspect_tree(tree, before, paths, rules, report, require_sources=False):
+    if any(published_path(path) for path in paths):
+        load_published(tree)  # Validate the candidate without using it to select history.
     csv.field_size_limit(rules.max_blob_bytes)
     sources = load_sources(tree, require_sources)
     for path, record in sources.items():
@@ -331,10 +364,23 @@ def inspect_tree(tree, before, paths, rules, report, require_sources=False):
                 report(reason, path)
 
 
-def inspect_range(base, tip, rules, report):
-    for line in git("rev-list", "--parents", tip, *([f"^{base}"] if base else [])).splitlines():
+def inspect_range(base, tip, report, *, trusted):
+    target = read_tree(tip)
+    rules = load_rules(target)
+    baseline = read_tree(base) if base else {}
+    inspect_tree(target, baseline, changed_paths(baseline, target), rules, report, require_sources=True)
+
+    trusted_tree = {}
+    if trusted:
+        trusted_tree = baseline if trusted == base else read_tree(trusted)
+    revisions = [tip.encode("ascii")]
+    if base:
+        revisions.append(b"^" + base.encode("ascii"))
+    revisions.extend(published_exclusions(trusted_tree))
+    history = git("rev-list", "--parents", "--stdin", input=b"\n".join(revisions) + b"\n")
+    for line in history.splitlines():
         commit, *parents = line.decode("ascii").split()
-        tree = read_tree(commit)
+        tree = target if commit == tip else read_tree(commit)
         before = read_tree(parents[0]) if parents else {}
         inspect_tree(tree, before, changed_paths(before, tree), rules, report, require_sources=commit == tip)
 
@@ -351,8 +397,7 @@ def inspect_push(remote, report):
             continue  # Ref deletion publishes no objects.
         tip = commit_id(local.decode("ascii"))
         base = commit_id(remote_oid.decode("ascii")) if remote_oid.strip(b"0") else default_base
-        rules = load_rules(read_tree(tip))
-        inspect_range(base, tip, rules, report)
+        inspect_range(base, tip, report, trusted=default_base)
 
 
 def main():
@@ -377,6 +422,7 @@ def main():
     try:
         if args.mode == "staged":
             before, tree = staged_trees()
+            load_published(before)
             inspect_tree(tree, before, changed_paths(before, tree), load_rules(tree),
                          report, require_sources=True)
         else:
@@ -384,8 +430,8 @@ def main():
                 raise GuardError("incomplete-history")
             if args.mode == "range":
                 tip = commit_id(args.tip)
-                tree = read_tree(tip)
-                inspect_range(commit_id(args.base), tip, load_rules(tree), report)
+                base = commit_id(args.base)
+                inspect_range(base, tip, report, trusted=base)
             else:
                 inspect_push(args.remote, report)
     except GuardError as error:
