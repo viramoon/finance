@@ -1,6 +1,6 @@
 # StrategyBundle v1 策略配置
 
-`StrategyBundle` 把离线研究所需的策略组件、数据与时钟、组合预算、风控和模拟执行模型固化为一份可校验、可编译为 JSON 的声明。当前引擎为 `nautilus_cash_equity`，模式为 `backtest`，范围是多头现金权益、整股和非负权重。编译出的计划供后续 F7 配置回测读取。现有 `DemoStrategy` 与 `SmaCrossover` 继续通过 [作业接口](backtest-jobs.md) 运行。
+`StrategyBundle` 把离线研究所需的策略组件、数据与时钟、组合预算、风控和模拟执行模型固化为一份可校验、可编译为 JSON 的声明。当前引擎为 `nautilus_cash_equity`，模式为 `backtest`，范围是多头现金权益、整股和非负权重。[回测作业接口](backtest-jobs.md) 接受内联配置与登记版本，也支持既有的 `DemoStrategy` 与 `SmaCrossover`。
 
 ## 格式与组件
 
@@ -125,7 +125,7 @@ spec:
 
 `B2` 从首次实际成交开始计持有会话，延迟成交会同步移动起算时刻。多个子组合各自维护虚拟子账，先各自计算目标，再按标的净额执行并分摊成本。同一标的若一个子组合退出而另一个保留，净减仓量只包含退出部分。
 
-编译计划会记录下列执行次序，供后续 F7 同一决策时刻使用。
+编译计划记录下列执行次序，配置策略在每次收盘决策与随后执行时使用。
 
 1. 冻结数据、现金和持仓快照，检查点时可用性、交易日历、数据质量和账户约束。缺失或过期输入阻止新风险。缺可信执行价时，暂存减仓意图并报告原因。
 2. 先应用全局风控、强制减仓和已有仓位退出。`same_session_reentry: false` 时禁止同一会话退出后重入。设为 `true` 时允许同会话重入，同一决策时刻的进出冲突仍按 `exit_first`。重复意图仅处理一次。
@@ -180,4 +180,4 @@ initial_cash = Decimal(plan["bundle"]["spec"]["portfolio"]["initial_cash"]["amou
 
 `spec.clock.calendar` 与标的主数据的 `calendar_id` 共用日历代码。跨契约接入时采用 1–32 位 ASCII 大写字母或数字，首位之后也允许下划线和连字符。当前示例目录只登记 `XNYS`，编译器要求股票池和日线目录的日历与决策日历一致。`metadata.id` 中的 `example.*` 是策略 ID，`spec.universe.ref` 和 `spec.data.bars` 中的 `example.*@1.0.0` 是各自目录的引用。后续解析股票池成分和日线记录时，实际标的使用 `<LOCAL>.<VENUE>`，例如 `SPY.ARCA`。标的和日历的完整规则见 [行情标的、事件与流协议](market-protocol.md)。
 
-F7 接入持久版本绑定、数据与成分的快照哈希、引擎提交、成本和运行区间，并将编译计划归入不可变 `run_manifest`。指标计算由 C4/F6 接入，因子评价由 F8 接入。
+配置回测将编译计划、点时成分和数据快照、引擎版本、成本与运行区间锁入 `run_manifest`。执行数据、归因和复验见 [配置策略作业](backtest-jobs.md#配置策略作业)。F7 通过窄接口求值收盘收益和 Wilder RSI。F6 合并后可向同一入口注入 F6 批量求值适配器，保留组件版本、闭合序列和 Decimal 合同。因子评价由 F8 接入。
