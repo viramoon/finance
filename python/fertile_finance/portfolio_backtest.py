@@ -53,12 +53,12 @@ def _native_cash(amount):
     return money
 
 
-def _cash_after_order(instrument, quantity, price, side, cash, day):
+def _cash_after_order(instrument, quantity, price, side, cash, day, commission=Decimal(0)):
     with localcontext(EXACT_RESEARCH_CONTEXT):
         description = f"{instrument.id} {day}: {quantity} shares at {price} USD"
         try:
             exact = quantity.as_decimal() * price.as_decimal()
-            projected = cash - exact if side == OrderSide.BUY else cash + exact
+            projected = (cash - exact if side == OrderSide.BUY else cash + exact) - commission
         except ArithmeticError as exc:
             raise ResearchError("native_cash_precision", f"{description}: cash arithmetic exceeds exact range") from exc
         try:
@@ -186,6 +186,7 @@ class _ExpectedFill:
     quantity: int
     parts: tuple[tuple[Quantity, Price], ...]
     cash_after: Decimal
+    commission: Decimal = Decimal(0)
     received: int = 0
 
 
@@ -346,22 +347,27 @@ class _PortfolioStrategy(Strategy):
             cash_after = self.cash
             for part_quantity, part_price in parts:
                 cash_after = _cash_after_order(instrument, part_quantity, part_price, side, cash_after, day)
-            order = self.order_factory.market(
-                quote.instrument_id, side, quantity,
-                time_in_force=TimeInForce.GTC if fixture_execution else TimeInForce.FOK,
-            )
             plan = _ExpectedFill(key, signal_day, signal_ts, day, event.ts_event, side, size, parts, cash_after)
-            self.orders[order.client_order_id] = plan
-            self.submit_order(order)
-            if plan.received != len(plan.parts):
-                raise ResearchError("execution_audit_failed", f"Expected an immediate full fill of {key} at {day}")
+            self._submit_fill(plan, quantity, TimeInForce.GTC if fixture_execution else TimeInForce.FOK)
+
+    def _submit_fill(self, plan, quantity, time_in_force=TimeInForce.FOK):
+        order = self.order_factory.market(
+            self.inputs.assets[plan.instrument_id].id, plan.side, quantity, time_in_force=time_in_force,
+        )
+        self.orders[order.client_order_id] = plan
+        self.submit_order(order)
+        if plan.received != len(plan.parts):
+            raise ResearchError(
+                "execution_audit_failed", f"Expected an immediate full fill of {plan.instrument_id} at {plan.fill_date}",
+            )
+        return order.client_order_id
 
     def on_order_filled(self, event):
         plan = self.orders.get(event.client_order_id)
         if (plan is None or plan.received >= len(plan.parts) or str(event.instrument_id) != plan.instrument_id
                 or not plan.signal_ts < plan.fill_ts == event.ts_event or plan.side != event.order_side
                 or (event.last_qty, event.last_px) != plan.parts[plan.received]
-                or event.commission.as_decimal() != 0):
+                or event.commission.as_decimal() != plan.commission):
             raise ResearchError("execution_audit_failed", "Unexpected time, size, price or fee for portfolio fill")
         if self.raw_fills is not None:
             self.raw_fills.append(event)
@@ -401,15 +407,21 @@ def _execution_parts(instrument, price, quantity, side, fixture_execution):
     return ((_FIXTURE_SIZE, price), (Quantity.from_int(int(quantity.as_decimal()) - 1), next_price))
 
 
-def _simulate(inputs, config, *, research_details=False):
+def _simulate(
+    inputs, config, *, research_details=False, strategy=None, execution_prices=None, fee_model=None,
+    quote_nonmembers=False,
+):
     engine = BacktestEngine(BacktestEngineConfig(logging=LoggingConfig(bypass_logging=True)))
-    strategy = _PortfolioStrategy(inputs, config, research_details=research_details)
+    if strategy is None:
+        strategy = _PortfolioStrategy(inputs, config, research_details=research_details)
+    if fee_model is None:
+        fee_model = PerContractFeeModel(Money.from_decimal(Decimal(0), USD))
     venue = next(iter(inputs.assets.values())).id.venue
     try:
         engine.add_venue(
             venue=venue, oms_type=OmsType.NETTING, account_type=AccountType.CASH, base_currency=USD,
             starting_balances=[_native_cash(config.initial_cash)],
-            fee_model=PerContractFeeModel(Money.from_decimal(Decimal(0), USD)),
+            fee_model=fee_model,
             bar_execution=False, trade_execution=False, use_message_queue=False,
         )
         for instrument in inputs.assets.values():
@@ -422,12 +434,15 @@ def _simulate(inputs, config, *, research_details=False):
             execution_at_close = config.fill_timing == "next_close"
             for key, bar in sorted(inputs.bars[day].items()):
                 bars_by_asset[key].append(bar)
-                if key in inputs.members[day] and (bar.volume.raw > 0 or inputs.fixture_zero_volume):
+                if (quote_nonmembers or key in inputs.members[day]) and (
+                    bar.volume.raw > 0 or inputs.fixture_zero_volume
+                ):
                     when = close if execution_at_close else opening
                     price = bar.close if execution_at_close else bar.open
+                    bid, ask = execution_prices(price) if execution_prices is not None else (price, price)
                     size = _QUOTE_SIZE if bar.volume.raw > 0 else _FIXTURE_SIZE
                     quotes_by_asset[key].append(QuoteTick(
-                        inputs.assets[key].id, price, price, size, size, when, when,
+                        inputs.assets[key].id, bid, ask, size, size, when, when,
                     ))
             if not execution_at_close:
                 clocks.append(CustomData(_SESSION_EVENT, _SessionEvent(day, opening, closing=False)))
@@ -467,7 +482,9 @@ def _performance(equity, closes, fills, rf, *, carried_valuation_dates):
     turnover = dict.fromkeys(closes, Decimal(0))
     with localcontext(RESEARCH_CONTEXT):
         for fill in fills:
-            turnover[fill.fill_date] += fill.notional / equity[fill.signal_date]
+            signal_equity = equity[fill.signal_date]
+            if signal_equity is not None:
+                turnover[fill.fill_date] += fill.notional / signal_equity
         windows = coverage_windows(
             observed, next(reversed(closes)), rf=aligned_rf, rf_source=rf.source if rf is not None else None,
             turnover=turnover, longest_through_end=True,

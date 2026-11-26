@@ -86,6 +86,10 @@ processes:
     working_directory: finance
     dependencies: [data_root, nautilus_source_wheel]
     queue: finance-state/backtests/jobs.sqlite3
+    strategy_bundle:
+      replay_inputs: finance-state/backtests/strategy-inputs
+      pinned_inputs: strategy_backtest_snapshots
+      mode: offline_backtest
     health: 监测 worker 进程和最近作业的终态
     restart_policy: fertile deploy/
   - name: api
