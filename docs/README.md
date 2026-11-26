@@ -36,6 +36,7 @@ fertile 以 git submodule 引入 finance、web、frontend，agent 单独维护�
 - [Nautilus 使用与升级](nautilus.md)
 - [连接恢复与熔断](connectivity.md)
 - [IBKR 接入](integrations/ib.md)
+- [Hyperliquid 公共永续行情](integrations/hyperliquid.md)
 - [HTTP 与代码导出](api.md)
 - [行情标的、事件与流协议](market-protocol.md)
 - [本地行情 WAL、投影与封段接口](market-wal.md)
@@ -51,3 +52,4 @@ fertile 以 git submodule 引入 finance、web、frontend，agent 单独维护�
 - [源码构建与官方回测](build.md)
 - [源码 submodule 决策](adr/ADR-0003-nautilus-source-submodule.md)
 - [Yahoo 拆股归一化日线准入](adr/ADR-0004-yahoo-split-normalized-research.md)
+- [永续上下文流版本](adr/ADR-0034-hyperliquid-context-stream.md)
