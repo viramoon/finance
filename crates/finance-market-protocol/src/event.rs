@@ -1,11 +1,15 @@
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::value::RawValue;
 use utoipa::ToSchema;
 
 use crate::{
-    AssetKind, Capability, DecimalText, Instrument, InstrumentId, MarketKind, NonEmptyText,
-    SchemaVersion, Token, U64Text, ValidationError, Venue, decode_tagged_object,
-    instrument::validate_venue, require, required_nullable, wire_enum, wire_object,
+    AssetKind, Capability, DecimalText, DecodeError, ErrorKind, Instrument, InstrumentId,
+    MarketKind, NonEmptyText, SchemaVersion, Token, U64Text, ValidationError, Venue,
+    decode_tagged_object,
+    diagnostics::{Object, decode_at},
+    instrument::validate_venue,
+    require, required_nullable, wire_enum, wire_object,
 };
 
 wire_enum! {
@@ -147,7 +151,59 @@ pub enum Message {
     Status(Status),
 }
 
-wire_object! {
+// Generate the wire fields once for the normal Serde type and for the decoder
+// that locates errors. The latter defers the tagged payload regardless of the
+// order of JSON keys and reuses its existing typed payload deserializer.
+macro_rules! event_record {
+    (
+        $(#[$attr:meta])*
+        pub struct Event {
+            $(
+                $(#[serde($($serde:tt)*)])?
+                $(#[schema($($schema:tt)*)])?
+                pub $field:ident: $ty:ty,
+            )*
+        }
+    ) => {
+        wire_object! {
+            $(#[$attr])*
+            pub struct Event {
+                $(
+                    $(#[serde($($serde)*)])?
+                    $(#[schema($($schema)*)])?
+                    pub $field: $ty,
+                )*
+                #[serde(flatten)]
+                pub message: Message,
+            }
+            validate = validate;
+            decode = decode_tagged_object;
+        }
+
+        impl Event {
+            pub(crate) fn decode_record(text: &str) -> Result<Self, DecodeError> {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Wire<'a> {
+                    $(
+                        $(#[serde($($serde)*)])?
+                        $field: $ty,
+                    )*
+                    kind: String,
+                    #[serde(borrow)]
+                    payload: &'a RawValue,
+                }
+                let Object(Wire { $($field,)* kind, payload }) = decode_at(text, "")?;
+                let message = Message::decode_payload(&kind, payload.get())?;
+                let event = Self { $($field,)* message };
+                event.validate()?;
+                Ok(event)
+            }
+        }
+    };
+}
+
+event_record! {
     /// One event and its position in an instrument stream.
     pub struct Event {
         pub schema_version: SchemaVersion,
@@ -174,11 +230,7 @@ wire_object! {
         )]
         #[schema(value_type = NonEmptyText, required = false)]
         pub native_id: Option<NonEmptyText>,
-        #[serde(flatten)]
-        pub message: Message,
     }
-    validate = validate;
-    decode = decode_tagged_object;
 }
 
 fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -301,11 +353,13 @@ impl Event {
 
     /// Compare two validated events in the same stream to detect gaps and resets.
     pub fn validate_successor(&self, previous: &Self) -> Result<(), ValidationError> {
-        require(
-            self.stream_key() == previous.stream_key(),
-            "stream",
-            "cannot compare positions from different streams",
-        )?;
+        if self.stream_key() != previous.stream_key() {
+            return Err(ValidationError::at_root(
+                "stream",
+                ErrorKind::ConstraintViolation,
+                "cannot compare positions from different streams",
+            ));
+        }
         let is_reset = matches!(self.message, Message::Reset(_));
         if self.epoch != previous.epoch || is_reset {
             require(
@@ -330,7 +384,80 @@ impl Event {
     }
 }
 
+impl MarketMessage {
+    fn decode_payload(kind: &str, payload: &str, scope: &str) -> Result<Self, DecodeError> {
+        let path = format!("{scope}/payload");
+        match kind {
+            "bar_closed" => decode_at(payload, &path).map(Self::BarClosed),
+            "trade" => decode_at(payload, &path).map(Self::Trade),
+            "snapshot" => decode_at(payload, &path).map(Self::Snapshot),
+            "delta" => decode_at(payload, &path).map(Self::Delta),
+            _ => Err(DecodeError {
+                path: format!("{scope}/kind"),
+                kind: ErrorKind::InvalidValue,
+                reason: format!("unknown message kind {kind:?}"),
+            }),
+        }
+    }
+}
+
+impl From<MarketMessage> for Message {
+    fn from(message: MarketMessage) -> Self {
+        match message {
+            MarketMessage::BarClosed(bar) => Self::BarClosed(bar),
+            MarketMessage::Trade(trade) => Self::Trade(trade),
+            MarketMessage::Snapshot(snapshot) => Self::Snapshot(snapshot),
+            MarketMessage::Delta(delta) => Self::Delta(delta),
+        }
+    }
+}
+
+impl Correction {
+    fn decode_payload(payload: &str) -> Result<Self, DecodeError> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Tagged<'a> {
+            kind: String,
+            #[serde(borrow)]
+            payload: &'a RawValue,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire<'a> {
+            target_epoch: U64Text,
+            target_seq: U64Text,
+            #[serde(borrow)]
+            replacement: Object<Tagged<'a>>,
+        }
+        let Object(Wire {
+            target_epoch,
+            target_seq,
+            replacement: Object(replacement),
+        }) = decode_at(payload, "/payload")?;
+        Ok(Self {
+            target_epoch,
+            target_seq,
+            replacement: MarketMessage::decode_payload(
+                &replacement.kind,
+                replacement.payload.get(),
+                "/payload/replacement",
+            )?,
+        })
+    }
+}
+
 impl Message {
+    fn decode_payload(kind: &str, payload: &str) -> Result<Self, DecodeError> {
+        match kind {
+            "correction" => Correction::decode_payload(payload).map(Self::Correction),
+            "gap" => decode_at(payload, "/payload").map(Self::Gap),
+            "reset" => decode_at(payload, "/payload").map(Self::Reset),
+            "heartbeat" => decode_at(payload, "/payload").map(Self::Heartbeat),
+            "status" => decode_at(payload, "/payload").map(Self::Status),
+            _ => MarketMessage::decode_payload(kind, payload, "").map(Self::from),
+        }
+    }
+
     fn market_payload(&self) -> Option<MarketPayload<'_>> {
         match self {
             Self::BarClosed(bar) => Some(MarketPayload::BarClosed(bar)),

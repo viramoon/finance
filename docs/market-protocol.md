@@ -83,8 +83,21 @@ cargo test --locked -p finance-market-protocol
 PYTHONPATH=python python -m unittest discover -s tests -p test_market_protocol.py -v
 ```
 
-Rust 消费者用 `serde_json::from_str::<T>` 读取 `finance_market_protocol` 的 `Instrument`、`Capability` 或 `Event`。Python 消费者用 `fertile_finance.market_protocol` 的同名类型及 `from_json`。读取事件后调用 `validate_against(instrument, capability)` 校验元数据和步进，再用 `validate_successor(previous)` 核对已有流位置。
-
 读取端按完整 `schema_version` 选择 schema，拒绝未知版本、未知字段、未知种类和缺少必填字段。任意增删字段或种类、缩窄值域、改变单位或事件语义都需要显式协商并以新的主版本发布，旧 schema 和样本保留给旧读者。只修订文档或更正生成物中与既定 v1.0 规则不一致的部分时保留原协议版本。协议版本独立于代码包版本和 fertile 发布版本。
 
 跨仓消费方应从同一个 finance 提交取 schema 和样本，并在自身测试中核对识别的版本、消息分支以及精确字段。finance → web → frontend 的 HTTP OpenAPI 指针继续按原有流程更新。
+
+## 解码与错误定位
+
+Rust 使用 `finance_market_protocol::decode_json::<T>(input)`，其中 `T` 为 `Instrument`、`Capability` 或 `Event`。通过错误的 `path()` 和 `kind().as_str()` 读取诊断。Python 使用 `fertile_finance.market_protocol` 的同名类型及 `from_json(input)`，通过 `ProtocolError.path` 和 `ProtocolError.kind` 读取诊断。
+
+路径使用相对于所读对象的 JSON Pointer，数组下标从零开始。语法错误等定位到整个输入的情况使用空路径。调用方可按错误种类分支，并用可读错误消息显示原因。
+
+| 输入问题 | 路径 | 错误种类 |
+| --- | --- | --- |
+| 逐笔价格为 `"6.6312e2"` | `/payload/price` | `invalid_decimal` |
+| 逐笔数量为 JSON 数字 | `/payload/quantity` | `invalid_type` |
+| 序号为 `"18446744073709551616"` | `/seq` | `out_of_range` |
+| 更正的盘口替换中第一档价格非法 | `/payload/replacement/payload/bids/0/price` | `invalid_decimal` |
+
+结构错误种类包括 `missing_field`、`unknown_field`、`duplicate_field` 和 `invalid_json`。非规范的无符号整数字符串报告 `invalid_integer`，未知枚举值等报告 `invalid_value`。读取事件后调用 `validate_against(instrument, capability)` 校验元数据和步进，再用 `validate_successor(previous)` 核对已有流位置。此类语义约束错误报告 `constraint_violation`。

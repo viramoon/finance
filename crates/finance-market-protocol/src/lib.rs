@@ -2,10 +2,12 @@
 //!
 //! The wire contract is independent of collector runtime and Nautilus types.
 
+mod diagnostics;
 mod event;
 mod instrument;
 mod scalar;
 
+pub use diagnostics::{DecodeError, ErrorKind, ProtocolJson, decode_json};
 pub use event::*;
 pub use instrument::*;
 pub use scalar::*;
@@ -18,13 +20,33 @@ use serde::{Deserialize, Deserializer};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationError {
     field: String,
+    path: String,
+    kind: ErrorKind,
     reason: &'static str,
 }
 
 impl ValidationError {
     fn new(field: impl Into<String>, reason: &'static str) -> Self {
+        let field = field.into();
+        let mut path = String::new();
+        if !field.is_empty() {
+            for segment in field.split('.') {
+                diagnostics::push_segment(&mut path, segment);
+            }
+        }
         Self {
-            field: field.into(),
+            field,
+            path,
+            kind: ErrorKind::ConstraintViolation,
+            reason,
+        }
+    }
+
+    fn at_root(field: &'static str, kind: ErrorKind, reason: &'static str) -> Self {
+        Self {
+            field: field.to_owned(),
+            path: String::new(),
+            kind,
             reason,
         }
     }
@@ -32,6 +54,19 @@ impl ValidationError {
     /// A dotted field path, including zero-based array indexes where relevant.
     pub fn field(&self) -> &str {
         &self.field
+    }
+
+    /// RFC 6901 JSON Pointer. An empty string refers to the whole record.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn kind(&self) -> ErrorKind {
+        self.kind
+    }
+
+    pub fn reason(&self) -> &str {
+        self.reason
     }
 }
 
@@ -190,7 +225,7 @@ macro_rules! wire_object {
                 }
                 let Wire { $($field),* } = wire_object!(@decoder $($decode)?)(deserializer)?;
                 let value = Self { $($field),* };
-                $(value.$validate().map_err(serde::de::Error::custom)?;)?
+                $(value.$validate().map_err(crate::diagnostics::serde_validation_error)?;)?
                 Ok(value)
             }
         }

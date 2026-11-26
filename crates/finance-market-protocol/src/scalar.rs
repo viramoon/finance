@@ -1,7 +1,7 @@
 use std::{fmt, str::FromStr};
 
 use rust_decimal::Decimal;
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use utoipa::{
     PartialSchema, ToSchema,
     openapi::{
@@ -10,7 +10,7 @@ use utoipa::{
     },
 };
 
-use crate::{ValidationError, wire_enum};
+use crate::{ErrorKind, ValidationError, diagnostics::serde_validation_error, wire_enum};
 
 wire_enum! {
     pub enum SchemaVersion {
@@ -102,7 +102,11 @@ macro_rules! text_type {
                 if $valid(&text) {
                     Ok(Self(text))
                 } else {
-                    Err(ValidationError::new(stringify!($name), $reason))
+                    Err(ValidationError::at_root(
+                        stringify!($name),
+                        ErrorKind::InvalidValue,
+                        $reason,
+                    ))
                 }
             }
         }
@@ -110,7 +114,7 @@ macro_rules! text_type {
         impl<'de> Deserialize<'de> for $name {
             fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
                 let text = String::deserialize(deserializer)?;
-                text.try_into().map_err(D::Error::custom)
+                text.try_into().map_err(serde_validation_error)
             }
         }
 
@@ -235,14 +239,19 @@ impl TryFrom<String> for DecimalText {
             || (digits.contains('.') && fraction.is_empty())
             || !fraction.bytes().all(|byte| byte.is_ascii_digit())
         {
-            return Err(ValidationError::new(
+            return Err(ValidationError::at_root(
                 "DecimalText",
+                ErrorKind::InvalidDecimal,
                 "expected plain decimal text with at most 28 digits and no exponent",
             ));
         }
 
         let value = Decimal::from_str_exact(&text).map_err(|_| {
-            ValidationError::new("DecimalText", "decimal cannot be represented exactly")
+            ValidationError::at_root(
+                "DecimalText",
+                ErrorKind::InvalidDecimal,
+                "decimal cannot be represented exactly",
+            )
         })?;
         Ok(Self { text, value })
     }
@@ -259,7 +268,7 @@ impl FromStr for DecimalText {
 impl<'de> Deserialize<'de> for DecimalText {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let text = String::deserialize(deserializer)?;
-        text.try_into().map_err(D::Error::custom)
+        text.try_into().map_err(serde_validation_error)
     }
 }
 
@@ -298,21 +307,26 @@ impl FromStr for U64Text {
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         if !canonical_digits(text) {
-            return Err(ValidationError::new(
+            return Err(ValidationError::at_root(
                 "U64Text",
+                ErrorKind::InvalidInteger,
                 "expected canonical unsigned integer text",
             ));
         }
-        text.parse::<u64>()
-            .map(Self)
-            .map_err(|_| ValidationError::new("U64Text", "value exceeds unsigned 64-bit range"))
+        text.parse::<u64>().map(Self).map_err(|_| {
+            ValidationError::at_root(
+                "U64Text",
+                ErrorKind::OutOfRange,
+                "value exceeds unsigned 64-bit range",
+            )
+        })
     }
 }
 
 impl<'de> Deserialize<'de> for U64Text {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let text = String::deserialize(deserializer)?;
-        text.parse().map_err(D::Error::custom)
+        text.parse().map_err(serde_validation_error)
     }
 }
 
