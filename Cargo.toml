@@ -5,4 +5,8 @@ members = [
     "crates/finance-collector",
     "crates/finance-market-protocol",
 ]
+exclude = ["third_party/ibapi"]
 resolver = "2"
+
+[patch.crates-io]
+ibapi = { path = "third_party/ibapi" }

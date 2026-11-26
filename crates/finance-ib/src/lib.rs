@@ -1,4 +1,6 @@
 pub mod config;
+pub mod entitlements;
+pub mod market;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 pub use config::IbConfig;
@@ -20,6 +22,8 @@ pub enum Error {
     Timeout(&'static str),
     #[error("gateway: {0}")]
     Gateway(String),
+    #[error("gateway disconnected: {0}")]
+    Disconnected(String),
     #[error("recovery: {0}")]
     Recovery(String),
 }
@@ -52,38 +56,138 @@ pub trait Session: Send + Sync + 'static {
     }
     async fn close(&self);
 }
+/// The Gateway handle exposes only the read operations used by finance.
+///
+/// ```compile_fail
+/// fn raw_client(peer: &finance_ib::PaperPeer) {
+///     let _ = &peer.client;
+/// }
+/// ```
 pub struct PaperPeer {
-    pub client: Client,
+    client: Client,
     notices: tokio::sync::Mutex<ibapi::subscriptions::NoticeStream>,
+    invalidated: watch::Sender<bool>,
+}
+impl PaperPeer {
+    fn new(client: Client, notices: ibapi::subscriptions::NoticeStream) -> Self {
+        Self {
+            client,
+            notices: tokio::sync::Mutex::new(notices),
+            invalidated: watch::Sender::new(false),
+        }
+    }
+
+    fn invalidate(&self) {
+        self.invalidated.send_replace(true);
+    }
+
+    fn is_active(&self) -> bool {
+        if *self.invalidated.borrow() {
+            return false;
+        }
+        if self.client.is_connected() {
+            return true;
+        }
+        self.invalidate();
+        false
+    }
+
+    fn checked_reply<T>(&self, reply: std::result::Result<T, ibapi::Error>) -> Result<T> {
+        // SDK one-shot helpers can yield buffered data (or an empty account
+        // list) after the dispatcher has already torn down the connection.
+        if self.is_active() {
+            reply.map_err(Error::from)
+        } else {
+            Err(Error::Disconnected(
+                "connection closed during request".into(),
+            ))
+        }
+    }
+
+    pub fn historical_data<'a>(
+        &'a self,
+        contract: &'a ibapi::contracts::Contract,
+        bar_size: ibapi::market_data::historical::BarSize,
+    ) -> ibapi::market_data::historical::HistoricalDataBuilder<'a, Client> {
+        self.client.historical_data(contract, bar_size)
+    }
+
+    pub async fn switch_market_data_type(
+        &self,
+        mode: ibapi::market_data::MarketDataType,
+    ) -> std::result::Result<(), ibapi::Error> {
+        self.client.switch_market_data_type(mode).await
+    }
 }
 pub fn invalidates_market_session(code: i32) -> bool {
     matches!(code, 1100 | 1101 | 1102 | 1300 | 2103 | 2105 | 2110)
 }
+
+fn is_disconnect(error: &ibapi::Error) -> bool {
+    use ibapi::Error as SdkError;
+    error.is_connection_lost()
+        || matches!(error, SdkError::Io(io) if io.kind() == std::io::ErrorKind::NotConnected)
+        || matches!(
+            error,
+            SdkError::ConnectionFailed
+                | SdkError::ConnectionRejected(_)
+                | SdkError::EndOfStream
+                | SdkError::UnexpectedEndOfStream
+                | SdkError::Shutdown
+        )
+        || matches!(error, SdkError::Notice(notice) if invalidates_market_session(notice.code))
+}
+
+impl From<ibapi::Error> for Error {
+    fn from(error: ibapi::Error) -> Self {
+        match error {
+            ibapi::Error::Notice(notice) if invalidates_market_session(notice.code) => {
+                Self::Disconnected(format!("IB connectivity notice {}", notice.code))
+            }
+            error if is_disconnect(&error) => Self::Disconnected(error.to_string()),
+            error => Self::Gateway(error.to_string()),
+        }
+    }
+}
+
 #[async_trait]
 impl Session for PaperPeer {
     async fn accounts(&self) -> Result<Vec<String>> {
-        self.client
-            .managed_accounts()
-            .await
-            .map_err(|e| Error::Gateway(e.to_string()))
+        self.checked_reply(self.client.managed_accounts().await)
     }
     async fn server_time(&self) -> Result<i64> {
-        self.client
-            .server_time()
-            .await
+        self.checked_reply(self.client.server_time().await)
             .map(|d| d.unix_timestamp())
-            .map_err(|e| Error::Gateway(e.to_string()))
     }
     async fn disconnected(&self) -> Error {
-        let mut notices = self.notices.lock().await;
-        while let Some(notice) = notices.next().await {
-            if invalidates_market_session(notice.code) {
-                return Error::Gateway(format!("IB connectivity notice {}", notice.code));
+        let mut invalidated = self.invalidated.subscribe();
+        let notice = async {
+            let mut notices = self.notices.lock().await;
+            while let Some(notice) = notices.next().await {
+                if invalidates_market_session(notice.code) {
+                    return format!("IB connectivity notice {}", notice.code);
+                }
             }
-        }
-        Error::Gateway("IB notice stream ended".into())
+            "IB notice stream ended".into()
+        };
+        let socket = async {
+            while self.client.is_connected() {
+                sleep(Duration::from_millis(100)).await;
+            }
+        };
+        let reason = tokio::select! {
+            biased;
+            _ = invalidated.wait_for(|closed| *closed) => {
+                return Error::Disconnected("session closed".into());
+            }
+            reason = notice => reason,
+            _ = socket => "socket closed".into(),
+        };
+        self.invalidate();
+        Error::Disconnected(reason)
     }
     async fn close(&self) {
+        self.invalidate();
         self.client.disconnect().await
     }
 }
@@ -93,20 +197,26 @@ pub trait Transport: Send + Sync {
     async fn connect(&self, address: &str, id: i32) -> Result<Self::S>;
 }
 pub struct IbTransport;
+impl IbTransport {
+    fn paper_client_builder() -> ibapi::ClientBuilder {
+        // ConnectionManager verifies an account on each new connection. The
+        // SDK must never silently replace the socket behind that verification.
+        Client::builder()
+            .auto_reconnect(false)
+            .disconnect_on_notice(invalidates_market_session)
+    }
+}
 #[async_trait]
 impl Transport for IbTransport {
     type S = PaperPeer;
     async fn connect(&self, address: &str, id: i32) -> Result<PaperPeer> {
-        let (client, notices) = Client::builder()
+        let (client, notices) = Self::paper_client_builder()
             .address(address)
             .client_id(id)
             .connect_with_notice_stream()
             .await
-            .map_err(|e| Error::Gateway(e.to_string()))?;
-        Ok(PaperPeer {
-            client,
-            notices: tokio::sync::Mutex::new(notices),
-        })
+            .map_err(Error::from)?;
+        Ok(PaperPeer::new(client, notices))
     }
 }
 
@@ -129,6 +239,46 @@ pub struct ConnectionManager<T: Transport> {
     config: IbConfig,
     transport: T,
     status: watch::Sender<ConnectionStatus>,
+}
+impl ConnectionManager<IbTransport> {
+    /// Open a dedicated market-client session on the configured probe client ID.
+    pub async fn open_market(
+        &self,
+    ) -> std::result::Result<market::PaperMarket, market::MarketError> {
+        // The SDK would otherwise record raw handshake and market frames.
+        if std::env::var_os("IBAPI_RECORDING_DIR").is_some_and(|path| !path.is_empty()) {
+            return Err(market::MarketError::InvalidConfiguration);
+        }
+        self.open_verified_market().await
+    }
+}
+impl<T: Transport<S = PaperPeer>> ConnectionManager<T> {
+    async fn open_verified_market(
+        &self,
+    ) -> std::result::Result<market::PaperMarket, market::MarketError> {
+        let (peer, _) = self
+            .open(self.config.probe_client_id)
+            .await
+            .map_err(|e| match e {
+                Error::UnsafeAccount => market::MarketError::UnsafeAccount,
+                Error::Config(_) => market::MarketError::InvalidConfiguration,
+                Error::Timeout(_) => market::MarketError::Timeout,
+                Error::Disconnected(_) => market::MarketError::Disconnected,
+                _ => market::MarketError::Transport,
+            })?;
+        match market::PaperMarket::new(
+            peer.clone(),
+            Duration::from_millis(self.config.read_timeout_ms),
+        )
+        .await
+        {
+            Ok(market) => Ok(market),
+            Err(error) => {
+                peer.close().await;
+                Err(error)
+            }
+        }
+    }
 }
 impl<T: Transport> ConnectionManager<T> {
     pub fn new(config: IbConfig, transport: T) -> Result<Self> {
@@ -161,10 +311,12 @@ impl<T: Transport> ConnectionManager<T> {
                 .await
                 .map_err(|_| Error::Timeout("connect"))??,
         );
-        let accounts = tokio::time::timeout_at(deadline, session.accounts())
-            .await
-            .map_err(|_| Error::Timeout("managed_accounts"))
-            .and_then(|a| a);
+        let accounts = tokio::select! {
+            biased;
+            error = session.disconnected() => Err(error),
+            result = tokio::time::timeout_at(deadline, session.accounts()) =>
+                result.unwrap_or(Err(Error::Timeout("managed_accounts"))),
+        };
         match accounts {
             Ok(accounts)
                 if !accounts.is_empty()
@@ -189,17 +341,16 @@ impl<T: Transport> ConnectionManager<T> {
         .map_err(|_| Error::Timeout("server_time"))?
     }
     pub async fn probe(&self) -> Result<(i64, Vec<String>)> {
-        timeout(
-            Duration::from_millis(self.config.connect_timeout_ms),
-            async {
-                let (session, accounts) = self.open(self.config.probe_client_id).await?;
-                let time = self.heartbeat(&session).await;
-                session.close().await;
-                Ok((time?, accounts))
-            },
-        )
-        .await
-        .map_err(|_| Error::Timeout("paper probe"))?
+        let deadline = Instant::now() + Duration::from_millis(self.config.connect_timeout_ms);
+        let (session, accounts) = self.open(self.config.probe_client_id).await?;
+        let time = tokio::select! {
+            biased;
+            error = session.disconnected() => Err(error),
+            result = tokio::time::timeout_at(deadline, self.heartbeat(&session)) =>
+                result.unwrap_or(Err(Error::Timeout("paper probe"))),
+        };
+        session.close().await;
+        Ok((time?, accounts))
     }
     /// Run until the caller cancels this future or paper validation fails. Each live
     /// session is disconnected before retry. Only a verified session reaches hooks.
@@ -210,6 +361,8 @@ impl<T: Transport> ConnectionManager<T> {
             self.phase(Phase::Connecting);
             let failure = match self.open(self.config.collector_client_id).await {
                 Err(Error::UnsafeAccount) => {
+                    self.status
+                        .send_modify(|s| s.last_error = Some(Error::UnsafeAccount.to_string()));
                     self.phase(Phase::Disconnected);
                     return Err(Error::UnsafeAccount);
                 }
@@ -275,3 +428,6 @@ impl<T: Transport> ConnectionManager<T> {
         }
     }
 }
+
+#[cfg(test)]
+mod connection_replay_tests;
