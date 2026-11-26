@@ -17,7 +17,7 @@ paths:
 repository_data_policy:
   runtime_data_outside_worktree: true
   docs: docs/data-guard.md
-  rules: .data-guard/rules.json
+  rules: .data-guard/rules.json # 暂存读取 HEAD，推送读取远端跟踪默认分支，PR 读取基分支 SHA
   fixture_sources: .data-guard/sources.json
   published_history: .data-guard/published.json
 dependencies:
@@ -121,6 +121,11 @@ offline_research:
   historical_registration: strategies/registry/factor-momentum-v1.json
   invocation: local_python_library
   documentation: docs/factor-research.md
+option_exposure:
+  invocation: in_process_rust_library
+  input: option_chain_snapshot
+  persistence: disabled
+  documentation: docs/option-exposure.md
 library_interfaces:
   option_history:
     entry: finance_collector::option_history
