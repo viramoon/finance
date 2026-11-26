@@ -75,8 +75,7 @@ fn builder<'a>(
     peer: &'a PaperPeer,
     contract: &'a Contract,
 ) -> historical::HistoricalDataBuilder<'a, ibapi::Client> {
-    peer.client
-        .historical_data(contract, historical::BarSize::Min)
+    peer.historical_data(contract, historical::BarSize::Min)
         .what_to_show(historical::WhatToShow::Trades)
         .trading_hours(TradingHours::Extended)
 }
@@ -263,7 +262,7 @@ impl Hooks {
         } else {
             MarketDataType::Realtime
         };
-        timeout(REQUEST_TIMEOUT, peer.client.switch_market_data_type(mode)).await??;
+        timeout(REQUEST_TIMEOUT, peer.switch_market_data_type(mode)).await??;
         let (sender, bars) = mpsc::channel::<MarketItem>(256);
         for id in &self.ids {
             let id = id.clone();
