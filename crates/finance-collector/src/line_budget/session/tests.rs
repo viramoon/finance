@@ -44,9 +44,12 @@ struct GatewayState {
     disconnect: Option<watch::Sender<bool>>,
     global_pacing: Option<watch::Sender<Option<Instant>>>,
     failed_opens: usize,
+    pace_on_failed_open: bool,
     fail_next_cancel: bool,
     throttle_next_option: bool,
     first_equity_timeouts: usize,
+    first_equity_timeout_delay: Option<Duration>,
+    option_underlying: Option<i32>,
     incomplete_next_series: bool,
 }
 
@@ -66,28 +69,32 @@ impl Gateway {
         }
     }
 
-    async fn open(self) -> Result<FakeSession, MarketError> {
-        let (session, disconnected, global_pacing) = {
+    async fn open(
+        self,
+        pacing: watch::Sender<Option<Instant>>,
+    ) -> Result<FakeSession, MarketError> {
+        let (session, disconnected) = {
             let mut state = self.state.lock().unwrap();
             let session = state.current_session + 1;
             state.record(session, Operation::Open);
             if state.failed_opens > 0 {
                 state.failed_opens -= 1;
+                if std::mem::take(&mut state.pace_on_failed_open) {
+                    pacing.send_replace(Some(Instant::now()));
+                }
                 return Err(MarketError::Disconnected);
             }
             assert!(state.active.is_empty());
             let (disconnect, disconnected) = watch::channel(false);
-            let (pacing, global_pacing) = watch::channel(None);
             state.current_session = session;
             state.disconnect = Some(disconnect);
             state.global_pacing = Some(pacing);
-            (session, disconnected, global_pacing)
+            (session, disconnected)
         };
         Ok(FakeSession {
             gateway: self,
             session,
             disconnected,
-            global_pacing,
             confirmed: Mutex::default(),
         })
     }
@@ -138,7 +145,6 @@ struct FakeSession {
     gateway: Gateway,
     session: usize,
     disconnected: watch::Receiver<bool>,
-    global_pacing: watch::Receiver<Option<Instant>>,
     confirmed: Mutex<HashSet<i32>>,
 }
 
@@ -147,10 +153,6 @@ impl Session for FakeSession {
     async fn disconnected(&self) -> MarketError {
         let _ = self.disconnected.clone().wait_for(|lost| *lost).await;
         MarketError::Disconnected
-    }
-
-    fn pacing_notices(&self) -> watch::Receiver<Option<Instant>> {
-        self.global_pacing.clone()
     }
 
     async fn close(&self) {
@@ -179,13 +181,22 @@ impl MarketDataSource for FakeSession {
             .position(|candidate| candidate == query)
             .unwrap();
         let con_id = i32::try_from(index).unwrap() + 1;
-        {
+        let timeout_delay = {
             let mut state = self.gateway.state.lock().unwrap();
             state.record(self.session, Operation::Confirm);
             if con_id == 1 && state.first_equity_timeouts > 0 {
                 state.first_equity_timeouts -= 1;
                 return Err(MarketError::Timeout);
             }
+            if con_id == 1 {
+                state.first_equity_timeout_delay
+            } else {
+                None
+            }
+        };
+        if let Some(delay) = timeout_delay {
+            tokio::time::sleep(delay).await;
+            return Err(MarketError::Timeout);
         }
         self.confirmed.lock().unwrap().insert(con_id);
         Ok(ConfirmedContract {
@@ -244,12 +255,12 @@ impl OptionChainSource for FakeSession {
         &self,
         equity: &ConfirmedContract,
     ) -> Result<Vec<OptionSeries>, MarketError> {
-        self.gateway
-            .state
-            .lock()
-            .unwrap()
-            .record(self.session, Operation::Definitions);
-        if equity.con_id != 1 {
+        let option_underlying = {
+            let mut state = self.gateway.state.lock().unwrap();
+            state.record(self.session, Operation::Definitions);
+            state.option_underlying.unwrap_or(1)
+        };
+        if equity.con_id != option_underlying {
             return Ok(Vec::new());
         }
         Ok(vec![OptionSeries {
@@ -352,7 +363,7 @@ fn start(
     let handle = scheduler.handle();
     let (stop, stopped) = watch::channel(false);
     let fake = gateway.clone();
-    let task = tokio::spawn(scheduler.run(move || fake.clone().open(), stopped));
+    let task = tokio::spawn(scheduler.run(move |pacing| fake.clone().open(pacing), stopped));
     (gateway, handle, stop, task)
 }
 
@@ -438,6 +449,45 @@ async fn stock_confirmation_timeout_retries_in_session_and_recovers_chain() {
     assert_eq!(handle.status().stock_lines, 2);
     assert_eq!(handle.status().confirmed_options, 1);
     assert_eq!(handle.option_contracts()[0].con_id, FIRST_OPTION);
+    check_request_spacing(&gateway, step);
+    stop.send(true).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn persistent_stock_timeout_with_short_backoff_yields_to_other_stocks_and_chains() {
+    let config = BudgetConfig {
+        account_lines: 6,
+        stock_lines: 2,
+        request_interval: Duration::from_millis(250),
+        reconnect_initial: Duration::from_millis(100),
+        reconnect_max: Duration::from_millis(200),
+        ..compact_config()
+    };
+    let step = config.request_interval;
+    let (gateway, handle, stop, task) = start(config, 1);
+    {
+        let mut state = gateway.state.lock().unwrap();
+        state.first_equity_timeout_delay = Some(Duration::from_secs(1));
+        state.option_underlying = Some(2);
+    }
+    let healthy_stock = stock_key(2);
+    until(12, step, || {
+        gateway.count(1, Operation::Subscribe(healthy_stock)) == 1
+    })
+    .await;
+    assert_eq!(gateway.count(1, Operation::Confirm), 2);
+
+    until(36, step, || handle.status().observed_options == 1).await;
+    assert!(gateway.count(1, Operation::Confirm) > 2);
+    assert_eq!(gateway.count(1, Operation::Subscribe(stock_key(1))), 0);
+    assert_eq!(gateway.count(1, Operation::Subscribe(healthy_stock)), 1);
+    assert_eq!(gateway.count(1, Operation::Close), 0);
+    let status = handle.status();
+    assert_eq!(status.phase, SchedulerPhase::Online);
+    assert_eq!(status.stock_lines, 1);
+    assert_eq!(status.confirmed_options, 1);
+    assert!(!status.discovery_complete);
     check_request_spacing(&gateway, step);
     stop.send(true).unwrap();
     task.await.unwrap().unwrap();
@@ -767,6 +817,43 @@ async fn global_pacing_deadline_survives_disconnect_before_driver_sees_notice() 
         .find(|call| call.session == 2 && call.operation == Operation::Open)
         .unwrap();
     assert!(reopened.time >= paced_at + cooldown);
+    stop.send(true).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn startup_disconnect_retries_only_after_global_pacing_deadline() {
+    let config = compact_config();
+    let step = config.request_interval;
+    let backoff = config.reconnect_initial;
+    let cooldown = config.pacing_cooldown;
+    let (gateway, handle, stop, task) = start(config, 1);
+    {
+        let mut state = gateway.state.lock().unwrap();
+        state.failed_opens = 1;
+        state.pace_on_failed_open = true;
+    }
+    until(3, step, || {
+        handle.status().phase == SchedulerPhase::Reconnecting
+    })
+    .await;
+    let first_open = gateway.calls()[0].time;
+    assert_eq!(gateway.count(1, Operation::Open), 1);
+
+    tick(backoff).await;
+    assert_eq!(gateway.count(1, Operation::Open), 1);
+    let just_before_deadline = first_open + cooldown - step;
+    tick(just_before_deadline.duration_since(Instant::now())).await;
+    assert_eq!(gateway.count(1, Operation::Open), 1);
+
+    until(8, step, || handle.status().stock_lines == 1).await;
+    let attempts: Vec<_> = gateway
+        .calls()
+        .into_iter()
+        .filter(|call| call.operation == Operation::Open)
+        .collect();
+    assert_eq!(attempts.len(), 2);
+    assert!(attempts[1].time >= first_open + cooldown);
     stop.send(true).unwrap();
     task.await.unwrap().unwrap();
 }

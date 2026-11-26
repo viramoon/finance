@@ -251,19 +251,40 @@ impl ConnectionManager<IbTransport> {
     pub async fn open_market(
         &self,
     ) -> std::result::Result<market::PaperMarket, market::MarketError> {
+        self.open_market_with_pacing(&watch::channel(None).0).await
+    }
+
+    /// Open a verified paper session and report observed global pacing notices
+    /// through a channel owned by the caller. The channel remains available
+    /// after failures during account verification or market type selection.
+    pub async fn open_market_with_pacing(
+        &self,
+        pacing: &watch::Sender<Option<Instant>>,
+    ) -> std::result::Result<market::PaperMarket, market::MarketError> {
         // The SDK would otherwise record raw handshake and market frames.
         if std::env::var_os("IBAPI_RECORDING_DIR").is_some_and(|path| !path.is_empty()) {
             return Err(market::MarketError::InvalidConfiguration);
         }
-        self.open_verified_market().await
+        self.open_verified_market_with_pacing(pacing).await
     }
 }
 impl<T: Transport<S = PaperPeer>> ConnectionManager<T> {
+    #[cfg(test)]
     async fn open_verified_market(
         &self,
     ) -> std::result::Result<market::PaperMarket, market::MarketError> {
+        self.open_verified_market_with_pacing(&watch::channel(None).0)
+            .await
+    }
+
+    async fn open_verified_market_with_pacing(
+        &self,
+        pacing: &watch::Sender<Option<Instant>>,
+    ) -> std::result::Result<market::PaperMarket, market::MarketError> {
         let (peer, _) = self
-            .open(self.config.probe_client_id)
+            .open_prepared(self.config.probe_client_id, |peer| {
+                peer.market_pacing = pacing.clone();
+            })
             .await
             .map_err(|e| match e {
                 Error::UnsafeAccount => market::MarketError::UnsafeAccount,
@@ -310,13 +331,20 @@ impl<T: Transport> ConnectionManager<T> {
         tracing::info!(?phase, "IB session transition");
     }
     async fn open(&self, id: i32) -> Result<(Arc<T::S>, Vec<String>)> {
+        self.open_prepared(id, |_| {}).await
+    }
+    async fn open_prepared(
+        &self,
+        id: i32,
+        prepare: impl FnOnce(&mut T::S),
+    ) -> Result<(Arc<T::S>, Vec<String>)> {
         let bound = Duration::from_millis(self.config.connect_timeout_ms);
         let deadline = Instant::now() + bound;
-        let session = Arc::new(
-            timeout(bound, self.transport.connect(&self.config.address, id))
-                .await
-                .map_err(|_| Error::Timeout("connect"))??,
-        );
+        let mut session = timeout(bound, self.transport.connect(&self.config.address, id))
+            .await
+            .map_err(|_| Error::Timeout("connect"))??;
+        prepare(&mut session);
+        let session = Arc::new(session);
         let accounts = tokio::select! {
             biased;
             error = session.disconnected() => Err(error),

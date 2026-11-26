@@ -28,7 +28,6 @@ mod tests;
 #[async_trait]
 trait Session: OptionChainSource {
     async fn disconnected(&self) -> MarketError;
-    fn pacing_notices(&self) -> watch::Receiver<Option<Instant>>;
     async fn close(&self);
 }
 
@@ -36,10 +35,6 @@ trait Session: OptionChainSource {
 impl Session for PaperMarket {
     async fn disconnected(&self) -> MarketError {
         PaperMarket::disconnected(self).await
-    }
-
-    fn pacing_notices(&self) -> watch::Receiver<Option<Instant>> {
-        PaperMarket::pacing_notices(self)
     }
 
     async fn close(&self) {
@@ -83,7 +78,11 @@ impl LineScheduler {
         manager: &ConnectionManager<IbTransport>,
         stop: watch::Receiver<bool>,
     ) -> Result<(), MarketError> {
-        self.run(|| manager.open_market(), stop).await
+        self.run(
+            |pacing| async move { manager.open_market_with_pacing(&pacing).await },
+            stop,
+        )
+        .await
     }
 
     async fn run<S, F, Open>(
@@ -95,21 +94,22 @@ impl LineScheduler {
         S: Session,
         S::Subscription: 'static,
         F: Future<Output = Result<S, MarketError>>,
-        Open: FnMut() -> F,
+        Open: FnMut(watch::Sender<Option<Instant>>) -> F,
     {
         let config = &self.shared.config;
         let mut backoff = config.reconnect_initial;
         let mut next_request = Instant::now();
+        // A failed open can receive a notice before a session is returned.
+        let (pacing_sender, mut pacing) = watch::channel(None);
         let outcome = loop {
             let error = match tokio::select! {
                 biased;
                 _ = stop_requested(&mut stop) => break Ok(()),
-                result = open() => result,
+                result = open(pacing_sender.clone()) => result,
             } {
                 Ok(session) => {
                     let online_since = Instant::now();
                     let mut online = Online::new(&self);
-                    let mut pacing = session.pacing_notices();
                     self.shared.state.lock().expect("line state").phase = SchedulerPhase::Online;
                     let result = tokio::select! {
                         biased;
@@ -117,9 +117,6 @@ impl LineScheduler {
                         error = session.disconnected() => Err(error),
                         result = online.drive(&session, &mut next_request, &mut pacing) => result,
                     };
-                    if let Some(received) = *pacing.borrow() {
-                        next_request = next_request.max(received + config.pacing_cooldown);
-                    }
                     {
                         let mut state = self.shared.state.lock().expect("line state");
                         state.phase = SchedulerPhase::Reconnecting;
@@ -149,6 +146,9 @@ impl LineScheduler {
             let now = Instant::now();
             if error == MarketError::Pacing {
                 next_request = next_request.max(now + config.pacing_cooldown);
+            }
+            if let Some(received) = *pacing.borrow() {
+                next_request = next_request.max(received + config.pacing_cooldown);
             }
             {
                 let mut state = self.shared.state.lock().expect("line state");
@@ -194,13 +194,14 @@ enum Action {
 
 struct PendingStock {
     query: ContractQuery,
-    retry_at: Instant,
+    retry_at: Option<Instant>,
     retry_delay: Duration,
 }
 
 struct Online<'a> {
     owner: &'a LineScheduler,
     watchlist: Vec<PendingStock>,
+    defer_stock_retry: bool,
     stocks: Vec<ConfirmedContract>,
     stock_confirmation_failed: bool,
     active: HashMap<RequestKey, Worker>,
@@ -231,10 +232,11 @@ impl<'a> Online<'a> {
                 .cloned()
                 .map(|query| PendingStock {
                     query,
-                    retry_at: Instant::now(),
+                    retry_at: None,
                     retry_delay: owner.shared.config.reconnect_initial,
                 })
                 .collect(),
+            defer_stock_retry: false,
             stocks: Vec::new(),
             stock_confirmation_failed: false,
             active: Default::default(),
@@ -251,7 +253,10 @@ impl<'a> Online<'a> {
     }
 
     fn next_stock_retry(&self) -> Option<Instant> {
-        self.watchlist.iter().map(|stock| stock.retry_at).min()
+        self.watchlist
+            .iter()
+            .filter_map(|stock| stock.retry_at)
+            .min()
     }
 
     async fn drive<S: Session>(
@@ -375,10 +380,14 @@ impl<'a> Online<'a> {
                 false,
             )));
         }
-        if let Some(index) = self
+        let ready_stock = self
             .watchlist
             .iter()
-            .position(|stock| stock.retry_at <= now)
+            .position(|stock| stock.retry_at.is_none_or(|retry_at| retry_at <= now));
+        // A short retry can be due at the next paced request. After a timeout,
+        // give other work a turn while keeping first confirmations a priority.
+        if let Some(index) = ready_stock
+            && (!self.defer_stock_retry || self.watchlist[index].retry_at.is_none())
         {
             return Ok(Some(Action::ConfirmStock(index)));
         }
@@ -434,7 +443,7 @@ impl<'a> Online<'a> {
                 return Ok(Some(Action::Start(contract, LinePool::Rotation, new_sweep)));
             }
         }
-        Ok(discovery)
+        Ok(discovery.or(ready_stock.map(Action::ConfirmStock)))
     }
 
     fn next_option(&self, ranked: Vec<ConfirmedContract>) -> Option<(ConfirmedContract, bool)> {
@@ -467,10 +476,10 @@ impl<'a> Online<'a> {
         S::Subscription: 'static,
     {
         let shared = &self.owner.shared;
+        self.defer_stock_retry = false;
         match action {
             Action::ConfirmStock(index) => {
-                let pending = &mut self.watchlist[index];
-                let result = session.confirm(&pending.query).await;
+                let result = session.confirm(&self.watchlist[index].query).await;
                 match result {
                     Ok(equity) if equity.product() == Product::EquityL1 && equity.con_id > 0 => {
                         if let Some(stock) = self
@@ -497,11 +506,14 @@ impl<'a> Online<'a> {
                     }
                     Ok(_) => return Err(MarketError::InvalidConfiguration),
                     Err(error) if incomplete_metadata(error) => {
-                        pending.retry_at = Instant::now() + pending.retry_delay;
+                        let mut pending = self.watchlist.remove(index);
+                        pending.retry_at = Some(Instant::now() + pending.retry_delay);
                         pending.retry_delay = pending
                             .retry_delay
                             .saturating_mul(2)
                             .min(shared.config.reconnect_max);
+                        self.watchlist.push(pending);
+                        self.defer_stock_retry = true;
                         return Ok(());
                     }
                     Err(error) if unavailable(error) => self.stock_confirmation_failed = true,

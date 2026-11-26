@@ -131,6 +131,48 @@ async fn account_verification_distinguishes_loss_empty_reply_and_silence() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn failed_account_verification_preserves_global_pacing() {
+    let (manager, [replay]) = manager();
+    let (pacing, observed) = watch::channel(None);
+    let (opened, sent_at) =
+        tokio::join!(manager.open_verified_market_with_pacing(&pacing), async {
+            replay.wait_for_writes(1).await;
+            let sent_at = Instant::now();
+            replay.notice(-1, 100).await.unwrap();
+            replay.notice(-1, 1100).await.unwrap();
+            sent_at
+        });
+    assert!(matches!(opened, Err(MarketError::Disconnected)));
+    assert_eq!(replay.writes(), [MarketWrite::Accounts]);
+    assert!(replay.is_closed());
+    assert!(observed.borrow().is_some_and(|at| at >= sent_at));
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_market_type_selection_preserves_global_pacing() {
+    let (manager, [replay]) = manager();
+    let (pacing, observed) = watch::channel(None);
+    let (opened, (_release, sent_at)) =
+        tokio::join!(manager.open_verified_market_with_pacing(&pacing), async {
+            replay.wait_for_writes(1).await;
+            let release = replay.hold_next_write();
+            replay.managed_accounts("DU-SYNTH").await.unwrap();
+            replay.wait_for_writes(2).await;
+            let sent_at = Instant::now();
+            replay.notice(-1, 100).await.unwrap();
+            replay.notice(-1, 1100).await.unwrap();
+            (release, sent_at)
+        });
+    assert!(matches!(opened, Err(MarketError::Disconnected)));
+    assert_eq!(
+        replay.writes(),
+        [MarketWrite::Accounts, MarketWrite::SelectType(Some(3))]
+    );
+    assert!(replay.is_closed());
+    assert!(observed.borrow().is_some_and(|at| at >= sent_at));
+}
+
+#[tokio::test(start_paused = true)]
 async fn manager_stops_recovery_if_replacement_fails_paper_verification() {
     #[derive(Default)]
     struct Hooks {

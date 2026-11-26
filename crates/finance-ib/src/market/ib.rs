@@ -73,7 +73,8 @@ impl PaperMarket {
         MarketError::Disconnected
     }
 
-    /// The latest connection-wide pacing notice seen by the session observer.
+    /// The latest observed global pacing notice, including notices received
+    /// before this market opened when the caller shares its pacing channel.
     /// Poll `disconnected` alongside session operations to drive that observer.
     pub fn pacing_notices(&self) -> watch::Receiver<Option<Instant>> {
         self.peer.market_pacing.subscribe()
