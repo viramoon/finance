@@ -8,7 +8,7 @@ use crate::market::{InstrumentStatus, MarketStatus};
 use axum::response::sse::Event as AxumSseEvent;
 use chrono::DateTime;
 use finance_market_protocol::{
-    Event, SchemaVersion, U64Text,
+    Event, U64Text,
     schema_export::{event_schema, json_schema},
 };
 use serde::{Deserialize, Serialize};
@@ -28,8 +28,15 @@ pub enum StatusSseMessage {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MarketStatusData {
-    pub schema_version: SchemaVersion,
+    pub schema_version: StatusSseVersion,
     pub status: MarketStatus,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(as = SchemaVersion)]
+pub enum StatusSseVersion {
+    #[serde(rename = "1.0")]
+    V1,
 }
 
 impl StatusSseMessage {
@@ -37,7 +44,7 @@ impl StatusSseMessage {
         Self::MarketStatus {
             id: id.into(),
             data: MarketStatusData {
-                schema_version: SchemaVersion::V1,
+                schema_version: StatusSseVersion::V1,
                 status,
             },
         }

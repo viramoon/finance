@@ -1,7 +1,7 @@
 //! Build standalone JSON Schemas from the protocol's Rust wire types.
 
-use crate::Event;
-use serde_json::{Map, Value};
+use crate::{Event, SchemaVersion};
+use serde_json::{Map, Value, json};
 use std::error::Error;
 use utoipa::ToSchema;
 
@@ -50,9 +50,67 @@ pub fn json_schema<T: ToSchema>(id: &str) -> Result<Value, Box<dyn Error>> {
     Ok(root)
 }
 
+pub fn versioned_json_schema<T: ToSchema>(
+    id: &str,
+    version: SchemaVersion,
+) -> Result<Value, Box<dyn Error>> {
+    let mut root = json_schema::<T>(id)?;
+    *root
+        .pointer_mut("/$defs/SchemaVersion/enum")
+        .ok_or("schema is missing SchemaVersion")? = json!([version]);
+    Ok(root)
+}
+
+/// Export the v1.0 event format used by the first read stream contract.
 pub fn event_schema(id: &str) -> Result<Value, Box<dyn Error>> {
-    let mut root = json_schema::<Event>(id)?;
+    event_schema_for_version(id, SchemaVersion::V1)
+}
+
+pub fn event_schema_for_version(id: &str, version: SchemaVersion) -> Result<Value, Box<dyn Error>> {
+    let mut root = versioned_json_schema::<Event>(id, version)?;
     close_event_envelopes(&mut root, "", "/$defs/MarketMessage")?;
+    root.pointer_mut("/$defs/Message/oneOf")
+        .and_then(Value::as_array_mut)
+        .ok_or("event schema is missing the message union")?
+        .retain(|branch| {
+            let context = branch["properties"]["kind"]["enum"][0] == "perpetual_context";
+            context == (version == SchemaVersion::V2)
+        });
+
+    let defs = root["$defs"]
+        .as_object_mut()
+        .ok_or("missing event definitions")?;
+    match version {
+        SchemaVersion::V1 => {
+            defs.remove("PerpetualContext");
+            defs["Message"]["description"] =
+                "The version 1.0 kind tag and its corresponding payload.".into();
+        }
+        SchemaVersion::V2 => {
+            for name in [
+                "AssetKind",
+                "BookDelta",
+                "BookLevel",
+                "BookSide",
+                "BookSnapshot",
+                "BookUpdate",
+                "ClosedBar",
+                "ConnectionState",
+                "Correction",
+                "Gap",
+                "Heartbeat",
+                "MarketMessage",
+                "Reset",
+                "Status",
+                "Trade",
+                "TradeSide",
+            ] {
+                defs.remove(name);
+            }
+            root["allOf"][1]["properties"]["asset_kind"] = json!({"const": "perpetual"});
+            root["allOf"][1]["properties"]["revision"] = json!({"const": "0"});
+        }
+    }
     Ok(root)
 }
 

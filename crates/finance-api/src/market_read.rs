@@ -359,6 +359,7 @@ fn event_matches(query: &ProjectionQuery, matched: &ProjectionMatch, event: &Eve
         Message::Trade(_) => (event.epoch, event.seq, "trade"),
         Message::Snapshot(_) => (event.epoch, event.seq, "snapshot"),
         Message::Delta(_) => (event.epoch, event.seq, "delta"),
+        Message::PerpetualContext(_) => (event.epoch, event.seq, "perpetual_context"),
         Message::Correction(correction) => (
             correction.target_epoch,
             correction.target_seq,

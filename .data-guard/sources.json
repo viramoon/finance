@@ -8,10 +8,16 @@
       "source": "手工设计的三根闭合 bar，覆盖十进制精度和循环回放。"
     },
     "crates/finance-api/tests/market_read.rs": {
-      "sha256": "0886b89781f8f960a1134e2ccad568159c4be471534dad59a7dc8ec452d0b79b",
+      "sha256": "827b989e1cf15ef120f110a27da07b9b57e42de4605bb248b60313c9538ccf0c",
       "generator": "crates/finance-api/tests/support/market_read_fixture.rs",
       "seed": "fixed",
-      "source": "Rust 测试复用已登记的 F1 合成事件并补充固定的十进制、序号和更正常量，在临时目录构造 WAL、质量报告和投影索引。"
+      "source": "Rust 测试复用已登记的 F1 合成事件并补充固定的十进制、序号和更正常量，在临时目录构造 WAL、质量报告和投影索引。 跨语言投影联测另复用 F5 已登记的 v2 合成永续上下文。"
+    },
+    "crates/finance-market-protocol/fixtures/examples-v2.input.json": {
+      "sha256": "fdc6b95863efa58d9cc1f8360bd39e3fd813ff35cd33e31bb39078ace987e2d1",
+      "generator": "crates/finance-market-protocol/src/bin/export-market-protocol.rs",
+      "seed": "fixed",
+      "source": "手工构造的 v2 永续上下文固定输入，包含虚构费率、未平仓量和标记价，由 export-market-protocol 的 --v2 模式校验。"
     },
     "crates/finance-market-protocol/fixtures/examples.input.json": {
       "sha256": "b5abfc5b2ce37543e46c5a093b608aebb4873ac4714a6e616276dae37a2558a5",
@@ -30,6 +36,12 @@
       "generator": "crates/finance-api/src/read_stream.rs",
       "seed": "fixed",
       "source": "finance-api export-read-stream 复用已登记的 F1 固定合成事件，并用固定时钟生成 ready 和 missing 状态与 u64 边界事件 ID。"
+    },
+    "protocol/v2/examples.json": {
+      "sha256": "66199a94809e8b6a83274a3be82a91e67bbe652d8ed57cc310e69d6bc3a7b7fc",
+      "generator": "crates/finance-market-protocol/src/bin/export-market-protocol.rs",
+      "seed": "fixed",
+      "source": "以 examples-v2.input.json 为固定输入。运行 export-market-protocol OUTPUT --v2 复现。"
     },
     "tests/fixtures/factor_returns.csv": {
       "sha256": "46f724d546bcac2421c83587fba281f2c33a2996fa0876a7c1f375c23541210b",
@@ -72,6 +84,24 @@
       "generator": "scripts/generate_synthetic_fixtures.py",
       "seed": "fixed",
       "source": "按 Yahoo chart 响应结构手工设计，覆盖高精度日线、拆股和分红。"
+    },
+    "tests/fixtures/hyperliquid/meta.json": {
+      "sha256": "e561a98220d315cf1c19acbfd04a5b4c52226adc7dab866965f35bed41801929",
+      "generator": "scripts/generate_synthetic_fixtures.py",
+      "seed": "fixed",
+      "source": "固定 BTC/ETH/SOL 标的和合成精度。运行 generate_synthetic_fixtures.py OUTPUT 重建。"
+    },
+    "tests/fixtures/hyperliquid/ws-initial.jsonl": {
+      "sha256": "3d69f2aee4f946f7c0b738dab94e2e97ee96bce694e102e8e46e4177846cd50b",
+      "generator": "scripts/generate_synthetic_fixtures.py",
+      "seed": "fixed",
+      "source": "固定合成时钟与虚构价量，覆盖盘口、三种成交方向和永续上下文。运行 generate_synthetic_fixtures.py OUTPUT 重建。"
+    },
+    "tests/fixtures/hyperliquid/ws-reconnected.jsonl": {
+      "sha256": "55abf05ee5870b34479091ca971ba5356863fa5713589d4e874830cd2f95e6c2",
+      "generator": "scripts/generate_synthetic_fixtures.py",
+      "seed": "fixed",
+      "source": "固定模拟断线后的早到旧簿、新簿、成交 ID 重叠及缺省方向。运行 generate_synthetic_fixtures.py OUTPUT 重建。"
     }
   }
 }

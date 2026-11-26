@@ -1,9 +1,9 @@
 use finance_market_protocol::{
-    Capability, Event, Instrument,
-    schema_export::{event_schema, json_schema},
+    Capability, Event, Instrument, SchemaVersion,
+    schema_export::{event_schema_for_version, versioned_json_schema},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{collections::HashMap, env, error::Error, fs, io, path::PathBuf};
 
 #[derive(Deserialize, Serialize)]
@@ -15,9 +15,8 @@ struct Examples {
 }
 
 impl Examples {
-    fn validated() -> Result<Self, Box<dyn Error>> {
-        let examples: Self =
-            serde_json::from_str(include_str!("../../fixtures/examples.input.json"))?;
+    fn validated(input: &str) -> Result<Self, Box<dyn Error>> {
+        let examples: Self = serde_json::from_str(input)?;
         let mut instruments = HashMap::new();
         for instrument in &examples.instruments {
             if instruments
@@ -58,45 +57,72 @@ impl Examples {
     }
 }
 
-fn capability_schema() -> Result<Value, Box<dyn Error>> {
-    let mut root =
-        json_schema::<Capability>("urn:viramoon:finance:market-protocol:1.0:capability")?;
+fn capability_schema(id: &str, version: SchemaVersion) -> Result<Value, Box<dyn Error>> {
+    let mut root = versioned_json_schema::<Capability>(id, version)?;
     // Preserve the wire list order while enforcing the runtime uniqueness
     // check as a structural rule on the array.
     root.pointer_mut("/properties/message_kinds")
         .and_then(Value::as_object_mut)
         .ok_or("capability schema is missing message_kinds")?
         .insert("uniqueItems".into(), true.into());
-    // Utoipa emits the signed int32 format for u32. The numeric range
-    // already captures the unsigned depth type without the format hint.
+    // Utoipa emits the signed int32 format for u32.
     root.pointer_mut("/properties/max_depth")
         .and_then(Value::as_object_mut)
         .ok_or("capability schema is missing max_depth")?
         .remove("format");
+    match version {
+        SchemaVersion::V1 => {
+            root["$defs"]["MarketKind"]["enum"]
+                .as_array_mut()
+                .ok_or("capability schema is missing market kinds")?
+                .retain(|kind| kind != "perpetual_context");
+            root["properties"]["message_kinds"]["maxItems"] = 4.into();
+        }
+        SchemaVersion::V2 => {
+            root["$defs"]["MarketKind"]["description"] =
+                "Market data kinds a source/product can advertise in version 2.0.".into();
+            root["properties"]["message_kinds"]["contains"] = json!({"const": "perpetual_context"});
+        }
+    }
     Ok(root)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = env::args_os().skip(1);
-    let Some(directory) = args.next().filter(|_| args.next().is_none()) else {
-        return Err("usage: export-market-protocol OUTPUT_DIRECTORY".into());
+    let Some(directory) = args.next() else {
+        return Err("usage: export-market-protocol OUTPUT_DIRECTORY [--v2]".into());
     };
+    let (version, wire_version) = match args.next() {
+        None => (SchemaVersion::V1, "1.0"),
+        Some(flag) if flag == "--v2" && args.next().is_none() => (SchemaVersion::V2, "2.0"),
+        _ => return Err("usage: export-market-protocol OUTPUT_DIRECTORY [--v2]".into()),
+    };
+    let id = |name| format!("urn:viramoon:finance:market-protocol:{wire_version}:{name}");
     let directory = PathBuf::from(directory);
-    let documents = [
-        (
+    let mut documents = Vec::new();
+    let input = if version == SchemaVersion::V1 {
+        documents.push((
             "instrument.schema.json",
-            json_schema::<Instrument>("urn:viramoon:finance:market-protocol:1.0:instrument")?,
+            versioned_json_schema::<Instrument>(&id("instrument"), version)?,
+        ));
+        include_str!("../../fixtures/examples.input.json")
+    } else {
+        include_str!("../../fixtures/examples-v2.input.json")
+    };
+    documents.extend([
+        (
+            "capability.schema.json",
+            capability_schema(&id("capability"), version)?,
         ),
-        ("capability.schema.json", capability_schema()?),
         (
             "event.schema.json",
-            event_schema("urn:viramoon:finance:market-protocol:1.0:event")?,
+            event_schema_for_version(&id("event"), version)?,
         ),
         (
             "examples.json",
-            serde_json::to_value(Examples::validated()?)?,
+            serde_json::to_value(Examples::validated(input)?)?,
         ),
-    ];
+    ]);
     fs::create_dir_all(&directory)?;
     for (file, mut document) in documents {
         // Canonical key ordering stays stable when other workspace crates enable

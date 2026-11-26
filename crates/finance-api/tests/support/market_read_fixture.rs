@@ -65,6 +65,35 @@ pub fn publish(ingress: &mut MarketIngress, indexes: &[usize], record_local: boo
         .collect()
 }
 
+pub fn publish_perpetual_context(root: &Path) -> Value {
+    let examples: Value =
+        serde_json::from_str(include_str!("../../../../protocol/v2/examples.json")).unwrap();
+    let data = &examples["events"][0];
+    let event = from_fixture::<Event>(data);
+    let mut ingress = MarketIngress::open(
+        root,
+        ProductPolicy {
+            source: event.source.clone(),
+            product: event.product.clone(),
+            license: event.license.clone(),
+            ..policy(TRADES, true)
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        ingress
+            .publish(
+                event,
+                &from_fixture::<Instrument>(&examples["instruments"][0]),
+                &from_fixture::<Capability>(&examples["capabilities"][0]),
+            )
+            .unwrap(),
+        PublishResult::Staged(_)
+    ));
+    assert_eq!(ingress.flush().unwrap(), Some(1));
+    data.clone()
+}
+
 pub fn quality(channel: &str, from: u64, to: u64) -> QualityReport {
     QualityReport {
         channel: channel.parse().unwrap(),

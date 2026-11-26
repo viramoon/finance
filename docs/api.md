@@ -47,13 +47,15 @@ POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /a
 | --- | --- | --- |
 | `/market/products` | 可选 `source`、`offset`、`limit` | 按 source/product 排序的已登记、可落盘产品许可 `items`，以及 `next_offset`。 |
 | `/market/wal` | `source`、`product`，可选排除式 `after`、含端点的 `through`、`limit` | `access`、`records`、`durable_through`、本次固定前缀上界 `through`、`next_after`。一页默认 512 条，上限 4096 条，F3 帧预算约 16 MiB，可能提前分页。续页传上次的 `through` 和 `next_after`，后者为 `null` 即结束。 |
-| `/market/projection/latest` | `source`、`product`、`channel`、`instrument_id`、`epoch`、`seq` | `access`、`projected_through`、`record`。按原始 F1 位置查 F3 SQLite 已提交索引，再从持久 WAL 取同一记录。已有更正时返回最新更正信封。 |
+| `/market/projection/latest` | `source`、`product`、`channel`、`instrument_id`、`epoch`、`seq` | `access`、`projected_through`、`record`。按原始事件位置查 F3 SQLite 已提交索引，再从持久 WAL 取同一记录。已有更正时返回最新更正信封。 |
 | `/market/watermarks` | `source`、`product` | `access` 和 F3 的 `watermarks`。`source_latest` 取最后一条已持久事件，`remote_verified` 在远端回执接入前为 `null`。 |
 | `/quality/gaps` | `source`、`product`，可选 `channel`、`instrument_id`、`from_ts`、`to_ts`、`offset`、`limit` | `access`、按报告写入顺序的 `items`、`next_offset`。返回与 `[from_ts, to_ts)` 相交的报告，报告自身仍保存含两端的 UTC 纳秒区间。 |
 | `/factors` | 可选 `factor_id`、`version`、`after`、`limit` | 因子定义、研究状态、状态迁移、历史研究登记以及许可。游标为 `factor_id@version`。 |
 | `/factors/{id}/evaluations` | 可选 `version`、`after`、`limit` | 评价报告摘要，含样本窗、IC/衰减、覆盖、费前费后及换手数据。游标为 `version@evaluation_id`。 |
 
 行情查询的 `as_of` 是 API 的 UTC 观察时间。事件时间与覆盖分别由 F1 时钟、持久和投影水位、质量报告说明。`position`、`generation`、`epoch`、`seq`、`revision` 与 UTC 纳秒时间在 JSON 和查询参数中均使用十进制字符串，`after` 默认 `"0"`。价格与数量沿用 F1 的精确十进制字符串。`offset` 默认 0，`limit` 默认 100、最大 500，`next_offset: null` 表示已到列表末尾。[F1 事件](market-protocol.md) · [F3 存储](market-wal.md)
+
+WAL 的 `records[].event` 和投影的 `record.event` 保留原始 `schema_version`。同一 WAL 页面可以包含 F1 `1.0` 和 F5 `2.0` 事件。消费端按每条事件的版本解码，`2.0` 事件的 `kind` 为 `perpetual_context`。首批独立导出的 WS/SSE 消息继续使用 `1.0`。[版本化行情协议](market-protocol.md)
 
 市场响应的 `access` 来自 F3 的落盘策略，含 `license`、`display_live`、`record_local`、`derive_non_display`、`backup_personal_drive`。事件另携带原 `license`。仅展示产品由生产者在内存处理，不进入这些查询和生成物。项目禁止再分发。参数不合法返回 `400 / market_query_invalid`。产品未登记或目标投影位置缺失返回 `404 / market_product_not_found` 或 `market_projection_not_found`。策略、索引或 WAL 损坏返回 `500 / market_storage_error`，响应省略本地路径和数据正文。
 
@@ -76,9 +78,11 @@ cargo run --locked --offline -q -p finance-api -- export-openapi > /tmp/finance.
 cargo run --locked --offline -q -p finance-api -- export-read-stream /tmp/finance-read-stream
 ```
 
-utoipa 从 handler 注解和实际响应类型导出。流生成器使用同一套 F1 行情类型和已有行情状态 DTO。导出不依赖部署数据根、账户或网络。Finance API CI 比较两次导出的字节，并将流产物与 `protocol/v1/` 中的文件逐一比对，成功后上传 `finance-openapi` 和 `finance-read-stream-v1` artifact。兼容测试用旧客户端类型检查现有字段，流样本来自已登记的固定合成输入。[WS/SSE 消息契约](market-protocol.md#首批读契约的-ws-与-sse-消息)
+utoipa 从 handler 注解和实际响应类型导出。流生成器使用 F1 v1.0 行情事件和已有的行情状态 DTO。导出不依赖部署数据根、账户或网络。Finance API CI 比较两次导出的字节，并将流产物与 `protocol/v1/` 中的文件逐一比对，成功后上传 `finance-openapi` 和 `finance-read-stream-v1` artifact。兼容测试用旧客户端类型检查现有字段，流样本来自已登记的固定合成输入。[WS/SSE 消息契约](market-protocol.md#首批读契约的-ws-与-sse-消息)
 
-finance 合并后，web 先固定 `openapi/finance.commit` 的完整 SHA，从同一提交更新快照与客户端，并扩充 web 自己的契约。frontend 随后固定 `openapi/web.commit` 并生成客户端。fertile 最后更新已合并的子仓 gitlink 及集成快照，并验证契约链。生成物由相应生成流程更新，破坏性接口变更需要兼容迁移计划。[fertile contracts](https://github.com/viramoon/fertile/tree/main/contracts)
+finance 合并后，web 先固定 `openapi/finance.commit` 的完整 SHA，从同一提交更新快照与客户端，并扩充 web 自己的契约。frontend 随后固定 `openapi/web.commit` 并生成客户端。fertile 最后更新已合并的子仓 gitlink 和集成快照 `contracts/finance.openapi.json`，并验证契约链。生成物由相应生成流程更新，破坏性接口变更需要兼容迁移计划。[fertile contracts](https://github.com/viramoon/fertile/tree/main/contracts)
+
+历史价量补拉通过本地命令运行。入口、JSON 运行报告和 Parquet 目录见批任务文档。[历史价量批任务](historical-pull.md)
 
 ## 历史回测与提交确认
 

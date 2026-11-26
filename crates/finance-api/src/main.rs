@@ -1,5 +1,6 @@
 use finance_api::{ApiDoc, AppState, config::Settings, read_stream, router};
-use finance_market_protocol::schema_export::close_event_envelopes;
+use finance_market_protocol::{SchemaVersion, schema_export::close_event_envelopes};
+use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     error::Error,
@@ -27,6 +28,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
             "/components/schemas/Event",
             "/components/schemas/MarketMessage",
         )?;
+        // REST reads both versions from the same WAL. The common envelope and
+        // kind union alone do not express which version is valid for each kind.
+        spec.pointer_mut("/components/schemas/Event/allOf")
+            .and_then(Value::as_array_mut)
+            .ok_or("missing REST event envelope schema")?
+            .push(json!({"oneOf": [
+                {"properties": {
+                    "schema_version": {"const": SchemaVersion::V1},
+                    "kind": {"not": {"const": "perpetual_context"}}
+                }},
+                {"properties": {
+                    "schema_version": {"const": SchemaVersion::V2},
+                    "kind": {"const": "perpetual_context"},
+                    "asset_kind": {"const": "perpetual"},
+                    "revision": {"const": "0"}
+                }}
+            ]}));
         println!("{}", serde_json::to_string_pretty(&spec)?);
         return Ok(());
     }

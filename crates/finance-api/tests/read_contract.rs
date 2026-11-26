@@ -206,4 +206,26 @@ fn openapi_cli_is_deterministic_and_resolves_read_contract_refs() {
     assert_eq!(schemas["U64Text"]["type"], "string");
     assert_eq!(schemas["Event"]["unevaluatedProperties"], false);
     assert_eq!(schemas["MarketMessage"]["unevaluatedProperties"], false);
+    assert_eq!(schemas["SchemaVersion"]["enum"], json!(["1.0", "2.0"]));
+    let event_version = schemas["Event"]["allOf"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap();
+    assert_eq!(
+        event_version["oneOf"][0]["properties"],
+        json!({
+            "schema_version": {"const": "1.0"},
+            "kind": {"not": {"const": "perpetual_context"}}
+        })
+    );
+    assert_eq!(
+        event_version["oneOf"][1]["properties"],
+        json!({
+            "schema_version": {"const": "2.0"},
+            "kind": {"const": "perpetual_context"},
+            "asset_kind": {"const": "perpetual"},
+            "revision": {"const": "0"}
+        })
+    );
 }

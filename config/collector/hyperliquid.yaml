@@ -1,0 +1,10 @@
+coins: [BTC, ETH, SOL]
+policy:
+  source: hyperliquid
+  product: perp-public
+  # 示例策略标识。接入前由部署方核对产品条款并配置审核后的权限。
+  license: hyperliquid-public-display
+  display_live: true
+  record_local: false
+  derive_non_display: false
+  backup_personal_drive: false

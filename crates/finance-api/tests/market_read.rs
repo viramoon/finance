@@ -12,7 +12,8 @@ use tower::ServiceExt;
 #[path = "support/market_read_fixture.rs"]
 mod fixture;
 use fixture::{
-    SOURCE, TRADES, index_fixture, index_trade, policy, projection_dir, publish, quality,
+    SOURCE, TRADES, index_fixture, index_trade, policy, projection_dir, publish,
+    publish_perpetual_context, quality,
 };
 
 const WAL: &str = "/api/v1/market/wal?source=fixture&product=us-etf-delayed";
@@ -323,6 +324,7 @@ async fn python_projector_index_is_readable_over_http() {
     let events = publish(&mut ingress, &[0, 1, 1, 2], true);
     ingress.flush().unwrap();
     publish(&mut ingress, &[3], true);
+    let context = publish_perpetual_context(root.path());
     let python = std::env::var_os("FINANCE_F3_TEST_PYTHON").unwrap();
     let wal_bin = std::env::var_os("FINANCE_F3_TEST_WAL_BIN").unwrap();
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -373,4 +375,20 @@ async fn python_projector_index_is_readable_over_http() {
         files,
         ["projection.sqlite3", "watermark.json", "writer.lock"]
     );
+
+    let product = "source=hyperliquid&product=perp-public";
+    let wal = get(
+        &app,
+        &format!("/api/v1/market/wal?{product}"),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(wal["records"][0]["event"], context);
+    let projection = format!(
+        "/api/v1/market/projection/latest?{product}&channel=perpetual_context&instrument_id=BTC-USD-PERP.HYPERLIQUID&epoch=1&seq=1"
+    );
+    let projected = get(&app, &projection, StatusCode::OK).await;
+    assert_eq!(projected["access"]["license"], context["license"]);
+    assert_eq!(projected["projected_through"], "1");
+    assert_eq!(projected["record"]["event"], context);
 }
