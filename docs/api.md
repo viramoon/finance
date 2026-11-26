@@ -57,6 +57,8 @@ utoipa 从 handler 注解和实际响应类型导出，不需要数据目录、�
 
 权威集成快照是 fertile contracts/finance.openapi.json：改代码并验证 → 从同一 commit 导出 artifact → 后续 fertile 集成 PR 同步快照和子模块指针、比对差异 → web 生成客户端。禁止手改生成文件；当前 issue 不跨仓库更新快照或实现比对脚本。破坏性接口变更须有兼容迁移计划，见 [fertile contracts](https://github.com/viramoon/fertile/tree/main/contracts)。
 
+行情流使用独立版本化 schema 和样本，见 [行情标的、事件与流协议](market-protocol.md)。
+
 ## 历史回测与提交确认
 
 GET /api/v1/backtests/datasets 返回具名日线 catalog 的可选标的、来源和日期范围。POST /api/v1/backtests 接受 `SmaCrossover`、一个已导入的 `instrument`、UTC 午夜的 `start` / `end`，以及整数 `fast_period`、`slow_period`、`shares`。要求 `2 ≤ fast_period < slow_period ≤ 250` 与 `1 ≤ shares ≤ 1000`。研究结果的 `research` 字段含数据血缘、执行模型、覆盖与成交审计。无匹配 catalog 的新请求返回 422。缺失会话或 warmup 不够的作业进入失败终态，错误码为 `missing_sessions` 或 `insufficient_history`。不替换为示例数据。
