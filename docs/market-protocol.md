@@ -66,7 +66,7 @@ finance 定义行情流契约 v1.0，供采集适配器、投影、研究和 web
 
 ## Schema 导出与兼容规则
 
-每条标的、能力和事件都带 `schema_version: "1.0"`。仓库交付以下独立的 JSON Schema Draft 2020-12 和跨仓样本。
+v1.0 标的、能力和事件均带 `schema_version: "1.0"`。仓库交付以下独立的 JSON Schema Draft 2020-12 和跨仓样本。
 
 | 文件 | 内容 |
 | --- | --- |
@@ -86,6 +86,21 @@ PYTHONPATH=python python -m unittest discover -s tests -p test_market_protocol.p
 读取端按完整 `schema_version` 选择 schema，拒绝未知版本、未知字段、未知种类和缺少必填字段。任意增删字段或种类、缩窄值域、改变单位或事件语义都需要显式协商并以新的主版本发布，旧 schema 和样本保留给旧读者。只修订文档或更正生成物中与既定 v1.0 规则不一致的部分时保留原协议版本。协议版本独立于代码包版本和 fertile 发布版本。
 
 跨仓消费方应从同一个 finance 提交取 schema 和样本，并在自身测试中核对识别的版本、消息分支以及精确字段。finance → web → frontend 的 HTTP OpenAPI 指针继续按原有流程更新。
+
+## 永续上下文 2.0
+
+`schema_version: "2.0"` 用于独立的永续上下文能力和事件。标的主数据继续使用 v1.0，事件的 `asset_kind` 必须是 `perpetual`。上下文产品 `max_depth` 固定为 0，保留原有 `gap`、`reset`、`heartbeat` 和 `status` 控制消息。上下文观测需要 `exchange_ts`。盘口、成交和 bar 仍使用 v1.0。读取端按产品协商版本，按完整版本选择 schema。
+
+| `kind` | `payload` |
+| --- | --- |
+| `funding_rate` | 有符号的十进制比率 `rate`，以及不早于 `exchange_ts` 的 UTC 纳秒 `next_funding_ts`。 |
+| `open_interest` | 非负十进制字符串 `quantity`，保留供应商的基础资产数量和有效位。 |
+
+使用与 v1.0 相同的导出器生成 [能力 schema](../protocol/v2/capability.schema.json) 和 [事件 schema](../protocol/v2/event.schema.json)：
+
+```sh
+cargo run --locked -q -p finance-market-protocol --bin export-market-protocol -- protocol/v2 --context-v2
+```
 
 ## 解码与错误定位
 

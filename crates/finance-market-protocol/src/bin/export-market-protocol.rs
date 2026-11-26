@@ -73,7 +73,7 @@ fn use_local_refs(value: &mut Value) {
     }
 }
 
-fn schema<T: ToSchema>(id: &str) -> Result<Value, Box<dyn Error>> {
+fn schema<T: ToSchema>(id: &str, version: &str) -> Result<Value, Box<dyn Error>> {
     let mut root = serde_json::to_value(T::schema())?;
     let object = root
         .as_object_mut()
@@ -95,7 +95,7 @@ fn schema<T: ToSchema>(id: &str) -> Result<Value, Box<dyn Error>> {
     );
     object.insert(
         "$id".into(),
-        format!("urn:viramoon:finance:market-protocol:1.0:{id}").into(),
+        format!("urn:viramoon:finance:market-protocol:{version}:{id}").into(),
     );
     if !definitions.is_empty() {
         object.insert("$defs".into(), Value::Object(definitions));
@@ -110,6 +110,11 @@ fn schema<T: ToSchema>(id: &str) -> Result<Value, Box<dyn Error>> {
             .insert("unevaluatedProperties".into(), false.into());
     }
     if id == "capability" {
+        if version == "2.0" {
+            root["$defs"]["MarketKind"]["description"] = "Perpetual context kinds.".into();
+            root["properties"]["message_kinds"]["maxItems"] = 2.into();
+            root["properties"]["max_depth"]["maximum"] = 0.into();
+        }
         // Preserve the wire list order while enforcing the runtime uniqueness
         // check as a structural rule on the array.
         root.pointer_mut("/properties/message_kinds")
@@ -123,31 +128,106 @@ fn schema<T: ToSchema>(id: &str) -> Result<Value, Box<dyn Error>> {
             .ok_or("capability schema is missing max_depth")?
             .remove("format");
     }
+    if let Some(versions) = root.pointer_mut("/$defs/SchemaVersion/enum") {
+        *versions = serde_json::json!([version]);
+    }
+    let context = ["funding_rate", "open_interest"];
+    if let Some(kinds) = root
+        .pointer_mut("/$defs/MarketKind/enum")
+        .and_then(Value::as_array_mut)
+    {
+        kinds.retain(|kind| {
+            context.contains(&kind.as_str().unwrap_or_default()) == (version == "2.0")
+        });
+    }
+    if let Some(message) = root
+        .pointer_mut("/$defs/Message")
+        .and_then(Value::as_object_mut)
+    {
+        let branches = message
+            .get_mut("oneOf")
+            .and_then(Value::as_array_mut)
+            .ok_or("missing event kinds")?;
+        let old_market = ["bar_closed", "trade", "snapshot", "delta", "correction"];
+        branches.retain(|branch| {
+            let kind = branch
+                .pointer("/properties/kind/enum/0")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if version == "2.0" {
+                !old_market.contains(&kind)
+            } else {
+                !context.contains(&kind)
+            }
+        });
+        let unused: &[_] = if version == "2.0" {
+            message.insert(
+                "description".into(),
+                "Perpetual context events and stream controls.".into(),
+            );
+            *root
+                .pointer_mut("/allOf/1/properties/asset_kind")
+                .ok_or("missing asset kind")? =
+                serde_json::json!({"type": "string", "enum": ["perpetual"]});
+            &[
+                "AssetKind",
+                "ClosedBar",
+                "Trade",
+                "BookSnapshot",
+                "BookDelta",
+                "BookLevel",
+                "BookUpdate",
+                "BookSide",
+                "TradeSide",
+                "Correction",
+                "MarketMessage",
+            ]
+        } else {
+            &["FundingRate", "OpenInterest"]
+        };
+        let definitions = root
+            .pointer_mut("/$defs")
+            .and_then(Value::as_object_mut)
+            .ok_or("missing definitions")?;
+        for name in unused {
+            definitions.remove(*name);
+        }
+    }
     use_local_refs(&mut root);
     Ok(root)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = env::args_os().skip(1);
-    let Some(directory) = args.next().filter(|_| args.next().is_none()) else {
-        return Err("usage: export-market-protocol OUTPUT_DIRECTORY".into());
+    let directory = args
+        .next()
+        .ok_or("usage: export-market-protocol OUTPUT_DIRECTORY [--context-v2]")?;
+    let context_v2 = match (args.next().as_deref(), args.next()) {
+        (None, None) => false,
+        (Some(flag), None) if flag == "--context-v2" => true,
+        _ => return Err("usage: export-market-protocol OUTPUT_DIRECTORY [--context-v2]".into()),
     };
     let directory = PathBuf::from(directory);
-    let documents = [
-        (
-            "instrument.schema.json",
-            schema::<Instrument>("instrument")?,
-        ),
+    let version = if context_v2 { "2.0" } else { "1.0" };
+    let mut documents = vec![
         (
             "capability.schema.json",
-            schema::<Capability>("capability")?,
+            schema::<Capability>("capability", version)?,
         ),
-        ("event.schema.json", schema::<Event>("event")?),
-        (
-            "examples.json",
-            serde_json::to_value(Examples::validated()?)?,
-        ),
+        ("event.schema.json", schema::<Event>("event", version)?),
     ];
+    if !context_v2 {
+        documents.extend([
+            (
+                "instrument.schema.json",
+                schema::<Instrument>("instrument", version)?,
+            ),
+            (
+                "examples.json",
+                serde_json::to_value(Examples::validated()?)?,
+            ),
+        ]);
+    }
     fs::create_dir_all(&directory)?;
     for (file, mut document) in documents {
         // Canonical key ordering stays stable when other workspace crates enable

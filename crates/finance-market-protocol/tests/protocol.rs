@@ -740,3 +740,45 @@ fn instrument_and_capability_require_valid_metadata() {
         assert_rejected_json::<Capability>(&json, "/max_depth", kind, None);
     }
 }
+
+#[test]
+fn context_v2_exports_are_deterministic_and_version_scoped() {
+    let directory = tempfile::tempdir().unwrap();
+    let committed = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../protocol/v2");
+    for _ in 0..2 {
+        assert!(
+            Command::new(env!("CARGO_BIN_EXE_export-market-protocol"))
+                .arg(directory.path())
+                .arg("--context-v2")
+                .status()
+                .unwrap()
+                .success()
+        );
+        for name in ["capability.schema.json", "event.schema.json"] {
+            let exported = fs::read(directory.path().join(name)).unwrap();
+            assert_eq!(exported, fs::read(committed.join(name)).unwrap());
+            let schema: Value = serde_json::from_slice(&exported).unwrap();
+            assert_references_resolve(&schema, &schema);
+            assert_eq!(schema["$defs"]["SchemaVersion"]["enum"], json!(["2.0"]));
+        }
+    }
+    let events: Value =
+        serde_json::from_slice(&fs::read(committed.join("event.schema.json")).unwrap()).unwrap();
+    let kinds: BTreeSet<_> = events["$defs"]["Message"]["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|branch| branch["properties"]["kind"]["enum"][0].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        BTreeSet::from([
+            "funding_rate",
+            "open_interest",
+            "gap",
+            "reset",
+            "heartbeat",
+            "status"
+        ])
+    );
+}

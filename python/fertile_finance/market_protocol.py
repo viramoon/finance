@@ -136,7 +136,13 @@ class Kind(StrEnum):
     STATUS = "status"
 
 
+class ContextKind(StrEnum):
+    FUNDING_RATE = "funding_rate"
+    OPEN_INTEREST = "open_interest"
+
+
 _MARKET_KINDS = frozenset((Kind.BAR_CLOSED, Kind.TRADE, Kind.SNAPSHOT, Kind.DELTA))
+_CONTEXT_KINDS = frozenset(ContextKind)
 _BOOK_KINDS = frozenset((Kind.SNAPSHOT, Kind.DELTA))
 
 
@@ -203,11 +209,11 @@ def _market_kind(value: object, path: str) -> Kind:
     return kind
 
 
-def _version(record: dict[str, object]) -> str:
+def _version(record: dict[str, object], *, context: bool = False) -> str:
     path = "/schema_version"
     value = _string(record["schema_version"], path)
-    _require(value == SCHEMA_VERSION, path, f"expected {SCHEMA_VERSION!r}", kind="invalid_value")
-    return SCHEMA_VERSION
+    _require(value == SCHEMA_VERSION or (context and value == "2.0"), path, f"expected {SCHEMA_VERSION!r}", kind="invalid_value")
+    return value
 
 
 def _instrument_id(value: object, venue: str, path: str) -> str:
@@ -403,7 +409,7 @@ class Capability(_WireObject):
     schema_version: str
     source: str
     product: str
-    message_kinds: tuple[Kind, ...]
+    message_kinds: tuple[Kind | ContextKind, ...]
     max_depth: int
     can_backfill: bool
     delay_tier: DelayTier
@@ -415,9 +421,11 @@ class Capability(_WireObject):
             "schema_version", "source", "product", "message_kinds",
             "max_depth", "can_backfill", "delay_tier",
         ))
+        version = _version(data, context=True)
         kinds_path = f"{path}/message_kinds"
         kinds = tuple(
-            _market_kind(item, f"{kinds_path}/{index}")
+            _choice(ContextKind, item, f"{kinds_path}/{index}") if version == "2.0"
+            else _market_kind(item, f"{kinds_path}/{index}")
             for index, item in enumerate(_array(data["message_kinds"], kinds_path))
         )
         _require(bool(kinds), kinds_path, "expected at least one market message kind")
@@ -432,7 +440,7 @@ class Capability(_WireObject):
         if type(can_backfill) is not bool:
             raise ProtocolError("/can_backfill", "invalid_type", "expected a boolean")
         return cls(
-            schema_version=_version(data),
+            schema_version=version,
             source=_pattern(data["source"], _TOKEN, f"{path}/source"),
             product=_pattern(data["product"], _TOKEN, f"{path}/product"),
             message_kinds=kinds,
@@ -521,7 +529,18 @@ class Status:
     state: SourceState
 
 
-type Payload = MarketPayload | Correction | Gap | Reset | Heartbeat | Status
+@dataclass(frozen=True, slots=True)
+class FundingRate:
+    rate: DecimalText
+    next_funding_ts: U64Text
+
+
+@dataclass(frozen=True, slots=True)
+class OpenInterest:
+    quantity: DecimalText
+
+
+type Payload = MarketPayload | Correction | Gap | Reset | Heartbeat | Status | FundingRate | OpenInterest
 
 
 def _quantity(value: object, path: str, *, positive: bool = False) -> DecimalText:
@@ -611,7 +630,7 @@ def _market_payload(
             raise ProtocolError(path, "invalid_value", "expected a market payload")
 
 
-def _payload(kind: Kind, value: object, exchange_ts: U64Text | None) -> Payload:
+def _payload(kind: Kind | ContextKind, value: object, exchange_ts: U64Text | None) -> Payload:
     path = "/payload"
     if kind in _MARKET_KINDS or kind == Kind.CORRECTION:
         if exchange_ts is None:
@@ -630,6 +649,16 @@ def _payload(kind: Kind, value: object, exchange_ts: U64Text | None) -> Payload:
                 _market_payload(replacement_kind, replacement["payload"], f"{replacement_path}/payload", exchange_ts),
             ),
         )
+
+    if kind in _CONTEXT_KINDS:
+        _require(exchange_ts is not None, "/exchange_ts", "required for perpetual context")
+        if kind == ContextKind.FUNDING_RATE:
+            data = _object(value, path, ("rate", "next_funding_ts"))
+            next_ts = U64Text(data["next_funding_ts"], field=f"{path}/next_funding_ts")
+            _require(next_ts.integer >= exchange_ts.integer, f"{path}/next_funding_ts", "must be at or after exchange_ts")
+            return FundingRate(DecimalText(data["rate"], field=f"{path}/rate"), next_ts)
+        data = _object(value, path, ("quantity",))
+        return OpenInterest(_quantity(data["quantity"], f"{path}/quantity"))
 
     match kind:
         case Kind.GAP:
@@ -677,7 +706,7 @@ class Event(_WireObject):
     cursor: str
     revision: U64Text
     license: str
-    kind: Kind
+    kind: Kind | ContextKind
     payload: Payload
     native_id: str | None = None
 
@@ -690,7 +719,17 @@ class Event(_WireObject):
             "cursor", "revision", "license", "kind", "payload",
         ), ("native_id",))
         venue = _pattern(data["venue"], _VENUE_OR_CALENDAR, f"{path}/venue")
-        kind = _choice(Kind, data["kind"], f"{path}/kind")
+        version = _version(data, context=True)
+        asset_kind = _choice(AssetKind, data["asset_kind"], f"{path}/asset_kind")
+        raw_kind = _string(data["kind"], f"{path}/kind")
+        kind: Kind | ContextKind
+        if version == "2.0" and raw_kind in _CONTEXT_KINDS:
+            kind = ContextKind(raw_kind)
+        else:
+            kind = _choice(Kind, raw_kind, f"{path}/kind")
+        if version == "2.0":
+            _require(kind not in _MARKET_KINDS and kind != Kind.CORRECTION, "/schema_version", "2.0 does not support this message kind", kind="invalid_value")
+            _require(asset_kind == AssetKind.PERPETUAL, "/asset_kind", "version 2.0 requires a perpetual instrument")
         exchange_ts = (
             None if data["exchange_ts"] is None
             else U64Text(data["exchange_ts"], field=f"{path}/exchange_ts")
@@ -714,12 +753,12 @@ class Event(_WireObject):
                 "correction target must precede the new position",
             )
         return cls(
-            schema_version=_version(data),
+            schema_version=version,
             channel=_pattern(data["channel"], _TOKEN, f"{path}/channel"),
             source=_pattern(data["source"], _TOKEN, f"{path}/source"),
             product=_pattern(data["product"], _TOKEN, f"{path}/product"),
             instrument_id=_instrument_id(data["instrument_id"], venue, f"{path}/instrument_id"),
-            asset_kind=_choice(AssetKind, data["asset_kind"], f"{path}/asset_kind"),
+            asset_kind=asset_kind,
             venue=venue,
             exchange_ts=exchange_ts,
             receive_ts=U64Text(data["receive_ts"], field=f"{path}/receive_ts"),
@@ -778,6 +817,7 @@ class Event(_WireObject):
                 "does not match source capability",
             )
 
+        _require(self.schema_version == capability.schema_version, "/schema_version", "does not match the supplied capability")
         path = "/payload"
         kind_path = "/kind"
         kind, payload = self.kind, self.payload
@@ -785,7 +825,7 @@ class Event(_WireObject):
             path += "/replacement/payload"
             kind_path = "/payload/replacement/kind"
             kind, payload = payload.replacement.kind, payload.replacement.payload
-        if kind not in _MARKET_KINDS:
+        if kind not in _MARKET_KINDS and kind not in _CONTEXT_KINDS:
             return
         _require(kind in capability.message_kinds, kind_path, f"{kind} is not supported by the source product")
 

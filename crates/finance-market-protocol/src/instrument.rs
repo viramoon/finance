@@ -56,6 +56,11 @@ wire_object! {
 
 impl Instrument {
     pub fn validate(&self) -> Result<(), ValidationError> {
+        require(
+            self.schema_version == SchemaVersion::V1,
+            "schema_version",
+            "instrument metadata uses version 1.0",
+        )?;
         validate_venue(&self.instrument_id, &self.venue)?;
         for (field, value) in [
             ("tick_size", &self.tick_size),
@@ -101,6 +106,8 @@ wire_enum! {
         Trade = "trade",
         Snapshot = "snapshot",
         Delta = "delta",
+        FundingRate = "funding_rate",
+        OpenInterest = "open_interest",
     }
 }
 
@@ -128,6 +135,12 @@ wire_object! {
     validate = validate;
 }
 
+impl MarketKind {
+    pub fn is_perpetual_context(self) -> bool {
+        matches!(self, Self::FundingRate | Self::OpenInterest)
+    }
+}
+
 impl Capability {
     pub fn validate(&self) -> Result<(), ValidationError> {
         require(
@@ -136,6 +149,11 @@ impl Capability {
             "must contain at least one market message kind",
         )?;
         for (index, kind) in self.message_kinds.iter().enumerate() {
+            require(
+                kind.is_perpetual_context() == (self.schema_version == SchemaVersion::V2),
+                format!("message_kinds.{index}"),
+                "market kind does not match the capability version",
+            )?;
             require(
                 !self.message_kinds[..index].contains(kind),
                 "message_kinds",
