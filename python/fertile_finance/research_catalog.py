@@ -2,8 +2,10 @@
 
 import argparse
 import csv
+from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from enum import StrEnum
 from functools import lru_cache
 import hashlib
 import io
@@ -12,6 +14,8 @@ import os
 from pathlib import Path
 import re
 import tempfile
+from threading import Lock
+from typing import TYPE_CHECKING
 
 import exchange_calendars
 import pandas as pd
@@ -24,6 +28,10 @@ from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 
 from .collector_store import DECIMAL
 from .epoch import EPOCH, require_bar_timestamps, unix_nanos
+from .research_factors import FactorDefinition
+
+if TYPE_CHECKING:
+    from .factor_evaluation import FactorEvaluation
 
 
 ID = re.compile(r"[A-Z][A-Z0-9-]{0,15}\.XNYS")
@@ -43,6 +51,118 @@ class ResearchError(ValueError):
     def __init__(self, code, message):
         self.code = code
         super().__init__(message)
+
+
+class ResearchState(StrEnum):
+    RESEARCH = "research"
+    OUT_OF_SAMPLE_VALIDATION = "out_of_sample_validation"
+    OBSERVE_ONLY = "observe_only"
+    BACKTEST_SELECTABLE = "backtest_selectable"
+
+
+_RESEARCH_ADVANCE = {
+    ResearchState.RESEARCH: ResearchState.OUT_OF_SAMPLE_VALIDATION,
+    ResearchState.OUT_OF_SAMPLE_VALIDATION: ResearchState.OBSERVE_ONLY,
+    ResearchState.OBSERVE_ONLY: ResearchState.BACKTEST_SELECTABLE,
+}
+_RESEARCH_RETURN = {destination: origin for origin, destination in _RESEARCH_ADVANCE.items()}
+
+
+@dataclass(frozen=True)
+class ResearchTransition:
+    previous: ResearchState
+    current: ResearchState
+    reason: str
+    evidence_ref: str | None
+
+
+@dataclass(frozen=True)
+class RegisteredFactor:
+    definition: FactorDefinition
+    state: ResearchState = ResearchState.RESEARCH
+    history: tuple[ResearchTransition, ...] = ()
+
+
+class FactorResearchCatalog:
+    """Versioned research approvals for an offline caller's catalog instance."""
+
+    def __init__(self):
+        self._entries: dict[tuple[str, str], RegisteredFactor] = {}
+        self._lock = Lock()
+
+    def register(self, definition: FactorDefinition) -> RegisteredFactor:
+        key = (definition.factor_id, definition.version)
+        with self._lock:
+            existing = self._entries.get(key)
+            if existing is not None:
+                if existing.definition != definition:
+                    raise ResearchError("factor_version_conflict", "Register changed factor metadata under a new version")
+                return existing
+            entry = RegisteredFactor(definition)
+            self._entries[key] = entry
+            return entry
+
+    def get(self, factor_id: str, version: str) -> RegisteredFactor:
+        with self._lock:
+            return self._get(factor_id, version)
+
+    def _get(self, factor_id: str, version: str) -> RegisteredFactor:
+        try:
+            return self._entries[(factor_id, version)]
+        except KeyError:
+            raise ResearchError("unknown_factor_version", "Register this factor version first") from None
+
+    def transition(
+        self,
+        factor_id: str,
+        version: str,
+        state: ResearchState,
+        *,
+        reason: str,
+        evidence_ref: str | None = None,
+        report: "FactorEvaluation | None" = None,
+    ) -> RegisteredFactor:
+        if not isinstance(state, ResearchState) or not isinstance(reason, str) or not reason.strip():
+            raise ResearchError("invalid_research_transition", "Specify a research state and review reason")
+        if evidence_ref is not None and (not isinstance(evidence_ref, str) or not evidence_ref.strip()):
+            raise ResearchError("invalid_research_evidence", "Use a nonempty reference to versioned review evidence")
+        with self._lock:
+            entry = self._get(factor_id, version)
+            advancing = _RESEARCH_ADVANCE.get(entry.state) == state
+            if not advancing and _RESEARCH_RETURN.get(entry.state) != state:
+                raise ResearchError("invalid_research_transition", f"Cannot move from {entry.state} to {state}")
+            if advancing and evidence_ref is None:
+                raise ResearchError("invalid_research_evidence", "Record the frozen protocol or reviewed report reference")
+            if advancing and state in {ResearchState.OBSERVE_ONLY, ResearchState.BACKTEST_SELECTABLE}:
+                _require_out_of_sample_evidence(entry, state, report)
+            transition = ResearchTransition(entry.state, state, reason, evidence_ref)
+            updated = replace(entry, state=state, history=(*entry.history, transition))
+            self._entries[(factor_id, version)] = updated
+            return updated
+
+    def select_for_backtest(self, factor_id: str, version: str) -> FactorDefinition:
+        entry = self.get(factor_id, version)
+        if entry.state != ResearchState.BACKTEST_SELECTABLE:
+            raise ResearchError("factor_not_selectable", f"Factor version is in {entry.state}")
+        return entry.definition
+
+
+def _require_out_of_sample_evidence(
+    entry: RegisteredFactor, state: ResearchState, report: "FactorEvaluation | None",
+) -> None:
+    from .factor_evaluation import FactorEvaluation
+
+    if not isinstance(report, FactorEvaluation) or report.definition != entry.definition:
+        raise ResearchError("invalid_research_evidence", "Supply an evaluation for this exact factor and data version")
+    breadth = max(
+        (period.ic_pairs[1] for window in report.windows if window.window.phase == "out_of_sample"
+         for period in window.periods if period.ic[1] is not None),
+        default=0,
+    )
+    if not breadth:
+        raise ResearchError("invalid_research_evidence", "Supply a usable out-of-sample rank IC")
+    if state == ResearchState.BACKTEST_SELECTABLE and breadth <= 9:
+        raise ResearchError("insufficient_research_breadth", "Selection requires a reviewed cross section beyond nine assets")
 
 
 def research_root():

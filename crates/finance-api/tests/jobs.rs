@@ -102,6 +102,21 @@ async fn rejects_inputs_with_structured_errors() {
 }
 
 #[tokio::test]
+async fn historical_factor_momentum_cannot_enter_backtest_queue() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = "/api/v1/backtests";
+    for strategy in ["research.factor-momentum", "research.factor-momentum@1.0.0"] {
+        let body = BODY.replace("DemoStrategy", strategy);
+        let (status, data) = request(&temp, "POST", path, "historical", &body).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY.as_u16());
+        assert_eq!(data["error"]["code"], "invalid_request");
+    }
+    let (status, data) = request(&temp, "GET", path, "", "").await;
+    assert_eq!(status, StatusCode::OK.as_u16());
+    assert_eq!(data["items"], json!([]));
+}
+
+#[tokio::test]
 async fn queue_access_does_not_recreate_missing_data_mount() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("missing-mount");
