@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from fertile_finance import market_projector
@@ -89,6 +90,26 @@ class MarketProjectionTests(unittest.TestCase):
                 pq.write_table(table.take(indices), partition.path)
                 with self.assertRaisesRegex(ProjectionError, "no unique WAL position 0*2$"):
                     self.latest(self.second)
+
+    def test_latest_event_distinguishes_adjacent_wal_positions_at_uint64_max(self):
+        first_position, last_position = 2**64 - 2, 2**64 - 1
+        records = [WalRecord(first_position, self.first), WalRecord(last_position, self.second)]
+        wal = MemoryWal()
+
+        with open_projection(self.root, *self.product) as projection:
+            # Seed the checkpoint so a two-record WAL page reaches the uint64 boundary.
+            with projection.db:
+                projection.db.execute(
+                    "UPDATE checkpoint SET projected_through=? WHERE singleton=1",
+                    (str(first_position - 1),),
+                )
+            with patch.object(wal, "read_after", return_value=records):
+                self.assertEqual(projection.project_batch(wal, 2), 2)
+
+        partition, = self.partitions()
+        self.assertEqual((partition.first_position, partition.last_position), (first_position, last_position))
+        self.assertEqual(self.latest(self.first), self.first)
+        self.assertEqual(self.latest(self.second), self.second)
 
     def test_projection_readers_reject_directory_and_file_symlinks(self):
         self.project(MemoryWal(self.first))
@@ -374,6 +395,52 @@ class MarketProjectionTests(unittest.TestCase):
             (1, 2), (3, 3), (4, 4),
         ])
         self.assertEqual(self.latest(self.first), self.correction)
+
+    def test_retry_rejects_mismatched_partition_without_advancing_checkpoint(self):
+        wal = MemoryWal(self.first, self.second, self.correction, self.gap)
+        self.assertEqual(self.project(wal, 3), 3)
+        committed = self.partitions()
+        publish = market_projector._publish_parquet
+
+        def fail_after_publish(path, rows):
+            publish(path, rows)
+            raise OSError("synthetic loss after publish")
+
+        with patch.object(market_projector, "_publish_parquet", side_effect=fail_after_publish) as interrupted:
+            with self.assertRaisesRegex(OSError, "synthetic loss after publish"):
+                self.project(wal)
+        path, _ = interrupted.call_args.args
+
+        with pq.ParquetFile(path) as reader:
+            published = reader.read()
+        event_json = published.schema.field("event_json")
+        different_event = pa.array([self.second.to_json()], type=event_json.type)
+        mismatches = {
+            "row content": published.set_column(
+                published.schema.get_field_index("event_json"), event_json, different_event,
+            ),
+            "schema metadata": published.replace_schema_metadata({
+                **published.schema.metadata, b"finance.market_projection.version": b"2",
+            }),
+        }
+
+        for mismatch, table in mismatches.items():
+            with self.subTest(mismatch=mismatch):
+                pq.write_table(table, path)
+                with self.assertRaisesRegex(ProjectionError, "existing partition differs from replay at WAL 4$"):
+                    self.project(wal)
+                self.assertEqual(self.watermark(), "3")
+                self.assertEqual(self.partitions(), committed)
+                with open_projection(self.root, *self.product) as projection:
+                    checkpoint = projection.db.execute(
+                        "SELECT projected_through, pending_through FROM checkpoint WHERE singleton=1",
+                    ).fetchone()
+                self.assertEqual(checkpoint, ("3", "4"))
+
+        pq.write_table(published, path)
+        self.assertEqual(self.project(wal), 1)
+        self.assertEqual(self.watermark(), "4")
+        self.assertEqual([partition.path for partition in self.partitions()], [committed[0].path, path])
 
     def test_checkpoint_commit_before_watermark_repair(self):
         wal = MemoryWal(self.first)
