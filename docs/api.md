@@ -39,6 +39,8 @@ GET /api/v1/market/status 从 collector 持久状态读取各标的水位和新�
 
 IBKR 顶档订阅与权限验收由 `finance-ib` 的 Rust 接口和私有 CLI 提供，运行时独立于 HTTP API 和 collector 持久状态。接口与权限结论见 [IBKR 接入](integrations/ib.md#美股-l1-和-opra-权限验收)。
 
+Nasdaq TotalView 的页面焦点与场所深度由进程内 Rust 接口提供。接入共享行情所有者后，由 web 提供会话内展示入口。当前 HTTP 行情状态仍来自持久化采集状态。场所深度接口和接入边界见 [IBKR 接入](integrations/ib.md#nasdaq-totalview-场所深度)。
+
 POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /api/v1/backtests/{id} 查看执行进度与摘要，GET /api/v1/backtests 按 cursor 和 limit 翻页。提交使用同库事务完成幂等检查和容量检查，worker 独立执行。完整输入范围、超时和恢复见 [作业运维](backtest-jobs.md)。公网入口由 web 鉴权并限流。
 
 ## 配置策略提交与结果

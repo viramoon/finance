@@ -6,7 +6,7 @@ use crate::proto::decoders::{optional_f64, optional_string_f64, parse_f64, ts};
 use crate::Error;
 
 #[cfg(feature = "async")]
-use crate::market_data::realtime::ExactTickTypes;
+use crate::market_data::realtime::{ExactMarketDepth, ExactTickTypes};
 use crate::market_data::realtime::{
     Bar, BidAsk, BidAskAttribute, DepthMarketDataDescription, MarketDepth, MarketDepthL2, MidPoint, TickAttribute, TickGeneric, TickPrice,
     TickPriceSize, TickRequestParameters, TickSize, TickString, TickType, TickTypes, Trade, TradeAttribute,
@@ -35,6 +35,29 @@ pub(crate) fn decode_market_depth(message: &mut ResponseMessage) -> Result<Marke
 
 pub(crate) fn decode_market_depth_l2(message: &mut ResponseMessage) -> Result<MarketDepthL2, Error> {
     decode_market_depth_l2_proto(message.require_proto()?)
+}
+
+#[cfg(feature = "async")]
+pub(crate) fn decode_exact_market_depth(message: &ResponseMessage) -> Result<ExactMarketDepth, Error> {
+    use crate::messages::IncomingMessages;
+
+    let bytes = message.require_proto()?;
+    let data = match message.message_type() {
+        IncomingMessages::MarketDepth => crate::proto::MarketDepth::decode(bytes)?.market_depth_data,
+        IncomingMessages::MarketDepthL2 => crate::proto::MarketDepthL2::decode(bytes)?.market_depth_data,
+        _ => return Err(Error::unexpected_response(message)),
+    }
+    .ok_or_else(|| Error::parse_proto("market_depth_data", "missing from depth update"))?;
+
+    Ok(ExactMarketDepth {
+        position: data.position.ok_or_else(|| Error::parse_proto("position", "missing from depth update"))?,
+        operation: data.operation.ok_or_else(|| Error::parse_proto("operation", "missing from depth update"))?,
+        side: data.side.ok_or_else(|| Error::parse_proto("side", "missing from depth update"))?,
+        price: data.price,
+        size: data.size,
+        market_maker: data.market_maker,
+        smart_depth: data.is_smart_depth.unwrap_or_default(),
+    })
 }
 
 pub(crate) fn decode_market_depth_exchanges(message: &ResponseMessage) -> Result<Vec<DepthMarketDataDescription>, Error> {

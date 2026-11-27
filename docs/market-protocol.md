@@ -64,6 +64,8 @@ finance 定义行情流契约，供采集适配器、投影、研究和 web 消�
 
 相邻事件的校验和游标字段供生产者和消费者复用。[本地 WAL 与投影](market-wal.md) 用此分区键与 epoch、seq 识别逻辑位置，持久水位使用独立的产品内 WAL 位置。F6 定义从带游标的快照续接、游标过期的 `reset_required` 响应及 WS 订阅路由。web 的 SSE 投递与用户权限由后续 web 接口定义。
 
+Nasdaq TotalView 在 `finance-ib` 内存展示接口保留 IBKR 按位置更新的深度行。返回行数按现有位置计，允许同侧多行价格相同。F1 `snapshot` 仍使用严格有序的唯一价位，价位口径与场所展示行分别由各自的类型表达。场所深度通过专用接口消费，后续外部投递由 web 集成工作定义。[Nasdaq TotalView 场所深度](integrations/ib.md#nasdaq-totalview-场所深度)
+
 ## Schema 导出与兼容规则
 
 v1 的标的、能力和事件都带 `schema_version: "1.0"`。仓库交付以下独立的 JSON Schema Draft 2020-12 和跨仓样本。

@@ -146,4 +146,12 @@ option_exposure:
   input: option_chain_snapshot
   persistence: disabled
   documentation: docs/option-exposure.md
+nasdaq_totalview:
+  invocation: in_process_rust_library
+  account: paper_read_only
+  activation: 由共享行情所有者接入，启用前核对综合股票 L1、TotalView-OpenView 和 EDS
+  concurrent_depth: {pinned: 2, page_focus: 1}
+  output: private_session_display
+  persistence: disabled
+  documentation: docs/integrations/ib.md#nasdaq-totalview-场所深度
 runbook: RUNBOOK.md

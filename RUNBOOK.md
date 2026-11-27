@@ -108,6 +108,20 @@ Replay 可单独运行。paper 模式下 probe 用 client ID 91，collector 用 
 
 经授权后，在美股常规交易时段使用已登录的本机 paper Gateway，确认 Gateway 的 API 设置为只读。选择一份已知活跃的 SMART USD 美股期权，使用该合约的 `conId`，按 [产品权限验收](docs/integrations/ib.md#美股-l1-和-opra-权限验收) 运行 `scripts/check-ib-entitlements.sh`。权限探针占用现有 probe client ID 91，逐标的开一条流并在进入下一项前取消。`pending` 保留具体原因。遇到 `gateway_disconnected` 时，先恢复只读 paper 会话再重新运行探针。遇到 `cancel_failed` 时，本轮行数回收结果未知，探针关闭连接并保留已完成标的的证据。发现休市、无回调或报价不完整时，于常规交易时段复测。探针只输出脱敏摘要，原始行情和账户资料留在私有环境。
 
+### 离线验收 Nasdaq TotalView 场所深度
+
+焦点测试使用独立列出的 QQQ、AAPL、MSFT、NVDA、AMZN、GOOGL、META、TSLA 逐一验证切换，另验证 SPY 拒绝、两个固定名额与一个页面名额、清簿再订阅和场所及档数标签。深度测试使用合成回调和内存 Gateway 回放，无需账户配置。
+
+WAL 隔离测试在子进程中运行深度展示入口，将工作目录和 `FERTILE_DATA_ROOT` 都指向同一个临时目录。子进程在展示盘口时和退出展示循环后核对目录为空，并检查 WAL 产品和 TotalView 记录策略。随后在同一目录落盘一条获准记录的合成 F1 盘口快照作为对照，父进程核对只存在该对照产品且能原样回读快照。产品策略测试另行核对 `ibkr/nasdaq-totalview` 拒绝本地记录、非展示派生与 Drive 备份。
+
+```sh
+cargo test --locked --offline -p finance-ib depth
+cargo test --locked --offline -p finance-collector --test nasdaq_totalview
+cargo test --locked --offline -p finance-collector totalview_product_cannot_record_derive_or_back_up
+```
+
+授权的私有 paper 验收须独立核对综合股票 L1、TotalView-OpenView、EDS、paper 数据共享和实际 Nasdaq 深度回调。遇到休市或无回调时保留待验证状态，遇到名额不足时检查同一用户名的现有深度窗口。真实证据遵循 [数据入仓防护](docs/data-guard.md)。接口和故障状态见 [Nasdaq TotalView 场所深度](docs/integrations/ib.md#nasdaq-totalview-场所深度)。
+
 ### F1 行情 WAL 与投影
 
 生产者通过 [本地行情接口](docs/market-wal.md) 绑定产品许可，并在确认采集前提交 WAL。在独立数据根可使用已有源码构建的 Python 环境追平投影并检查水位。下列命令把 `$DATA_ROOT`、`$SOURCE` 和 `$PRODUCT` 设为目标数据根与已登记产品，`$WAL_BIN` 设为构建的 `finance-market-wal` 路径。
