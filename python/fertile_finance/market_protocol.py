@@ -14,6 +14,7 @@ from typing import Self
 
 SCHEMA_VERSION = "1.0"
 CONTEXT_SCHEMA_VERSION = "2.0"
+OPTION_HISTORY_SCHEMA_VERSION = "3.0"
 _MAX_U64 = 2**64 - 1
 _MAX_U32 = 2**32 - 1
 _U64 = re.compile(r"0|[1-9][0-9]*")
@@ -143,6 +144,14 @@ class ContextKind(StrEnum):
     PERPETUAL_CONTEXT = "perpetual_context"
 
 
+class OptionHistoryKind(StrEnum):
+    TRADE = "option_history_trade"
+    QUOTE = "option_history_quote"
+
+
+type EventKind = Kind | ContextKind | OptionHistoryKind
+
+
 _MARKET_KINDS = frozenset((Kind.BAR_CLOSED, Kind.TRADE, Kind.SNAPSHOT, Kind.DELTA))
 _CONTEXT_KINDS = frozenset(ContextKind)
 _SEPARATE_CONTEXT_KINDS = _CONTEXT_KINDS - {ContextKind.PERPETUAL_CONTEXT}
@@ -206,9 +215,11 @@ def _choice[T: StrEnum](enum: type[T], value: object, path: str) -> T:
         raise ProtocolError(path, "invalid_value", f"unknown value {text!r}, expected {choices}") from None
 
 
-def _event_kind(value: object, path: str) -> Kind | ContextKind:
+def _event_kind(value: object, path: str) -> EventKind:
     if isinstance(value, str) and value in _CONTEXT_KINDS:
         return _choice(ContextKind, value, path)
+    if value in (OptionHistoryKind.TRADE, OptionHistoryKind.QUOTE):
+        return _choice(OptionHistoryKind, value, path)
     return _choice(Kind, value, path)
 
 
@@ -218,10 +229,11 @@ def _market_kind(value: object, path: str) -> Kind:
     return kind
 
 
-def _capability_kind(value: object, path: str) -> Kind | ContextKind:
-    if isinstance(value, str) and value in _CONTEXT_KINDS:
-        return _choice(ContextKind, value, path)
-    return _market_kind(value, path)
+def _capability_kind(value: object, path: str) -> EventKind:
+    kind = _event_kind(value, path)
+    if isinstance(kind, Kind):
+        return _market_kind(value, path)
+    return kind
 
 
 def _version(record: dict[str, object], expected: str = SCHEMA_VERSION) -> str:
@@ -424,7 +436,7 @@ class Capability(_WireObject):
     schema_version: str
     source: str
     product: str
-    message_kinds: tuple[Kind | ContextKind, ...]
+    message_kinds: tuple[EventKind, ...]
     max_depth: int
     can_backfill: bool
     delay_tier: DelayTier
@@ -441,10 +453,15 @@ class Capability(_WireObject):
             _capability_kind(item, f"{kinds_path}/{index}")
             for index, item in enumerate(_array(data["message_kinds"], kinds_path))
         )
-        version = CONTEXT_SCHEMA_VERSION if _CONTEXT_KINDS.intersection(kinds) else SCHEMA_VERSION
-        if _SEPARATE_CONTEXT_KINDS.intersection(kinds):
-            for index, kind in enumerate(kinds):
-                _require(kind in _SEPARATE_CONTEXT_KINDS, f"{kinds_path}/{index}", "separate funding and open interest cannot share a capability with other kinds")
+        if any(isinstance(kind, OptionHistoryKind) for kind in kinds):
+            version = OPTION_HISTORY_SCHEMA_VERSION
+            _require(all(isinstance(kind, OptionHistoryKind) for kind in kinds), kinds_path,
+                     "historical option capabilities contain only historical option kinds")
+        else:
+            version = CONTEXT_SCHEMA_VERSION if _CONTEXT_KINDS.intersection(kinds) else SCHEMA_VERSION
+            if _SEPARATE_CONTEXT_KINDS.intersection(kinds):
+                for index, kind in enumerate(kinds):
+                    _require(kind in _SEPARATE_CONTEXT_KINDS, f"{kinds_path}/{index}", "separate funding and open interest cannot share a capability with other kinds")
         _require(bool(kinds), kinds_path, "expected at least one market message kind")
         _require(len(set(kinds)) == len(kinds), kinds_path, "duplicate message kind")
         max_depth = _depth(data["max_depth"], f"{path}/max_depth")
@@ -564,7 +581,40 @@ class PerpetualContext:
     mark_price: DecimalText
 
 
-type Payload = MarketPayload | Correction | Gap | Reset | Heartbeat | Status | PerpetualContext | FundingRate | OpenInterest
+@dataclass(frozen=True, slots=True)
+class OptionHistoryBatch:
+    requested_start_ts: U64Text
+    page: U64Text
+    occurrence: U64Text
+    request_id: U64Text | None
+
+
+@dataclass(frozen=True, slots=True)
+class OptionHistoryTrade:
+    batch: OptionHistoryBatch
+    price: DecimalText
+    quantity: DecimalText
+    contract_multiplier: DecimalText
+    exchange: str
+    special_conditions: str
+    condition_mapping_version: str
+    past_limit: bool
+    unreported: bool
+
+
+@dataclass(frozen=True, slots=True)
+class OptionHistoryQuote:
+    batch: OptionHistoryBatch
+    bid: DecimalText | None
+    ask: DecimalText | None
+    bid_quantity: DecimalText | None
+    ask_quantity: DecimalText | None
+    bid_past_low: bool
+    ask_past_high: bool
+
+
+type Payload = (MarketPayload | Correction | Gap | Reset | Heartbeat | Status
+                | PerpetualContext | FundingRate | OpenInterest | OptionHistoryTrade | OptionHistoryQuote)
 
 
 def _quantity(value: object, path: str, *, positive: bool = False) -> DecimalText:
@@ -654,8 +704,57 @@ def _market_payload(
             raise ProtocolError(path, "invalid_value", "expected a market payload")
 
 
-def _payload(kind: Kind | ContextKind, value: object, exchange_ts: U64Text | None) -> Payload:
+def _option_history_payload(
+    kind: OptionHistoryKind, value: object, path: str
+) -> OptionHistoryTrade | OptionHistoryQuote:
+    def boolean(data: dict[str, object], field: str) -> bool:
+        result = data[field]
+        if type(result) is not bool:
+            raise ProtocolError(f"{path}/{field}", "invalid_type", "expected a boolean")
+        return result
+
+    def batch(data: dict[str, object]) -> OptionHistoryBatch:
+        batch_path = f"{path}/batch"
+        fields = _object(data["batch"], batch_path, ("requested_start_ts", "page", "occurrence", "request_id"))
+        return OptionHistoryBatch(
+            U64Text(fields["requested_start_ts"], field=f"{batch_path}/requested_start_ts"),
+            U64Text(fields["page"], field=f"{batch_path}/page"),
+            U64Text(fields["occurrence"], field=f"{batch_path}/occurrence"),
+            None if fields["request_id"] is None else U64Text(fields["request_id"], field=f"{batch_path}/request_id"),
+        )
+
+    if kind == OptionHistoryKind.TRADE:
+        data = _object(value, path, ("batch", "price", "quantity", "contract_multiplier", "exchange", "special_conditions",
+                                     "condition_mapping_version", "past_limit", "unreported"))
+        return OptionHistoryTrade(
+            batch(data),
+            DecimalText(data["price"], field=f"{path}/price"),
+            DecimalText(data["quantity"], field=f"{path}/quantity"),
+            _quantity(data["contract_multiplier"], f"{path}/contract_multiplier", positive=True),
+            _string(data["exchange"], f"{path}/exchange"),
+            _string(data["special_conditions"], f"{path}/special_conditions"),
+            _text(data["condition_mapping_version"], f"{path}/condition_mapping_version"),
+            boolean(data, "past_limit"),
+            boolean(data, "unreported"),
+        )
+
+    data = _object(value, path, ("batch", "bid", "ask", "bid_quantity", "ask_quantity",
+                                 "bid_past_low", "ask_past_high"))
+
+    def decimal(field: str) -> DecimalText | None:
+        return None if data[field] is None else DecimalText(data[field], field=f"{path}/{field}")
+
+    return OptionHistoryQuote(
+        batch(data), decimal("bid"), decimal("ask"), decimal("bid_quantity"), decimal("ask_quantity"),
+        boolean(data, "bid_past_low"), boolean(data, "ask_past_high"),
+    )
+
+
+def _payload(kind: EventKind, value: object, exchange_ts: U64Text | None) -> Payload:
     path = "/payload"
+    if isinstance(kind, OptionHistoryKind):
+        _require(exchange_ts is not None, "/exchange_ts", "required for historical option evidence")
+        return _option_history_payload(kind, value, path)
     if kind in _MARKET_KINDS or kind == Kind.CORRECTION:
         if exchange_ts is None:
             raise ProtocolError("/exchange_ts", "constraint_violation", "required for market data and corrections")
@@ -739,7 +838,7 @@ class Event(_WireObject):
     cursor: str
     revision: U64Text
     license: str
-    kind: Kind | ContextKind
+    kind: EventKind
     payload: Payload
     native_id: str | None = None
 
@@ -755,7 +854,9 @@ class Event(_WireObject):
         kind = _event_kind(data["kind"], f"{path}/kind")
         asset_kind = _choice(AssetKind, data["asset_kind"], f"{path}/asset_kind")
         expected_version = data["schema_version"]
-        if kind in _CONTEXT_KINDS:
+        if isinstance(kind, OptionHistoryKind):
+            expected_version = OPTION_HISTORY_SCHEMA_VERSION
+        elif kind in _CONTEXT_KINDS:
             if kind in _SEPARATE_CONTEXT_KINDS and expected_version == SCHEMA_VERSION:
                 raise ProtocolError("/kind", "invalid_value", "perpetual context requires version 2.0")
             expected_version = CONTEXT_SCHEMA_VERSION
@@ -763,6 +864,7 @@ class Event(_WireObject):
             expected_version = SCHEMA_VERSION
         version = _version(data, expected_version)
         _require(version != CONTEXT_SCHEMA_VERSION or asset_kind == AssetKind.PERPETUAL, "/asset_kind", "version 2.0 requires a perpetual instrument")
+        _require(not isinstance(kind, OptionHistoryKind) or asset_kind == AssetKind.OPTION, "/asset_kind", "historical evidence requires an option instrument")
         exchange_ts = (
             None if data["exchange_ts"] is None
             else U64Text(data["exchange_ts"], field=f"{path}/exchange_ts")
@@ -778,6 +880,15 @@ class Event(_WireObject):
         )
         _require(kind != Kind.RESET or seq.integer == 0, f"{path}/seq", "reset must have sequence zero")
         payload = _payload(kind, data["payload"], exchange_ts)
+        receive_ts = U64Text(data["receive_ts"], field=f"{path}/receive_ts")
+        if isinstance(payload, (OptionHistoryTrade, OptionHistoryQuote)):
+            assert exchange_ts is not None
+            _require(exchange_ts.integer % 1_000_000_000 == 0 and exchange_ts.integer <= receive_ts.integer,
+                     "/exchange_ts", "historical evidence requires source seconds at or before receipt")
+            _require(payload.batch.requested_start_ts.integer <= exchange_ts.integer,
+                     "/payload/batch/requested_start_ts", "must be at or before the source tick")
+            for field in ("page", "occurrence"):
+                _require(getattr(payload.batch, field).integer > 0, f"/payload/batch/{field}", "must be positive")
         if isinstance(payload, Correction):
             _require(payload.target_epoch.integer > 0, f"{path}/payload/target_epoch", "must be positive")
             _require(
@@ -794,7 +905,7 @@ class Event(_WireObject):
             asset_kind=asset_kind,
             venue=venue,
             exchange_ts=exchange_ts,
-            receive_ts=U64Text(data["receive_ts"], field=f"{path}/receive_ts"),
+            receive_ts=receive_ts,
             first_available_ts=U64Text(data["first_available_ts"], field=f"{path}/first_available_ts"),
             epoch=epoch,
             seq=seq,
@@ -850,7 +961,7 @@ class Event(_WireObject):
                 "does not match source capability",
             )
 
-        if self.kind not in _CONTEXT_KINDS:
+        if isinstance(self.kind, Kind):
             separate = bool(_SEPARATE_CONTEXT_KINDS.intersection(capability.message_kinds))
             _require((self.schema_version == CONTEXT_SCHEMA_VERSION) == separate,
                      "/schema_version", "does not match the supplied capability")
@@ -861,7 +972,7 @@ class Event(_WireObject):
             path += "/replacement/payload"
             kind_path = "/payload/replacement/kind"
             kind, payload = payload.replacement.kind, payload.replacement.payload
-        if kind not in _MARKET_KINDS and kind not in _CONTEXT_KINDS:
+        if kind not in _MARKET_KINDS and not isinstance(kind, (ContextKind, OptionHistoryKind)):
             return
         _require(kind in capability.message_kinds, kind_path, f"{kind} is not supported by the source product")
 
@@ -871,6 +982,9 @@ class Event(_WireObject):
             _aligned(payload.volume, instrument.lot_size, f"{path}/volume", "lot_size")
         elif isinstance(payload, Trade):
             _check_level(payload, instrument, path)
+        elif isinstance(payload, OptionHistoryTrade):
+            _require(payload.contract_multiplier.decimal == instrument.contract_multiplier.decimal,
+                     f"{path}/contract_multiplier", "does not match the supplied instrument")
         elif isinstance(payload, Snapshot):
             for name, levels in (("bids", payload.bids), ("asks", payload.asks)):
                 _require(len(levels) <= capability.max_depth, f"{path}/{name}", "exceeds max_depth")

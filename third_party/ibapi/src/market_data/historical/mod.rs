@@ -602,6 +602,40 @@ pub struct TickAttributeLast {
     pub unreported: bool,
 }
 
+/// A historical trade with source field presence and decimal size preserved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExactTickLast {
+    /// Unix occurrence time in whole seconds.
+    pub timestamp: Option<i64>,
+    /// Trade attributes reported by the source.
+    pub tick_attribute_last: TickAttributeLast,
+    /// Price as reported by the source's binary64 field.
+    pub price: Option<f64>,
+    /// Trade size in the source's decimal representation.
+    pub size: Option<String>,
+    /// Reporting exchange, when provided.
+    pub exchange: Option<String>,
+    /// Uninterpreted source condition string, which may be empty.
+    pub special_conditions: Option<String>,
+}
+
+/// A historical quote with source field presence and decimal sizes preserved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExactTickBidAsk {
+    /// Unix occurrence time in whole seconds.
+    pub timestamp: Option<i64>,
+    /// Quote attributes reported by the source.
+    pub tick_attribute_bid_ask: TickAttributeBidAsk,
+    /// Bid price as reported by the source's binary64 field.
+    pub price_bid: Option<f64>,
+    /// Ask price as reported by the source's binary64 field.
+    pub price_ask: Option<f64>,
+    /// Bid size in the source's decimal representation.
+    pub size_bid: Option<String>,
+    /// Ask size in the source's decimal representation.
+    pub size_ask: Option<String>,
+}
+
 /// Enumerates the data payload returned when requesting historical data.
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Clone, Debug, Copy, PartialEq, Serialize, Deserialize)]
@@ -723,8 +757,8 @@ pub use r#async::TickSubscription;
 /// External users can name the trait as a bound on [`TickSubscription<T>`], but
 /// cannot call [`decode`](Self::decode) themselves — the argument
 /// `&mut ResponseMessage` is crate-private. Implementations are restricted to
-/// the three built-in tick types ([`TickBidAsk`], [`TickLast`],
-/// [`TickMidpoint`]); custom implementations are not supported.
+/// the built-in tick types such as [`TickBidAsk`], [`TickLast`],
+/// and [`TickMidpoint`]; custom implementations are not supported.
 #[allow(private_interfaces)]
 pub trait TickDecoder<T> {
     /// Message discriminator emitted by TWS for this tick type.
@@ -748,6 +782,24 @@ impl TickDecoder<TickLast> for TickLast {
 
     fn decode(message: &ResponseMessage) -> Result<(Vec<TickLast>, bool), Error> {
         common::decoders::decode_historical_ticks_last(message)
+    }
+}
+
+#[allow(private_interfaces)]
+impl TickDecoder<ExactTickLast> for ExactTickLast {
+    const MESSAGE_TYPE: IncomingMessages = IncomingMessages::HistoricalTickLast;
+
+    fn decode(message: &ResponseMessage) -> Result<(Vec<Self>, bool), Error> {
+        common::decoders::decode_exact_historical_ticks_last(message.require_proto()?)
+    }
+}
+
+#[allow(private_interfaces)]
+impl TickDecoder<ExactTickBidAsk> for ExactTickBidAsk {
+    const MESSAGE_TYPE: IncomingMessages = IncomingMessages::HistoricalTickBidAsk;
+
+    fn decode(message: &ResponseMessage) -> Result<(Vec<Self>, bool), Error> {
+        common::decoders::decode_exact_historical_ticks_bid_ask(message.require_proto()?)
     }
 }
 

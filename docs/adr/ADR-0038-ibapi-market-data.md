@@ -40,6 +40,14 @@ F9c 复用同一 Cargo patch。IBKR 的深度行按买卖侧和位置更新，�
 
 深度测试由固定 Rust 输入生成合约、深度行和状态通知。用 `sh scripts/export-totalview-review-sources.sh` 从当前提交导出三份合成测试的原始源码，校对登记的 SHA-256。运行手册列出执行回放的命令。[来源清单](../../.data-guard/sources.json) · [离线验收](../../RUNBOOK.md#离线验收-nasdaq-totalview-场所深度)
 
+## F9e 的期权历史逐笔扩展
+
+F9e 在同一补丁中复用历史逐笔的 Protobuf 请求、解码和分发。`trade_exact()` 与 `bid_ask_exact()` 保留原始十进制数量和字段缺失状态，只有收到完成标记且完整读到请求回调才交付一页。请求队列溢出、断流或错误会丢弃当页的部分结果。既有 SDK 历史逐笔接口沿用原有行为。源价格以 binary64 传输，finance 以最短往返十进制表示进入 `DecimalText`，后续计算与传输使用十进制类型。[issue #42](https://github.com/viramoon/finance/issues/42)
+
+历史读取使用同一已校验的 paper 会话和已确认的 SMART USD 期权 conId，只请求常规交易时段的 `TRADES` 和 `BID_ASK`。它复用 F11 的本地跨进程历史限速状态。内存回放经生产 SDK 分发器核对请求字段、原始数量、空条件码和完成标记。[历史限速](../historical-pull.md#预计耗时与连接约束)
+
+F9e 实时观察测试用固定输入生成合成行情回调。测试调用触发数据入仓防护的表格检测，可在仓库根目录用 `sh scripts/export-option-flow-review-sources.sh` 从当前提交导出其源码。独立提交回归核对归档路径和摘要。[来源清单](../../.data-guard/sources.json)
+
 ## 后续工作
 
-升级 SDK 时优先使用包含这些修复的上游版本。移除本地补丁前，运行同一套内存回归，核对顶档实际回调、顶档和深度数量、深度队列溢出后的清簿语义、取消写入结果、重连期间关闭和 paper 会话边界。
+升级 SDK 时优先使用包含这些修复的上游版本。移除本地补丁前，运行同一套内存回归，核对顶档实际回调、顶档和深度数量、深度队列溢出后的清簿语义、历史逐笔大小与完整页、取消写入结果、重连期间关闭和 paper 会话边界。

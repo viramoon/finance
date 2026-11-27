@@ -1,7 +1,9 @@
 use finance_api::{ApiDoc, AppState, config::Settings, read_stream, router};
 use finance_market_protocol::{
     SchemaVersion,
-    schema_export::{CONTROL_KINDS, V2_CONTEXT_KINDS, close_event_envelopes},
+    schema_export::{
+        CONTROL_KINDS, V2_CONTEXT_KINDS, V3_OPTION_HISTORY_KINDS, close_event_envelopes,
+    },
 };
 use serde_json::{Value, json};
 use std::{
@@ -31,22 +33,33 @@ async fn main() -> Result<(), Box<dyn Error>> {
             "/components/schemas/Event",
             "/components/schemas/MarketMessage",
         )?;
-        // REST reads both versions from the same WAL. The common envelope and
+        // REST reads versioned records from the WAL. The common envelope and
         // kind union alone do not express which version is valid for each kind.
         let v2_kinds: Vec<_> = V2_CONTEXT_KINDS.into_iter().chain(CONTROL_KINDS).collect();
+        let versioned_kinds: Vec<_> = V2_CONTEXT_KINDS
+            .into_iter()
+            .chain(V3_OPTION_HISTORY_KINDS)
+            .collect();
         spec.pointer_mut("/components/schemas/Event/allOf")
             .and_then(Value::as_array_mut)
             .ok_or("missing REST event envelope schema")?
             .push(json!({"oneOf": [
                 {"properties": {
                     "schema_version": {"const": SchemaVersion::V1},
-                    "kind": {"not": {"enum": V2_CONTEXT_KINDS}}
+                    "kind": {"not": {"enum": versioned_kinds}}
                 }},
                 {"properties": {
                     "schema_version": {"const": SchemaVersion::V2},
                     "kind": {"enum": v2_kinds},
                     "asset_kind": {"const": "perpetual"},
                     "revision": {"const": "0"}
+                }},
+                {"properties": {
+                    "schema_version": {"const": SchemaVersion::V3},
+                    "kind": {"enum": V3_OPTION_HISTORY_KINDS},
+                    "asset_kind": {"const": "option"},
+                    "revision": {"const": "0"},
+                    "exchange_ts": {"$ref": "#/components/schemas/U64Text"}
                 }}
             ]}));
         println!("{}", serde_json::to_string_pretty(&spec)?);

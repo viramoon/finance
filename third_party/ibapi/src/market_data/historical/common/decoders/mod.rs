@@ -7,7 +7,8 @@ use crate::messages::ResponseMessage;
 use crate::Error;
 
 use crate::market_data::historical::{
-    Bar, BarTimestamp, HistogramEntry, HistoricalData, Schedule, Session, TickAttributeBidAsk, TickAttributeLast, TickBidAsk, TickLast, TickMidpoint,
+    Bar, BarTimestamp, ExactTickBidAsk, ExactTickLast, HistogramEntry, HistoricalData, Schedule, Session, TickAttributeBidAsk,
+    TickAttributeLast, TickBidAsk, TickLast, TickMidpoint,
 };
 
 pub(crate) fn decode_head_timestamp(message: &ResponseMessage) -> Result<OffsetDateTime, Error> {
@@ -146,6 +147,22 @@ pub(crate) fn decode_historical_ticks_proto(bytes: &[u8]) -> Result<(Vec<TickMid
 }
 
 pub(crate) fn decode_historical_ticks_last_proto(bytes: &[u8]) -> Result<(Vec<TickLast>, bool), Error> {
+    let (rows, done) = decode_exact_historical_ticks_last(bytes)?;
+    let ticks = rows
+        .into_iter()
+        .map(|row| TickLast {
+            timestamp: ts(row.timestamp.unwrap_or_default()),
+            tick_attribute_last: row.tick_attribute_last,
+            price: row.price.unwrap_or_default(),
+            size: parse_str_i32(&row.size),
+            exchange: row.exchange.unwrap_or_default(),
+            special_conditions: row.special_conditions.unwrap_or_default(),
+        })
+        .collect();
+    Ok((ticks, done))
+}
+
+pub(crate) fn decode_exact_historical_ticks_last(bytes: &[u8]) -> Result<(Vec<ExactTickLast>, bool), Error> {
     let msg = proto::HistoricalTicksLast::decode(bytes)?;
 
     let ticks = msg
@@ -153,16 +170,16 @@ pub(crate) fn decode_historical_ticks_last_proto(bytes: &[u8]) -> Result<(Vec<Ti
         .into_iter()
         .map(|t| {
             let attr = t.tick_attrib_last;
-            TickLast {
-                timestamp: ts(t.time.unwrap_or_default()),
+            ExactTickLast {
+                timestamp: t.time,
                 tick_attribute_last: TickAttributeLast {
                     past_limit: attr.as_ref().and_then(|a| a.past_limit).unwrap_or_default(),
                     unreported: attr.and_then(|a| a.unreported).unwrap_or_default(),
                 },
-                price: t.price.unwrap_or_default(),
-                size: parse_str_i32(&t.size),
-                exchange: t.exchange.unwrap_or_default(),
-                special_conditions: t.special_conditions.unwrap_or_default(),
+                price: t.price,
+                size: t.size,
+                exchange: t.exchange,
+                special_conditions: t.special_conditions,
             }
         })
         .collect();
@@ -171,23 +188,39 @@ pub(crate) fn decode_historical_ticks_last_proto(bytes: &[u8]) -> Result<(Vec<Ti
 }
 
 pub(crate) fn decode_historical_ticks_bid_ask_proto(bytes: &[u8]) -> Result<(Vec<TickBidAsk>, bool), Error> {
+    let (rows, done) = decode_exact_historical_ticks_bid_ask(bytes)?;
+    let ticks = rows
+        .into_iter()
+        .map(|row| TickBidAsk {
+            timestamp: ts(row.timestamp.unwrap_or_default()),
+            tick_attribute_bid_ask: row.tick_attribute_bid_ask,
+            price_bid: row.price_bid.unwrap_or_default(),
+            price_ask: row.price_ask.unwrap_or_default(),
+            size_bid: parse_str_i32(&row.size_bid),
+            size_ask: parse_str_i32(&row.size_ask),
+        })
+        .collect();
+    Ok((ticks, done))
+}
+
+pub(crate) fn decode_exact_historical_ticks_bid_ask(bytes: &[u8]) -> Result<(Vec<ExactTickBidAsk>, bool), Error> {
     let msg = proto::HistoricalTicksBidAsk::decode(bytes)?;
 
     let ticks = msg
         .historical_ticks_bid_ask
-        .iter()
+        .into_iter()
         .map(|t| {
             let attr = t.tick_attrib_bid_ask.as_ref();
-            TickBidAsk {
-                timestamp: ts(t.time.unwrap_or_default()),
+            ExactTickBidAsk {
+                timestamp: t.time,
                 tick_attribute_bid_ask: TickAttributeBidAsk {
                     ask_past_high: attr.and_then(|a| a.ask_past_high).unwrap_or_default(),
                     bid_past_low: attr.and_then(|a| a.bid_past_low).unwrap_or_default(),
                 },
-                price_bid: t.price_bid.unwrap_or_default(),
-                price_ask: t.price_ask.unwrap_or_default(),
-                size_bid: parse_str_i32(&t.size_bid),
-                size_ask: parse_str_i32(&t.size_ask),
+                price_bid: t.price_bid,
+                price_ask: t.price_ask,
+                size_bid: t.size_bid,
+                size_ask: t.size_ask,
             }
         })
         .collect();

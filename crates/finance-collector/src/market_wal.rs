@@ -2,20 +2,19 @@
 //! prefix, so a valid frame left by an interrupted batch is still unconfirmed.
 
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{self, BufReader, Read, Seek, SeekFrom, Write},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use anyhow::{Context, Result, ensure};
 use finance_market_protocol::{Event, Token, U64Text, decode_json};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tempfile::NamedTempFile;
 use utoipa::ToSchema;
 
-mod restore;
-use restore::RestoreDirectory;
+mod directory;
+pub(crate) use directory::WalDirectory;
 
 pub(crate) const WAL_SUBDIRECTORIES: [&str; 2] = ["finance-state", "market-wal"];
 const VERSION: u32 = 1;
@@ -122,13 +121,13 @@ impl Checkpoint {
         }
     }
 
-    fn load(dir: &Path, source: &Token, product: &Token) -> Result<Option<Self>> {
-        let file = match File::open(dir.join(CHECKPOINT)) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error).context("opening WAL checkpoint"),
-        };
-        Self::decode(file, source, product).map(Some)
+    fn decode_optional(
+        file: Option<File>,
+        source: &Token,
+        product: &Token,
+    ) -> Result<Option<Self>> {
+        file.map(|file| Self::decode(file, source, product))
+            .transpose()
     }
 
     fn decode(file: File, source: &Token, product: &Token) -> Result<Self> {
@@ -147,13 +146,8 @@ impl Checkpoint {
         Ok(state)
     }
 
-    fn publish(&self, dir: &Path) -> Result<()> {
-        let mut temp = NamedTempFile::new_in(dir).context("creating WAL checkpoint")?;
-        serde_json::to_writer(&mut temp, self).context("encoding WAL checkpoint")?;
-        temp.write_all(b"\n")?;
-        temp.as_file().sync_all()?;
-        temp.persist(dir.join(CHECKPOINT))?;
-        sync_dir(dir).context("persisting WAL checkpoint")
+    fn publish(&self, dir: &WalDirectory) -> Result<()> {
+        dir.publish_json(CHECKPOINT, self)
     }
 
     fn active(&self) -> Option<SegmentRange<'_>> {
@@ -173,11 +167,10 @@ impl Checkpoint {
             .chain(self.active())
     }
 
-    fn verify_files(&self, dir: &Path) -> Result<u64> {
+    fn verify_files(&self, dir: &WalDirectory) -> Result<u64> {
         let mut generation = 0;
         for range in self.ranges() {
-            let file = File::open(dir.join(segment_filename(range.first)))
-                .context("opening committed WAL segment")?;
+            let file = dir.open_segment(&segment_filename(range.first))?;
             generation = self.verify_segment(&file, range, generation, None)?;
         }
         Ok(generation)
@@ -241,28 +234,6 @@ fn valid_segment_size(bytes: u64) -> bool {
         .contains(&bytes)
 }
 
-fn sync_dir(path: &Path) -> io::Result<()> {
-    File::open(path)?.sync_all()
-}
-
-fn ensure_dir(path: &Path) -> io::Result<()> {
-    if path.as_os_str().is_empty() || path.is_dir() {
-        return Ok(());
-    }
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    ensure_dir(parent)?;
-    match fs::create_dir(path) {
-        Ok(()) => sync_dir(parent),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists && path.is_dir() => {
-            sync_dir(parent)
-        }
-        Err(error) => Err(error),
-    }
-}
-
 fn file_digest(file: &File, bytes: u64) -> Result<String> {
     ensure!(
         file.metadata()?.len() == bytes,
@@ -277,42 +248,9 @@ fn file_digest(file: &File, bytes: u64) -> Result<String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
-fn lock_product(dir: &Path) -> Result<File> {
-    ensure_dir(dir)?;
-    // These names may have been created by a concurrent opener or a backup
-    // copy, so ensure they are durable even when they already existed.
-    for ancestor in dir.ancestors().skip(1).take(3) {
-        if ancestor.as_os_str().is_empty() {
-            sync_dir(Path::new("."))?;
-        } else {
-            sync_dir(ancestor)?;
-        }
-    }
-    let lock = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(dir.join("writer.lock"))?;
-    lock.try_lock()
-        .context("WAL product already has a writer")?;
-    Ok(lock)
-}
-
-fn segment_files(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.extension().is_some_and(|extension| extension == "wal") {
-            files.push(path);
-        }
-    }
-    Ok(files)
-}
-
 /// Single-owner raw WAL writer. All public ingestion goes through admission.
 pub(crate) struct WalWriter {
-    dir: PathBuf,
+    dir: WalDirectory,
     state: Checkpoint,
     active: Option<File>,
     staged_position: u64,
@@ -322,19 +260,42 @@ pub(crate) struct WalWriter {
 }
 
 impl WalWriter {
-    pub(crate) fn open(root: &Path, source: &str, product: &str) -> Result<Self> {
+    pub(crate) fn open_product(
+        data_root: &Path,
+        source: &Token,
+        product: &Token,
+        bind_policy: impl FnOnce(&WalDirectory, bool) -> Result<()>,
+    ) -> Result<Self> {
+        let [state, wal] = WAL_SUBDIRECTORIES;
+        let dir = WalDirectory::open(data_root, &[state, wal, source.as_str(), product.as_str()])?;
+        Self::open_in(dir, source, product, bind_policy)
+    }
+
+    #[cfg(test)]
+    fn open(root: &Path, source: &str, product: &str) -> Result<Self> {
         let source: Token = source.parse()?;
         let product: Token = product.parse()?;
-        let dir = root.join(source.as_str()).join(product.as_str());
-        let lock = lock_product(&dir)?;
-        let mut state = match Checkpoint::load(&dir, &source, &product)? {
+        fs::create_dir_all(root)?;
+        let dir = WalDirectory::open(root, &[source.as_str(), product.as_str()])?;
+        Self::open_in(dir, &source, &product, |_, _| Ok(()))
+    }
+
+    fn open_in(
+        dir: WalDirectory,
+        source: &Token,
+        product: &Token,
+        bind_policy: impl FnOnce(&WalDirectory, bool) -> Result<()>,
+    ) -> Result<Self> {
+        let lock = dir.lock()?;
+        let checkpoint = dir.open_optional(CHECKPOINT)?;
+        let mut state = match Checkpoint::decode_optional(checkpoint, source, product)? {
             Some(state) => state,
             None => {
                 ensure!(
-                    segment_files(&dir)?.is_empty(),
+                    dir.segment_count()? == 0,
                     "WAL files exist without a checkpoint"
                 );
-                Checkpoint::empty(source, product)
+                Checkpoint::empty(source.clone(), product.clone())
             }
         };
         let observed_generation = state.verify_files(&dir)?;
@@ -344,11 +305,12 @@ impl WalWriter {
         );
         let staged_position = state.durable_position.get();
         let staged_bytes = state.active_bytes.get();
+        bind_policy(&dir, staged_position == 0)?;
         let mut active = None;
         if let Some(first) = state.manifest.sealed_through.get().checked_add(1) {
-            let path = dir.join(segment_filename(first));
+            let name = segment_filename(first);
             if staged_bytes > 0 {
-                let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+                let mut file = dir.resume_segment(&name)?;
                 if file.metadata()?.len() > staged_bytes {
                     file.set_len(staged_bytes)?;
                     file.sync_all()?;
@@ -356,11 +318,7 @@ impl WalWriter {
                 file.seek(SeekFrom::Start(staged_bytes))?;
                 active = Some(file);
             } else {
-                match fs::remove_file(path) {
-                    Ok(()) => sync_dir(&dir)?,
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error).context("removing uncommitted WAL segment"),
-                }
+                dir.discard_segment(&name)?;
             }
         }
         state.generation = state
@@ -381,8 +339,13 @@ impl WalWriter {
         })
     }
 
-    pub(crate) fn product_dir(&self) -> &Path {
+    pub(crate) fn directory(&self) -> &WalDirectory {
         &self.dir
+    }
+
+    #[cfg(test)]
+    fn product_dir(&self) -> &Path {
+        self.dir.path()
     }
 
     pub(crate) fn generation(&self) -> u64 {
@@ -422,11 +385,7 @@ impl WalWriter {
         }
         self.poisoned = true;
         if self.active.is_none() {
-            let mut file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .open(self.dir.join(segment_filename(position)))?;
+            let mut file = self.dir.create_segment(&segment_filename(position))?;
             file.write_all(MAGIC)?;
             self.active = Some(file);
             self.staged_bytes = MAGIC.len() as u64;
@@ -458,7 +417,7 @@ impl WalWriter {
             // The checkpoint's directory sync must not be the first sync of a
             // newly linked segment. The two names may persist independently.
             if self.state.active_bytes.get() == 0 {
-                sync_dir(&self.dir)?;
+                self.dir.sync()?;
             }
             let mut next = self.state.clone();
             next.durable_position = self.staged_position.into();
@@ -477,7 +436,7 @@ impl WalWriter {
             let first = range.first;
             let last = range.last;
             let bytes = range.bytes;
-            let file = File::open(self.dir.join(segment_filename(first)))?;
+            let file = self.dir.open_segment(&segment_filename(first))?;
             let digest = file_digest(&file, bytes)?;
             let mut next = self.state.clone();
             next.manifest.segments.push(WalSegment {
@@ -504,11 +463,11 @@ impl WalWriter {
         data_root: &Path,
         manifest: &WalManifest,
         expected_license: &Token,
-        before_checkpoint: impl FnOnce(&RestoreDirectory) -> Result<()>,
+        before_checkpoint: impl FnOnce(&WalDirectory) -> Result<()>,
     ) -> Result<()> {
         manifest.validate(&manifest.source, &manifest.product)?;
         let [state, wal] = WAL_SUBDIRECTORIES;
-        let dir = RestoreDirectory::open(
+        let dir = WalDirectory::open(
             data_root,
             &[
                 state,
@@ -518,10 +477,11 @@ impl WalWriter {
             ],
         )?;
         let _lock = dir.lock()?;
-        let prior = dir
-            .open_optional(CHECKPOINT)?
-            .map(|file| Checkpoint::decode(file, &manifest.source, &manifest.product))
-            .transpose()?;
+        let prior = Checkpoint::decode_optional(
+            dir.open_optional(CHECKPOINT)?,
+            &manifest.source,
+            &manifest.product,
+        )?;
         if let Some(prior) = &prior {
             ensure!(
                 prior.active_bytes.get() == 0 && &prior.manifest == manifest,
@@ -658,7 +618,7 @@ impl<'a> SegmentReader<'a> {
 
 /// Read-only snapshot of one product. Reopen to observe newer commits/seals.
 pub struct WalReader {
-    dir: PathBuf,
+    dir: Option<WalDirectory>,
     state: Checkpoint,
 }
 
@@ -666,18 +626,39 @@ impl WalReader {
     pub fn open(root: &Path, source: &str, product: &str) -> Result<Self> {
         let source: Token = source.parse()?;
         let product: Token = product.parse()?;
-        let dir = root.join(source.as_str()).join(product.as_str());
-        let state = match Checkpoint::load(&dir, &source, &product)? {
-            Some(state) => {
+        let dir = WalDirectory::open_existing(root, &[source.as_str(), product.as_str()])?;
+        Self::open_in(dir, &source, &product)
+    }
+
+    pub(crate) fn from_directory(
+        dir: &WalDirectory,
+        source: &Token,
+        product: &Token,
+    ) -> Result<Self> {
+        Self::open_in(Some(dir.try_clone()?), source, product)
+    }
+
+    fn open_in(dir: Option<WalDirectory>, source: &Token, product: &Token) -> Result<Self> {
+        let checkpoint = if let Some(dir) = &dir {
+            let checkpoint = Checkpoint::decode_optional(
+                dir.open_optional_snapshot(CHECKPOINT)?,
+                source,
+                product,
+            )?;
+            if checkpoint.is_some() {
                 // A reader can race the rename before the writer syncs the
                 // directory. Make the visible prefix durable before a reader
                 // can commit a projection cursor that depends on it. A
                 // concurrent replacement only extends that committed prefix.
-                sync_dir(&dir).context("stabilizing WAL checkpoint for replay")?;
-                state
+                dir.sync()
+                    .context("stabilizing WAL checkpoint for replay")?;
             }
-            None => Checkpoint::empty(source, product),
+            checkpoint
+        } else {
+            None
         };
+        let state =
+            checkpoint.unwrap_or_else(|| Checkpoint::empty(source.clone(), product.clone()));
         Ok(Self { dir, state })
     }
 
@@ -739,11 +720,13 @@ impl WalReader {
             after <= self.durable_position(),
             "WAL cursor is ahead of the durable cutoff"
         );
+        let Some(dir) = &self.dir else {
+            return Ok(Vec::new());
+        };
         let mut records = Vec::new();
         let mut bytes = 0;
         for range in self.state.ranges().filter(|range| range.last > after) {
-            let file = File::open(self.dir.join(segment_filename(range.first)))
-                .context("opening committed WAL segment")?;
+            let file = dir.open_segment(&segment_filename(range.first))?;
             let mut reader = SegmentReader::new(&file, range)?;
             while let Some((record, frame_bytes)) = reader.next_record()? {
                 self.state.check_product(&record.event)?;
@@ -770,7 +753,9 @@ mod tests {
     use crate::market_ingress::{BackupManifest, ProductPolicy, restore_backup, wal_root};
     use serde_json::Value;
     use std::{
-        os::unix::fs::symlink,
+        fs::OpenOptions,
+        os::unix::fs::{MetadataExt, symlink},
+        path::PathBuf,
         process::{Command, Stdio},
         thread,
         time::{Duration, Instant},
@@ -872,6 +857,42 @@ mod tests {
         assert_eq!(restarted.flush().unwrap(), 2);
         let rows = reader(root.path()).read_after(0, 10).unwrap();
         assert_eq!((rows[0].generation.get(), rows[1].generation.get()), (1, 2));
+    }
+
+    #[test]
+    fn reader_keeps_opened_checkpoint_during_atomic_commit() {
+        let root = tempfile::tempdir().unwrap();
+        let mut writer = writer(root.path());
+        writer.append(&event(0)).unwrap();
+        assert_eq!(writer.flush().unwrap(), 1);
+        writer.append(&event(1)).unwrap();
+
+        WalDirectory::after_next_snapshot_open(move |checkpoint| {
+            assert_eq!(checkpoint.metadata().unwrap().nlink(), 1);
+            assert_eq!(writer.flush().unwrap(), 2);
+            assert_eq!(checkpoint.metadata().unwrap().nlink(), 0);
+        });
+        let old = reader(root.path());
+        assert_eq!(old.durable_position(), 1);
+        let old_rows = old.read_after(0, 5).unwrap();
+        assert_eq!(old_rows.len(), 1);
+        assert_eq!(old_rows[0].event, event(0));
+
+        let new = reader(root.path());
+        assert_eq!(new.durable_position(), 2);
+        let new_rows = new.read_after(1, 5).unwrap();
+        assert_eq!(new_rows.len(), 1);
+        assert_eq!(new_rows[0].event, event(1));
+    }
+
+    #[test]
+    fn reader_rejects_checkpoint_linked_to_another_path() {
+        let root = tempfile::tempdir().unwrap();
+        let writer = writer(root.path());
+        let checkpoint = writer.product_dir().join(CHECKPOINT);
+        fs::hard_link(&checkpoint, root.path().join("checkpoint-link")).unwrap();
+        assert_eq!(checkpoint.metadata().unwrap().nlink(), 2);
+        assert!(WalReader::open(root.path(), SOURCE, PRODUCT).is_err());
     }
 
     #[test]

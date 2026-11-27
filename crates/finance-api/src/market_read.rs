@@ -362,6 +362,8 @@ fn event_matches(query: &ProjectionQuery, matched: &ProjectionMatch, event: &Eve
         Message::PerpetualContext(_) => (event.epoch, event.seq, "perpetual_context"),
         Message::FundingRate(_) => (event.epoch, event.seq, "funding_rate"),
         Message::OpenInterest(_) => (event.epoch, event.seq, "open_interest"),
+        Message::OptionHistoryTrade(_) => (event.epoch, event.seq, "option_history_trade"),
+        Message::OptionHistoryQuote(_) => (event.epoch, event.seq, "option_history_quote"),
         Message::Correction(correction) => (
             correction.target_epoch,
             correction.target_seq,
