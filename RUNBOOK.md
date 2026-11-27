@@ -207,7 +207,7 @@ PYTHONPATH=python "$FINANCE_PYTHON" -m fertile_finance.market_projector \
 
 经授权备份的产品可在写者运行时通过生产者封段，或在停写时使用 `finance-market-wal seal`。按 [封段清单 v1](docs/market-wal.md#t2b-封段清单-v1) 枚举并校验封段，再交给 fertile 的备份协调方。旧 collector 仍由上面的运行方式管理。
 
-Nautilus 源码 CI 使用构建后的 Python 环境运行 Rust WAL 到 Parquet 的端到端测试。本地可用同一命令核对四条水位、同秒逐笔保留、去重和修订索引。
+Nautilus 源码 CI 使用构建后的 Python 环境运行 Rust WAL 到 Parquet 的端到端测试。本地可用同一命令核对四条水位、同秒逐笔保留、去重和修订索引。`committed_wal_projects_through_python_cli` 在每次投影后检查退出状态与水位，并启动 8 个独立的 Python 校验进程读取分区和最新修订，逐次检查正常退出。
 
 ```sh
 FINANCE_F3_TEST_PYTHON="$FINANCE_PYTHON" \

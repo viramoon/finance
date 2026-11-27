@@ -21,6 +21,7 @@ from threading import Event as StopEvent
 from typing import Protocol
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from fertile_finance.collector_store import atomic_json
@@ -285,7 +286,9 @@ def _publish_parquet(dest: Path, rows: list[dict]) -> None:
             with _regular_file(directory, dest.name) as existing:
                 # Recovery after rename and before SQLite commit. An existing
                 # partition is reused only when it matches the intended rows.
-                if not pq.ParquetFile(existing).read().equals(table, check_metadata=True):
+                with pq.ParquetFile(existing, pre_buffer=False) as parquet:
+                    persisted = parquet.read(use_threads=False)
+                if not persisted.equals(table, check_metadata=True):
                     raise ProjectionError(f"existing partition differs from replay at WAL {rows[0]['wal_position']}")
                 os.fsync(existing.fileno())
         except FileNotFoundError:
@@ -558,10 +561,11 @@ def read_latest_event(
         ) as file:
             if not stat.S_ISREG(os.fstat(file.fileno()).st_mode):
                 raise ProjectionError(f"unexpected file type in projection path: {parquet}")
-            table = pq.read_table(
-                file, columns=["event_json"],
-                filters=[("wal_position", "=", pa.scalar(int(position), pa.uint64()))],
-            )
+            # Dataset scans can release Python-backed files or buffers on Arrow
+            # workers after read_table returns, racing interpreter shutdown.
+            with pq.ParquetFile(file, pre_buffer=False) as reader:
+                table = reader.read(columns=["wal_position", "event_json"], use_threads=False)
+        table = table.filter(pc.equal(table["wal_position"], pa.scalar(int(position), pa.uint64())))
         if table.num_rows != 1:
             raise ProjectionError(f"projection file has no unique WAL position {position}")
         return Event.from_json(table["event_json"][0].as_py())

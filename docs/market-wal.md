@@ -68,7 +68,7 @@ WAL 段、写锁和写入或恢复时读取的元数据须为单链接普通文�
 
 ## Parquet 与投影游标
 
-`python -m fertile_finance.market_projector --data-root PATH --wal-bin PATH` 轮询可读产品，`--once` 用于追平当前前缀后退出。默认每批 512 条，`--batch-size` 接受 1–4096，空闲等待由 `--poll-seconds` 设置，默认 1 秒。投影按产品加锁，先固定本批 WAL 位置范围，再原子发布 Parquet，最后提交 SQLite 游标和修订索引。文件发布后、游标提交前中断时，同一批次重放并校验已有文件。目录分别为：
+`python -m fertile_finance.market_projector --data-root PATH --wal-bin PATH` 轮询可读产品，`--once` 用于追平当前前缀后退出。默认每批 512 条，`--batch-size` 接受 1–4096，空闲等待由 `--poll-seconds` 设置，默认 1 秒。投影按产品加锁，先固定本批 WAL 位置范围，再原子发布 Parquet，最后提交 SQLite 游标和修订索引。文件发布后、游标提交前中断时，同一批次重放并校验已有文件。已有分区的内容或 schema 元数据不一致时，投影报错并报告待写入分区首行的 WAL 位置，已提交游标停在上一成功批次。目录分别为：
 
 - `<data-root>/catalog/market-events/<source>/<product>/positions-<first:020>-<last:020>.parquet`。
 - `<data-root>/finance-state/market-projection/<source>/<product>/`，包括 `projection.sqlite3` 和原子更新的 `watermark.json`。
@@ -78,6 +78,10 @@ WAL 段、写锁和写入或恢复时读取的元数据须为单链接普通文�
 投影以 F1 流分区、epoch 和 seq 去重。同一秒或纳秒的不同 seq 分开保留，重复投递保留首次接收数据。位置相同却内容冲突、修订目标缺失、类型不符或修订号未递增时，该产品投影报错，游标停在上一成功批次。原事件与有效修订各自保留。完全重复的批次也推进 WAL 游标。
 
 Parquet schema 版本 `finance.market_projection.version=1`。文件含 WAL 位置、F1 产品、流、标的、种类、epoch、seq、revision、三个时钟、修订目标以及 `event_json`。位置、序号和时钟列为精确 `uint64`，行情价格与数量保存在 `event_json` 的原始十进制字符串中。读取端用 `projected_partitions(data_root, source, product)` 按 SQLite 已提交的范围枚举 Parquet。用 `read_latest_event(data_root, source, product, channel, instrument_id, epoch, seq)` 读取某原始位置的原事件或最新更正信封。需要重建时先停止该产品投影，保留旧投影供核对，在隔离根从已恢复的 WAL 重新投影。
+
+重放校验与 `read_latest_event` 同步读取单个 Parquet 文件，关闭预读与并行列解码。最新事件查询只读取 `wal_position` 和 `event_json` 两列，按 SQLite 索引给出的精确 `uint64` 位置匹配。位置缺失或重复均抛出 `ProjectionError`。回归测试覆盖同一分区内 `2^64-2` 和 `2^64-1` 两个相邻 WAL 位置的精确查询。
+
+修复前，端到端测试 `committed_wal_projects_through_python_cli` 在 CI 中偶发以 `SIGABRT` 退出。修复后的循环回归测试共运行 50 轮，每轮启动 8 个独立的 Python 校验进程读取分区和最新修订，所有校验进程均正常退出。失败子进程的精确归因见 [#84](https://github.com/viramoon/finance/issues/84)。
 
 finance-api 可查询已获准落盘的产品、WAL 持久前缀、水位和缺口。投影查询使用 SQLite v1 索引定位已提交的原事件或最新更正，再从 WAL 读取信封及其许可。传入 `through` 可固定 WAL 翻页截点，`projected_through` 则表示该次查询读取的投影提交水位。[REST 首批读契约](api.md#首批读契约)
 

@@ -318,7 +318,7 @@ fn committed_wal_projects_through_python_cli() {
     let python = env::var_os("FINANCE_F3_TEST_PYTHON").unwrap();
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let projector = || {
-        checked_output(
+        let stdout = checked_output(
             Command::new(&python)
                 .env("PYTHONPATH", repo.join("python"))
                 .args([
@@ -332,6 +332,7 @@ fn committed_wal_projects_through_python_cli() {
                 .output()
                 .unwrap(),
         );
+        assert!(stdout.is_empty(), "the projection CLI should be silent");
     };
     assert_watermarks(root.path(), &events[3], "4", "0");
     projector();
@@ -363,15 +364,19 @@ assert json.loads(latest.to_json()) == events[2]
 assert events[2]['revision'] == '1'
 assert events[2]['payload']['replacement']['payload']['price'] == '663.1100'
 "#;
-    checked_output(
-        Command::new(&python)
-            .env("PYTHONPATH", repo.join("python"))
-            .args(["-B", "-c", verify])
-            .arg(root.path())
-            .args([SOURCE, PRODUCT])
-            .output()
-            .unwrap(),
-    );
+    // Each verifier must exit cleanly after its final read of the latest event.
+    // Use fresh interpreters so each run exercises Arrow's shutdown path.
+    for _ in 0..8 {
+        checked_output(
+            Command::new(&python)
+                .env("PYTHONPATH", repo.join("python"))
+                .args(["-B", "-c", verify])
+                .arg(root.path())
+                .args([SOURCE, PRODUCT])
+                .output()
+                .unwrap(),
+        );
+    }
 }
 
 #[test]

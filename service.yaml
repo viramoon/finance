@@ -91,6 +91,7 @@ processes:
     state: finance-state/market-projection
     output: catalog/market-events
     health: 由本地 finance-market-wal watermarks 检查投影进度
+    documentation: docs/market-wal.md#parquet-与投影游标
     restart_policy: fertile deploy/
   - name: backtest-worker
     command: scripts/finance-backtest-worker
