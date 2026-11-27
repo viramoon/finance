@@ -155,6 +155,8 @@ processes:
         database: finance-state/decisions/decisions.sqlite3
         publication: finance-state/decisions/read-v1.json
         access: published_plan_with_local_recording_and_non_display_derivation
+        sma_license_proof: sma_replay_license
+      local_state_paths: 数据根以下的目录和文件禁止使用符号链接
       cache_control: private, no-store
       openapi_export: cargo run --locked -q -p finance-api -- export-openapi
       stream_schema_export: cargo run --locked -q -p finance-api -- export-read-stream DIRECTORY

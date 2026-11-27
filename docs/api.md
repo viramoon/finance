@@ -68,7 +68,7 @@ POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /a
 
 ## 第二批策略回测与研究契约
 
-路径使用 `/api/v1` 前缀。以下为新增操作，返回 `Cache-Control: private, no-store`。网关按会话授权，回测取消与策略登记需要写权限。
+路径使用 `/api/v1` 前缀。以下为新增操作，返回 `Cache-Control: private, no-store`。网关按会话授权，回测取消与策略登记需要写权限。因子快照、决策发布文件及数据库、策略输入和回测队列须位于配置数据根内的实体目录。API 遇到这些路径中的符号链接时返回存储错误。
 
 | 请求 | 参数和行为 | OpenAPI 响应 schema |
 | --- | --- | --- |
@@ -86,7 +86,7 @@ POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /a
 
 ### 决策信号发布与分页
 
-API 只读打开现有 `finance-state/decisions/decisions.sqlite3`。运维或已授权的回放提供方核对允许本地留存和非展示计算后，在同一目录原子发布普通文件 `read-v1.json`。下列为固定合成配置。部署时登记 `decisions` 或 `bundle_decisions` 表的 `plan_sha256`。配置策略使用信号行的完整计划哈希，检查点哈希另绑定指标求值器版本。SMA 的许可标识还须与信号行 `license` 一致。配置策略由发布方为全部输入核对共同授权并登记适用许可。
+API 只读打开现有 `finance-state/decisions/decisions.sqlite3`。运维或已授权的回放提供方核对允许本地留存和非展示计算后，在同一目录原子发布普通文件 `read-v1.json`。下列为固定合成配置。部署时登记 `decisions` 或 `bundle_decisions` 表的 `plan_sha256`。配置策略使用信号行的完整计划哈希，检查点哈希另绑定指标求值器版本。SMA 的发布许可还须与生产者校验整个已提交回放前缀后记录的许可一致，范围包括预热与控制帧。首次遇到不同许可的帧即停止，保留上一份已提交检查点。API 仅返回许可证明覆盖的信号。旧 SMA 库需要用原始同许可回放启动新版决策进程，完整验证旧检查点后才能发布。证明缺失、过期或许可不匹配时返回 `404 / decision_not_published`。配置策略由发布方为全部输入核对共同授权并登记适用许可。
 
 ```json
 {

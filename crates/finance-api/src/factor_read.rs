@@ -1,6 +1,6 @@
 //! The read API serves an explicitly published F8 snapshot without running research code.
 
-use crate::{ApiError, AppState, ErrorBody, error};
+use crate::{ApiError, AppState, ErrorBody, error, read_store};
 use axum::{
     Json, Router,
     extract::{
@@ -15,7 +15,6 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File},
     io::{self, Read},
     path::{Component, Path as FsPath},
     sync::LazyLock,
@@ -386,16 +385,20 @@ fn snapshot_unreadable() -> ApiError {
 }
 
 fn load_snapshot(data_root: &FsPath) -> Result<Option<Snapshot>, ApiError> {
-    let path = data_root.join(SNAPSHOT_PATH);
-    match fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.file_type().is_file() => {}
-        Ok(_) => return Err(snapshot_invalid()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(snapshot_unreadable()),
-    }
+    let Some(file) =
+        read_store::open_file(data_root, FsPath::new(SNAPSHOT_PATH)).map_err(|err| {
+            if err.kind() == io::ErrorKind::InvalidData {
+                snapshot_invalid()
+            } else {
+                snapshot_unreadable()
+            }
+        })?
+    else {
+        return Ok(None);
+    };
     let mut bytes = Vec::new();
-    File::open(path)
-        .and_then(|file| file.take(MAX_BYTES + 1).read_to_end(&mut bytes))
+    file.take(MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
         .map_err(|_| snapshot_unreadable())?;
     if bytes.len() as u64 > MAX_BYTES {
         return Err(snapshot_invalid());

@@ -60,10 +60,8 @@ def recover(db, directory):
         db.execute("BEGIN IMMEDIATE")
         expired = db.execute(
             """SELECT id, attempt, status FROM jobs LEFT JOIN job_leases ON job_id=id
-               WHERE status='running' AND (expires_at_ms IS NULL OR expires_at_ms<=?1)
-               UNION ALL
-               SELECT id, attempt, status FROM job_leases CROSS JOIN jobs ON id=job_id
-               WHERE status='failed' AND error=?2 AND expires_at_ms<=?1""",
+               WHERE (status='running' OR (status='failed' AND error=?2))
+                 AND (expires_at_ms IS NULL OR expires_at_ms<=?1)""",
             (clock_ms(), CANCELLED_ERROR),
         ).fetchall()
         for job_id, attempt, status in expired:

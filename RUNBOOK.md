@@ -69,14 +69,14 @@ cargo run --locked --offline -q -p finance-api -- export-read-stream /tmp/financ
 
 ## 第二批策略回测与研究契约验收
 
-使用独立临时数据根运行以下测试。回测详情和取消都使用提交时返回的作业 ID。提交响应丢失时，以原 `Idempotency-Key` 调用 `GET /api/v1/backtests/by-key`。`job_cancelled` 是取消终态。重复取消返回同一终态，已完成作业返回 `409 / job_already_finished`。运行中取消时，worker 结束执行进程并清理临时文件，之后释放租约。异常中断后由恢复流程清理租约和临时文件。
+使用独立临时数据根运行以下测试。回测详情和取消都使用提交时返回的作业 ID。提交响应丢失时，以原 `Idempotency-Key` 调用 `GET /api/v1/backtests/by-key`。`job_cancelled` 是取消终态。重复取消返回同一终态，已完成作业返回 `409 / job_already_finished`。运行中取消时，worker 结束执行进程并清理临时文件，之后释放租约。异常中断后，恢复流程在租约缺失或到期且执行锁释放后清理临时文件和锁，旧版无租约作业也适用。
 
 ```sh
 cargo test --locked --offline -p finance-api --test bundle_jobs --test jobs --test decision_read --test factor_read --test read_contract --test read_stream
 PYTHONPATH=python "$FINANCE_PYTHON" -m unittest discover -s tests -p test_worker_leases.py -v
 ```
 
-用 `GET /api/v1/backtests/worker-status` 核对队列和租约。出现缺失或过期的租约时，检查 worker 进程和本地锁，再按[回测作业恢复](docs/backtest-jobs.md#worker-运行与恢复)处置。发布决策信号前核对输入许可和计划哈希，在现有决策目录原子发布 `read-v1.json`。需要下线读取时撤下发布文件。出现 `decision_not_published` 时检查发布文件和数据库是否位于同一数据根。因子报告按因子版本和评价 ID 从 F8 快照定位。[查询参数、许可和发布格式](docs/api.md#第二批策略回测与研究契约)
+用 `GET /api/v1/backtests/worker-status` 核对队列和租约。出现缺失或过期的租约时，检查 worker 进程和本地锁，再按[回测作业恢复](docs/backtest-jobs.md#worker-运行与恢复)处置。发布决策信号前核对输入许可和计划哈希，在现有决策目录原子发布 `read-v1.json`。需要下线读取时撤下发布文件。出现 `decision_not_published` 时检查发布文件和数据库是否在同一数据根。升级旧 SMA 库时先用原回放启动新版决策进程，重验整个已提交前缀。出现许可变化时停止发布，在独立数据根用已审核的同许可回放重建。因子、决策和回测队列绑定数据根以下的实体路径。因子报告按因子版本和评价 ID 从 F8 快照定位。[查询参数、许可和发布格式](docs/api.md#第二批策略回测与研究契约)
 
 ## 离线因子研究验收
 

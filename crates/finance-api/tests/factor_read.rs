@@ -418,3 +418,28 @@ async fn factor_report_deep_link_selects_exact_version_and_preserves_access() {
     assert_eq!(body["error"]["code"], "factor_snapshot_invalid");
     assert!(body.get("item").is_none());
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn factor_report_and_list_refuse_linked_snapshot_ancestors() {
+    use std::os::unix::fs::symlink;
+
+    let outside = tempfile::tempdir().unwrap();
+    write_snapshot(outside.path(), &snapshot());
+    for parent in ["finance-state", "finance-state/factor-research"] {
+        let root = tempfile::tempdir().unwrap();
+        let link = root.path().join(parent);
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        symlink(outside.path().join(parent), link).unwrap();
+        let app = app(root.path());
+        for path in [
+            "/api/v1/factors",
+            "/api/v1/factors/synthetic.factor/evaluations/first?version=1.0.0",
+        ] {
+            let (status, body) = get(&app, path).await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{parent} {path}");
+            assert_eq!(body["error"]["code"], "factor_snapshot_unreadable");
+            assert!(!body.to_string().contains("Synthetic fixture"));
+        }
+    }
+}

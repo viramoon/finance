@@ -16,6 +16,7 @@ use axum::{
 use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
+use std::path::Path as FsPath;
 use utoipa::ToSchema;
 
 pub(crate) const QUEUE_PATH: &str = "finance-state/backtests/jobs.sqlite3";
@@ -242,18 +243,7 @@ pub(super) async fn db<T: Send + 'static>(
     op: impl FnOnce(&mut Connection) -> Result<T, ApiError> + Send + 'static,
 ) -> Result<T, ApiError> {
     tokio::task::spawn_blocking(move || {
-        // An absent data root may indicate a missing persistent mount.
-        // Create children one level at a time and never recreate that root.
-        let dir = state.data_root.join("finance-state/backtests");
-        for path in [state.data_root.join("finance-state"), dir.clone()] {
-            match std::fs::create_dir(&path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => {}
-                Err(e) => return Err(storage_error(e)),
-            }
-        }
-        let mut conn = Connection::open(state.data_root.join(QUEUE_PATH)).map_err(storage_error)?;
-        conn.busy_timeout(std::time::Duration::from_secs(3))
+        let mut conn = read_store::open_queue(&state.data_root, FsPath::new(QUEUE_PATH))
             .map_err(storage_error)?;
         conn.execute_batch(include_str!("../../../sql/backtest-queue.sql"))
             .map_err(storage_error)?;
@@ -468,8 +458,8 @@ pub(crate) async fn cancel(
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage_error)?;
-        // A running lease is kept as a cleanup marker until the worker stops
-        // its execution or recovery obtains the abandoned execution lock.
+        // Running jobs keep their lease until the worker cleans up. Recovery
+        // also checks older running jobs that were never given a lease.
         tx.execute(
             "DELETE FROM job_leases WHERE job_id=?1
              AND EXISTS (SELECT 1 FROM jobs WHERE id=?1 AND status='queued')",
@@ -518,7 +508,7 @@ pub(crate) async fn worker_status(
 ) -> Result<Json<WorkerStatus>, ApiError> {
     tokio::task::spawn_blocking(move || {
         let mut status = WorkerStatus { as_of: Utc::now(), ..WorkerStatus::default() };
-        let Some(mut conn) = read_store::open(&state.data_root.join(QUEUE_PATH)).map_err(storage_error)? else {
+        let Some(mut conn) = read_store::open(&state.data_root, FsPath::new(QUEUE_PATH)).map_err(storage_error)? else {
             return Ok(Json(status));
         };
         let tx = conn.transaction().map_err(storage_error)?;

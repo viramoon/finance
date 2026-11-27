@@ -26,7 +26,6 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
-    fs::{self, File},
     io::{self, Read},
     path::Path,
 };
@@ -247,9 +246,8 @@ impl PreparedBundle {
 
     fn compile(root: &Path, document: StrategyDocument) -> Result<Self, ApiError> {
         let examples = example_catalog();
-        let path = root.join(INPUT_DIR).join("catalog.json");
-        check_input_directory(path.parent().expect("fixed catalog parent"))?;
-        let Some(bytes) = read_bounded(&path, MAX_BYTES).map_err(input_error)? else {
+        let path = Path::new(INPUT_DIR).join("catalog.json");
+        let Some(bytes) = read_bounded(root, &path, MAX_BYTES).map_err(input_error)? else {
             return Self::using_catalog(document, &examples);
         };
         let configured: ConfiguredCatalog<'_> =
@@ -364,22 +362,12 @@ fn read_version(tx: &Connection, id: &str, version: &str) -> Result<PreparedBund
     Ok(prepared)
 }
 
-fn read_bounded(path: &Path, limit: usize) -> io::Result<Option<Vec<u8>>> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err),
+fn read_bounded(root: &Path, relative: &Path, limit: usize) -> io::Result<Option<Vec<u8>>> {
+    let Some(file) = read_store::open_file(root, relative)? else {
+        return Ok(None);
     };
-    if !metadata.is_file() || metadata.len() > limit as u64 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "expected a bounded regular input file",
-        ));
-    }
     let mut bytes = Vec::new();
-    File::open(path)?
-        .take(limit as u64 + 1)
-        .read_to_end(&mut bytes)?;
+    file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
     if bytes.len() > limit {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -387,17 +375,6 @@ fn read_bounded(path: &Path, limit: usize) -> io::Result<Option<Vec<u8>>> {
         ));
     }
     Ok(Some(bytes))
-}
-
-fn check_input_directory(path: &Path) -> Result<(), ApiError> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_dir() => Ok(()),
-        Ok(_) => Err(input_error(
-            "strategy input directories must be concrete directories",
-        )),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(input_error(err)),
-    }
 }
 
 fn replay_component(id: &str, suffix: &str) -> String {
@@ -423,12 +400,10 @@ struct ReplayHeader {
 fn pin_replay(tx: &Connection, root: &Path, inputs: &str) -> Result<String, ApiError> {
     let inputs: ResolvedInputs<'_> = serde_json::from_str(inputs).map_err(storage_error)?;
     // F2 validates the references before resolving inputs. Do not use caller-supplied paths.
-    let input_root = root.join(INPUT_DIR);
-    check_input_directory(&input_root)?;
-    let directory = input_root.join(replay_component(inputs.bars.id, ""));
-    check_input_directory(&directory)?;
-    let path = directory.join(replay_component(inputs.universe.id, ".json"));
-    let bytes = read_bounded(&path, MAX_REPLAY_BYTES)
+    let path = Path::new(INPUT_DIR)
+        .join(replay_component(inputs.bars.id, ""))
+        .join(replay_component(inputs.universe.id, ".json"));
+    let bytes = read_bounded(root, &path, MAX_REPLAY_BYTES)
         .map_err(input_error)?
         .ok_or_else(|| {
             error(
@@ -674,7 +649,8 @@ async fn read_registry<T: Send + 'static>(
     read: impl FnOnce(Option<&Connection>) -> Result<T, ApiError> + Send + 'static,
 ) -> Result<T, ApiError> {
     tokio::task::spawn_blocking(move || {
-        let conn = read_store::open(&state.data_root.join(QUEUE_PATH)).map_err(storage_error)?;
+        let conn =
+            read_store::open(&state.data_root, Path::new(QUEUE_PATH)).map_err(storage_error)?;
         if let Some(conn) = &conn
             && read_store::has_table(conn, "strategy_backtest_versions").map_err(storage_error)?
         {

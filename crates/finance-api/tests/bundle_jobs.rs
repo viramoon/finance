@@ -633,3 +633,31 @@ async fn strategy_validation_returns_compiler_location_and_enforces_upload_limit
     assert_eq!(body["error"]["code"], "INPUT_TOO_LARGE");
     assert_eq!(temp.path().read_dir().unwrap().count(), 0);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn strategy_preview_refuses_an_input_catalog_below_a_linked_parent() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    fs::create_dir_all(inputs(outside.path())).unwrap();
+    fs::write(
+        inputs(outside.path()).join("catalog.json"),
+        json!({"universes":[],"bars":[]}).to_string(),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        outside.path().join("finance-state"),
+        root.path().join("finance-state"),
+    )
+    .unwrap();
+    let (status, body) = request(
+        root.path(),
+        "POST",
+        "/api/v1/strategies/validate",
+        "",
+        json!({"format":"yaml","content":ENTRY_EXIT}),
+    )
+    .await;
+    assert_eq!(status, 500);
+    assert_eq!(body["error"]["code"], "strategy_input_error");
+}

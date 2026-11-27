@@ -8,18 +8,13 @@ use axum::{
 };
 use chrono::NaiveDate;
 use finance_market_protocol::{DecimalText, InstrumentId, NonEmptyText, Token, U64Text};
-use rusqlite::{Connection, Row, params, types::Type};
+use rusqlite::{Connection, OptionalExtension, Row, params, types::Type};
 use serde::{Deserialize, Serialize};
-use std::{
-    error::Error,
-    fs::{self, File},
-    io::{ErrorKind, Read},
-    path::Path,
-    str::FromStr,
-};
+use std::{error::Error, io::Read, path::Path, str::FromStr};
 use utoipa::{IntoParams, ToSchema};
 
-const STATE_DIR: &str = "finance-state/decisions";
+const PUBLICATION_PATH: &str = "finance-state/decisions/read-v1.json";
+const DATABASE_PATH: &str = "finance-state/decisions/decisions.sqlite3";
 const MAX_PUBLICATION_BYTES: u64 = 4096;
 
 #[derive(Deserialize, IntoParams)]
@@ -141,19 +136,13 @@ fn storage_error() -> ApiError {
     )
 }
 
-fn publication(dir: &Path) -> Result<Publication, ApiError> {
-    let path = dir.join("read-v1.json");
-    let metadata = match fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Err(not_published()),
-        Err(_) => return Err(storage_error()),
-    };
-    if !metadata.is_file() || metadata.len() > MAX_PUBLICATION_BYTES {
-        return Err(storage_error());
-    }
+fn publication(root: &Path) -> Result<Publication, ApiError> {
+    let file = read_store::open_file(root, Path::new(PUBLICATION_PATH))
+        .map_err(|_| storage_error())?
+        .ok_or_else(not_published)?;
     let mut data = Vec::new();
-    File::open(path)
-        .and_then(|file| file.take(MAX_PUBLICATION_BYTES + 1).read_to_end(&mut data))
+    file.take(MAX_PUBLICATION_BYTES + 1)
+        .read_to_end(&mut data)
         .map_err(|_| storage_error())?;
     if data.len() as u64 > MAX_PUBLICATION_BYTES {
         return Err(storage_error());
@@ -198,6 +187,23 @@ where
         .map_err(|err| rusqlite::Error::FromSqlConversionFailure(idx, Type::Text, Box::new(err)))
 }
 
+fn verified_sma_offset(conn: &Connection, published: &Publication) -> Result<i64, ApiError> {
+    if !read_store::has_table(conn, "sma_replay_license").map_err(|_| storage_error())? {
+        return Err(not_published());
+    }
+    conn.query_row(
+        "SELECT checkpoint.replay_offset
+         FROM decision_checkpoint AS checkpoint
+         JOIN sma_replay_license AS verified USING (id, replay_offset, replay_sha256)
+         WHERE checkpoint.id=1 AND checkpoint.plan_sha256=?1 AND verified.license=?2",
+        params![published.plan_sha256, published.access.license.as_str()],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|_| storage_error())?
+    .ok_or_else(not_published)
+}
+
 fn sma_signals(
     conn: &Connection,
     published: &Publication,
@@ -205,17 +211,19 @@ fn sma_signals(
     limit: u16,
 ) -> Result<Vec<DecisionSignal>, ApiError> {
     let after = after.map(offset).transpose()?.unwrap_or(-1);
+    let through = verified_sma_offset(conn, published)?;
     read_signals(
         conn,
         "decisions",
         "SELECT replay_offset,source,product,channel,instrument_id,epoch,seq,cursor,license,
                 exchange_ts,first_available_ts,decision_ts,target_shares
-         FROM decisions WHERE plan_sha256=?1 AND replay_offset>?2 AND license=?3
-         ORDER BY replay_offset LIMIT ?4",
+         FROM decisions WHERE plan_sha256=?1 AND replay_offset>?2 AND license=?3 AND replay_offset<=?4
+         ORDER BY replay_offset LIMIT ?5",
         params![
             published.plan_sha256,
             after,
             published.access.license.as_str(),
+            through,
             limit
         ],
         |row| {
@@ -292,8 +300,7 @@ fn read_signals(
 }
 
 fn load(root: &Path, query: SignalQuery, limit: u16) -> Result<DecisionSignalPage, ApiError> {
-    let dir = root.join(STATE_DIR);
-    let published = publication(&dir)?;
+    let published = publication(root)?;
     let after = query
         .after
         .as_deref()
@@ -305,7 +312,7 @@ fn load(root: &Path, query: SignalQuery, limit: u16) -> Result<DecisionSignalPag
                 .ok_or_else(invalid_query)
         })
         .transpose()?;
-    let mut conn = read_store::open(&dir.join("decisions.sqlite3"))
+    let mut conn = read_store::open(root, Path::new(DATABASE_PATH))
         .map_err(|_| storage_error())?
         .ok_or_else(not_published)?;
     let tx = conn.transaction().map_err(|_| storage_error())?;
