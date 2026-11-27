@@ -168,6 +168,15 @@ FINANCE_F3_TEST_PYTHON="$FINANCE_PYTHON" \
   cargo test --locked -p finance-collector --test market_wal_projector -- --include-ignored
 ```
 
+### Binance 公共行情
+
+`finance-binance` 在内置 profile 下输出 `disabled_by_profile` 并退出。只在经审核的部署中使用 [Binance profile](docs/integrations/binance.md) 显式开启。启用前确认产品许可、数据根与 Nautilus 源码构建环境，进程的 `PYTHONPATH` 指向 finance 的 `python/`。该任务无需本地监听。使用独立日志区分 `synchronizing`、`live`、`recovering` 和 `region_restricted`。看到 403/451 时保留状态码并停止自动重启。盘口出现缺口时，通过 F3 的 `quality` 核对 `source_gap`、恢复快照和历史缺口范围。资金费率的 `next_funding_ts: null` 表示交易所尚未给出下次结算时间，已收到的费率仍可使用。
+
+```sh
+cargo test --workspace --locked --offline
+PYTHONPATH=python python -m unittest discover -s tests -p test_binance_transport.py -v
+```
+
 ### Hyperliquid 公共行情
 
 由 fertile 部署显式启动独立的 `finance-hyperliquid` 进程，配置参考 [hyperliquid.yaml](config/collector/hyperliquid.yaml)。启用前核对标的、产品条款和各用途权限。设置已有的 `FINANCE_PYTHON` 为源码构建的 Python、`PYTHONPATH=python`，并为 `FERTILE_DATA_ROOT` 明确指定数据根。启用落盘前应创建该目录。下列启动命令会连接公共 Hyperliquid。
@@ -205,9 +214,43 @@ curl -sS http://127.0.0.1:8081/api/v1/market/status
 
 历史回测导入、信号和审计见 [研究回测手册](docs/historical-backtest.md)。部署时向 API 和 worker 配置同一只读研究 catalog；请求状态和结果仍由持久作业队列管理。
 
+### 实时决策与并行回测
+
+多个 `scripts/finance-backtest-worker` 实例可共用同一宿主本地盘上的 `FERTILE_DATA_ROOT`。升级前让旧 worker 完成在途作业并停止，再启动新 worker。每个实例单独配置并发和资源限制。作业租约默认 15 秒，实例用 `FINANCE_WORKER_LEASE_SECONDS` 或 `--lease-seconds` 设置续租周期的基准。配置作业的指标子进程也持有执行锁。租约过期后，恢复仍须等旧作业的执行进程释放该锁。迁移、超时和重复执行防护见 [作业手册](docs/backtest-jobs.md#worker-运行与恢复)。
+
+使用 `finance-strategy` 编译单标的计划，并为 `finance-decision` 指定已有的绝对数据根和获准计算与留存的 F1 回放文件。以下 `TEST.XNYS` 为合成标的，回放需由输入方准备。
+
+```sh
+cargo build --locked -p finance-api --bin finance-strategy
+target/debug/finance-strategy compile-legacy-sma TEST.XNYS 2 3 10 > /path/to/sma-plan.json
+FERTILE_DATA_ROOT=/path/to/decision-data scripts/finance-decision \
+  --plan /path/to/sma-plan.json --replay /path/to/test-bars.ndjson
+```
+
+运行 `StrategyBundle` 时，用同一个 `finance-strategy compile` 命令生成 F2 计划，准备按 XNYS 收盘顺序写入的会话 NDJSON，再通过已有源码构建的 Python 环境启动。配置回测 worker 与实时决策都需要同一 finance 构建的 `finance-strategy`，可置于 `PATH` 或在各自环境中设置 `FINANCE_STRATEGY_BIN` 为绝对路径。每帧包含闭合行情、点时成分和只读组合快照。格式见 [配置策略会话输入](docs/decision-process.md#配置策略会话输入)。
+
+```sh
+target/debug/finance-strategy compile /path/to/bundle.yaml > /path/to/bundle-plan.json
+FINANCE_STRATEGY_BIN="$PWD/target/debug/finance-strategy" \
+  FINANCE_PYTHON=/path/to/source-built/venv/bin/python FERTILE_DATA_ROOT=/path/to/bundle-decision-data \
+  scripts/finance-decision --plan /path/to/bundle-plan.json --replay /path/to/decision-sessions.ndjson
+```
+
+升级配置策略的求值器版本时，保留原决策库，用新的数据根和原始获准回放重建基线。启动配置策略时若指标求值报错，核对 `FINANCE_STRATEGY_BIN`、二进制版本与执行权限，再核对闭合行情和计划的指标选择。
+
+一次性回放在读完后退出。对持续追加的同一文件加 `--follow`。向决策进程发送 SIGTERM 可中断正在等待的指标管道读写。进程回收指标子进程后退出，使用同一参数即可恢复。保留回放文件已提交的字节前缀和 `finance-state/decisions/decisions.sqlite3`。重启会重建指标状态、核对前缀并从持久断点续读。遇到缺口、更正或输入文件替换，先核对源和覆盖范围。用已复核的新输入基线和新数据根建立独立记录。进程健康由守护器检查，消费进度用决策库中的持久检查点核对。此进程只读行情，写入本地策略目标和消费进度，无端口或账户配置。文件格式、边界与诊断见 [实时决策接口](docs/decision-process.md)。
+
 ### 历史价量补拉
 
 在获准采集并落盘的部署上，使用 [历史价量批任务](docs/historical-pull.md) 拉取九只美股日线和 IBKR paper 只读分钟线、BTC/ETH/SOL 公共 K 线及 Binance Spot 逐笔归档。命令需显式授权，Binance 默认关闭。使用独立于工作树的配置数据根，记录 JSON 的水位和缺口，失败后用同一参数续拉。与 Gateway 的其他历史请求错开。来源口径、命令、退出状态和耗时估算见批任务文档。
+
+### 离线验证历史期权链
+
+在已准备好锁定的 Rust 工具链和依赖缓存后运行 `cargo test -p finance-collector --test option_history --locked --offline`。测试通过 F9a 接口的合成替身核对合约确认、历史请求和到期行为。真实读取仅使用已验证的只读 paper 会话，并与 F11 使用同一数据根以共用历史请求节流。权限或连接错误按单合约返回。
+
+运行 `cargo test -p finance-ib --lib verified_paper_option_history_requests_and_decodes_synthetic_bars --locked --offline`，在内存传输上验证生产历史请求的发出、解码与到期阻断。
+
+Databento 缺省禁用，即使配置估算常量也只进行离线估算。取得注明日期和来源的按量费率后才能用于预算。启用任何真实 Databento 请求之前须由 vira 确认费用、预算和数据用途授权。[历史期权链](docs/option-history.md)
 
 ### 隔离验收配置策略作业
 

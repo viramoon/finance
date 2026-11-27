@@ -376,11 +376,10 @@ fn diagnostic_decoder_handles_extreme_numbers_and_invalid_constants() {
     let quantity = format!(r#""quantity":{}"#, event["payload"]["quantity"]);
     let event = event.to_string();
     let long_integer = "9".repeat(4301);
-    for number in [
-        "1e1000000000000000000",
-        concat!("1e-", "1000000000000000000"),
-        &long_integer,
-    ] {
+    let exponent = "1000000000000000000";
+    let positive_exponent = format!("1e{exponent}");
+    let negative_exponent = format!("1e-{exponent}");
+    for number in [&positive_exponent, &negative_exponent, &long_integer] {
         let text = event.replacen(&quantity, &format!(r#""quantity":{number}"#), 1);
         assert_rejected_json::<Event>(&text, "/payload/quantity", "invalid_type", None);
     }
@@ -742,6 +741,94 @@ fn instrument_and_capability_require_valid_metadata() {
 }
 
 #[test]
+fn context_v2_exports_are_deterministic_and_version_scoped() {
+    let directory = tempfile::tempdir().unwrap();
+    let committed = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../protocol/v2");
+    for _ in 0..2 {
+        assert!(
+            Command::new(env!("CARGO_BIN_EXE_export-market-protocol"))
+                .arg(directory.path())
+                .arg("--context-v2")
+                .status()
+                .unwrap()
+                .success()
+        );
+        for name in ["capability.schema.json", "event.schema.json"] {
+            let exported = fs::read(directory.path().join(name)).unwrap();
+            assert_eq!(exported, fs::read(committed.join(name)).unwrap());
+            let schema: Value = serde_json::from_slice(&exported).unwrap();
+            assert_references_resolve(&schema, &schema);
+            assert_eq!(schema["$defs"]["SchemaVersion"]["enum"], json!(["2.0"]));
+        }
+    }
+    let events: Value =
+        serde_json::from_slice(&fs::read(committed.join("event.schema.json")).unwrap()).unwrap();
+    let kinds: BTreeSet<_> = events["$defs"]["Message"]["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|branch| branch["properties"]["kind"]["enum"][0].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        BTreeSet::from([
+            "funding_rate",
+            "open_interest",
+            "gap",
+            "reset",
+            "heartbeat",
+            "status",
+            "perpetual_context"
+        ])
+    );
+}
+
+#[test]
+fn funding_rate_next_time_is_required_nullable_in_event_and_export() {
+    let mut event = examples()["events"][0].clone();
+    event["schema_version"] = json!("2.0");
+    event["asset_kind"] = json!("perpetual");
+    event["instrument_id"] = json!("BTC-USDT-PERP.BINANCE");
+    event["venue"] = json!("BINANCE");
+    event["kind"] = json!("funding_rate");
+    event["payload"] = json!({"rate": "-0.00000001", "next_funding_ts": null});
+    assert_roundtrip::<Event>(&json!([event.clone()]));
+    event["payload"]["next_funding_ts"] = json!("0");
+    assert_rejected::<Event>(
+        &event,
+        "/payload/next_funding_ts",
+        "constraint_violation",
+        "at or after exchange_ts",
+    );
+    event["payload"]
+        .as_object_mut()
+        .unwrap()
+        .remove("next_funding_ts");
+    assert_rejected::<Event>(
+        &event,
+        "/payload/next_funding_ts",
+        "missing_field",
+        "next_funding_ts",
+    );
+
+    let schema: Value =
+        serde_json::from_str(include_str!("../../../protocol/v2/event.schema.json")).unwrap();
+    let funding = &schema["$defs"]["FundingRate"];
+    assert!(
+        funding["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("next_funding_ts"))
+    );
+    assert!(
+        funding["properties"]["next_funding_ts"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .contains(&json!({"type": "null"}))
+    );
+}
+
+#[test]
 fn perpetual_context_schema_exports_and_keeps_v1_kind_boundaries() {
     let directory = tempfile::tempdir().unwrap();
     assert!(
@@ -830,5 +917,37 @@ fn option_history_exports_round_trip_and_enforce_batch_and_version() {
         "/payload/batch/occurrence",
         "constraint_violation",
         "greater than zero",
+    );
+}
+
+#[test]
+fn perpetual_and_option_history_capabilities_cannot_mix_versions_or_payloads() {
+    let option_history: Value =
+        serde_json::from_str(include_str!("../../../protocol/v3/examples.json")).unwrap();
+    let mut cap = option_history["capabilities"][0].clone();
+    cap["message_kinds"] = json!(["option_history_trade", "funding_rate"]);
+    for version in ["1.0", "2.0", "3.0"] {
+        cap["schema_version"] = json!(version);
+        assert_rejected::<Capability>(&cap, "/schema_version", "invalid_value", "option history");
+    }
+
+    let mut history_trade = option_history["events"][1].clone();
+    history_trade["schema_version"] = json!("2.0");
+    assert_rejected::<Event>(
+        &history_trade,
+        "/schema_version",
+        "invalid_value",
+        "option history",
+    );
+
+    let mut perpetual: Value =
+        serde_json::from_str(include_str!("../../../protocol/v2/examples.json")).unwrap();
+    let next_context = &mut perpetual["events"][0];
+    next_context["schema_version"] = json!("3.0");
+    assert_rejected::<Event>(
+        next_context,
+        "/schema_version",
+        "invalid_value",
+        "option history",
     );
 }

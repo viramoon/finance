@@ -5,6 +5,13 @@ use serde_json::{Map, Value, json};
 use std::error::Error;
 use utoipa::ToSchema;
 
+/// Context observations reserved for the v2.0 event envelope.
+pub const V2_CONTEXT_KINDS: [&str; 3] = ["perpetual_context", "funding_rate", "open_interest"];
+/// Historical option observations reserved for the v3.0 event envelope.
+pub const V3_OPTION_HISTORY_KINDS: [&str; 2] = ["option_history_trade", "option_history_quote"];
+/// Controls shared by the v1.0 and v2.0 event envelopes.
+pub const CONTROL_KINDS: [&str; 4] = ["gap", "reset", "heartbeat", "status"];
+
 fn use_local_refs(value: &mut Value) {
     match value {
         Value::Object(object) => {
@@ -73,15 +80,18 @@ pub fn event_schema_for_version(id: &str, version: SchemaVersion) -> Result<Valu
         .and_then(Value::as_array_mut)
         .ok_or("event schema is missing the message union")?
         .retain(|branch| {
-            let kind = &branch["properties"]["kind"]["enum"][0];
-            let kind_version = if kind == "perpetual_context" {
-                SchemaVersion::V2
-            } else if kind == "option_history_trade" || kind == "option_history_quote" {
-                SchemaVersion::V3
-            } else {
-                SchemaVersion::V1
-            };
-            kind_version == version
+            let kind = branch["properties"]["kind"]["enum"][0]
+                .as_str()
+                .unwrap_or_default();
+            match version {
+                SchemaVersion::V1 => {
+                    !V2_CONTEXT_KINDS.contains(&kind) && !V3_OPTION_HISTORY_KINDS.contains(&kind)
+                }
+                SchemaVersion::V2 => {
+                    CONTROL_KINDS.contains(&kind) || V2_CONTEXT_KINDS.contains(&kind)
+                }
+                SchemaVersion::V3 => V3_OPTION_HISTORY_KINDS.contains(&kind),
+            }
         });
 
     let defs = root["$defs"]
@@ -97,7 +107,14 @@ pub fn event_schema_for_version(id: &str, version: SchemaVersion) -> Result<Valu
         }
     }
     if version != SchemaVersion::V2 {
-        defs.remove("PerpetualContext");
+        for name in ["PerpetualContext", "FundingRate", "OpenInterest"] {
+            defs.remove(name);
+        }
+    }
+    if version == SchemaVersion::V3 {
+        for name in ["ConnectionState", "Gap", "Heartbeat", "Reset", "Status"] {
+            defs.remove(name);
+        }
     }
     if version == SchemaVersion::V1 {
         defs["Message"]["description"] =
@@ -111,13 +128,8 @@ pub fn event_schema_for_version(id: &str, version: SchemaVersion) -> Result<Valu
             "BookSnapshot",
             "BookUpdate",
             "ClosedBar",
-            "ConnectionState",
             "Correction",
-            "Gap",
-            "Heartbeat",
             "MarketMessage",
-            "Reset",
-            "Status",
             "Trade",
             "TradeSide",
         ] {

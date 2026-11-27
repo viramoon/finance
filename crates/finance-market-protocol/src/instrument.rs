@@ -106,6 +106,8 @@ wire_enum! {
         Trade = "trade",
         Snapshot = "snapshot",
         Delta = "delta",
+        FundingRate = "funding_rate",
+        OpenInterest = "open_interest",
         PerpetualContext = "perpetual_context",
         OptionHistoryTrade = "option_history_trade",
         OptionHistoryQuote = "option_history_quote",
@@ -126,7 +128,7 @@ wire_object! {
         pub schema_version: SchemaVersion,
         pub source: Token,
         pub product: Token,
-        #[schema(min_items = 1, max_items = 7)]
+        #[schema(min_items = 1, max_items = 5)]
         pub message_kinds: Vec<MarketKind>,
         #[schema(maximum = 4294967295u32)]
         pub max_depth: u32,
@@ -136,9 +138,22 @@ wire_object! {
     validate = validate;
 }
 
+impl MarketKind {
+    fn is_separate_context(self) -> bool {
+        matches!(self, Self::FundingRate | Self::OpenInterest)
+    }
+}
+
 impl Capability {
+    pub(crate) fn has_separate_context(&self) -> bool {
+        self.message_kinds
+            .iter()
+            .any(|kind| kind.is_separate_context())
+    }
+
     pub fn validate(&self) -> Result<(), ValidationError> {
-        let context = self.message_kinds.contains(&MarketKind::PerpetualContext);
+        let separate = self.has_separate_context();
+        let context = separate || self.message_kinds.contains(&MarketKind::PerpetualContext);
         let history = self
             .message_kinds
             .iter()
@@ -155,7 +170,7 @@ impl Capability {
                             .all(|kind| kind.is_option_history())
                 }
             },
-            "capability version must match its market message kinds (2.0 for perpetual_context, 3.0 for option history)",
+            "capability uses version 2.0 for perpetual context or version 3.0 for option history",
         )?;
         require(
             !self.message_kinds.is_empty(),
@@ -163,6 +178,11 @@ impl Capability {
             "must contain at least one market message kind",
         )?;
         for (index, kind) in self.message_kinds.iter().enumerate() {
+            require(
+                !separate || kind.is_separate_context(),
+                format!("message_kinds.{index}"),
+                "separate funding and open interest cannot share a capability with other kinds",
+            )?;
             require(
                 !self.message_kinds[..index].contains(kind),
                 "message_kinds",

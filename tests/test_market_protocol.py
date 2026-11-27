@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 from copy import deepcopy
 from decimal import Decimal, localcontext
+from hashlib import sha256
 import json
 from pathlib import Path
 import unittest
@@ -52,6 +53,19 @@ class MarketProtocolTests(unittest.TestCase):
         self.assertEqual(raised.exception.kind, kind)
         if reason:
             self.assertIn(reason, str(raised.exception))
+
+    def test_frozen_v1_exports_match_the_published_contract(self):
+        # These bytes match the v1 contract at the F5 merge (ff3050d).
+        digests = {
+            "instrument.schema.json": "94def9de952cb2701bd0881461236971312f141fab44313f06091980382a6bcf",
+            "capability.schema.json": "dbd60ca9272b8b581b7dabd6917fb414c73463667fa7a36ef3032a90d9692643",
+            "event.schema.json": "a0bba8ff7c6e275a583b27970ce508735a4f4ffb16894c4b0ab8ee7ad9918352",
+            "examples.json": "b82a278885d251be3b4e98683dbf63712d343bc5f00725675b735da3ddc64467",
+        }
+        for name, expected in digests.items():
+            with self.subTest(file=name):
+                encoded = _EXAMPLES.with_name(name).read_bytes()
+                self.assertEqual(sha256(encoded).hexdigest(), expected)
 
     def test_rust_exported_examples_roundtrip(self):
         groups = (("instruments", Instrument), ("capabilities", Capability), ("events", Event))

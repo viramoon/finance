@@ -220,7 +220,8 @@ fn openapi_cli_is_deterministic_and_resolves_read_contract_refs() {
         json!({
             "schema_version": {"const": "1.0"},
             "kind": {"not": {"enum": [
-                "perpetual_context", "option_history_trade", "option_history_quote"
+                "perpetual_context", "funding_rate", "open_interest",
+                "option_history_trade", "option_history_quote"
             ]}}
         })
     );
@@ -228,7 +229,9 @@ fn openapi_cli_is_deterministic_and_resolves_read_contract_refs() {
         event_version["oneOf"][1]["properties"],
         json!({
             "schema_version": {"const": "2.0"},
-            "kind": {"const": "perpetual_context"},
+            "kind": {"enum": [
+                "perpetual_context", "funding_rate", "open_interest", "gap", "reset", "heartbeat", "status"
+            ]},
             "asset_kind": {"const": "perpetual"},
             "revision": {"const": "0"}
         })

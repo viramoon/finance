@@ -1,6 +1,8 @@
 use finance_market_protocol::{
     Capability, Event, Instrument, SchemaVersion,
-    schema_export::{event_schema_for_version, versioned_json_schema},
+    schema_export::{
+        V2_CONTEXT_KINDS, V3_OPTION_HISTORY_KINDS, event_schema_for_version, versioned_json_schema,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -74,9 +76,10 @@ fn capability_schema(id: &str, version: SchemaVersion) -> Result<Value, Box<dyn 
         .as_array_mut()
         .ok_or("capability schema is missing market kinds")?;
     kinds.retain(|kind| {
-        let history = kind == "option_history_trade" || kind == "option_history_quote";
+        let name = kind.as_str().unwrap_or_default();
+        let history = V3_OPTION_HISTORY_KINDS.contains(&name);
         match version {
-            SchemaVersion::V1 => !history && kind != "perpetual_context",
+            SchemaVersion::V1 => !history && !V2_CONTEXT_KINDS.contains(&name),
             SchemaVersion::V2 => !history,
             SchemaVersion::V3 => history,
         }
@@ -88,8 +91,25 @@ fn capability_schema(id: &str, version: SchemaVersion) -> Result<Value, Box<dyn 
         SchemaVersion::V2 => {
             root["$defs"]["MarketKind"]["description"] =
                 "Market data kinds a source/product can advertise in version 2.0.".into();
-            root["properties"]["message_kinds"]["contains"] = json!({"const": "perpetual_context"});
-            root["properties"]["message_kinds"]["maxItems"] = 5.into();
+            root["oneOf"] = json!([
+                {
+                    "properties": {
+                        "message_kinds": {
+                            "contains": {"const": "perpetual_context"},
+                            "items": {"enum": ["bar_closed", "trade", "snapshot", "delta", "perpetual_context"]}
+                        }
+                    }
+                },
+                {
+                    "properties": {
+                        "message_kinds": {
+                            "maxItems": 2,
+                            "items": {"enum": ["funding_rate", "open_interest"]}
+                        },
+                        "max_depth": {"const": 0}
+                    }
+                }
+            ]);
         }
         SchemaVersion::V3 => {
             root["$defs"]["MarketKind"]["description"] =
@@ -108,7 +128,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     let (version, wire_version) = match args.next() {
         None => (SchemaVersion::V1, "1.0"),
-        Some(flag) if flag == "--v2" && args.next().is_none() => (SchemaVersion::V2, "2.0"),
+        Some(flag) if (flag == "--v2" || flag == "--context-v2") && args.next().is_none() => {
+            (SchemaVersion::V2, "2.0")
+        }
         Some(flag) if flag == "--v3" && args.next().is_none() => (SchemaVersion::V3, "3.0"),
         _ => return Err("usage: export-market-protocol OUTPUT_DIRECTORY [--v2 | --v3]".into()),
     };

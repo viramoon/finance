@@ -19,9 +19,10 @@ from .backtest_sample import timestamp
 from .epoch import require_bar_timestamps, unix_nanos
 from .research_catalog import CENT, ResearchError, iso_date, load_interval
 from .research_windows import coverage_windows as daily_coverage_windows, metrics
+from .strategy_evaluation import ClosedBar, SMA_STRATEGY, SmaCrossoverPlan, open_evaluator
 
 
-STRATEGY = "SmaCrossover"
+STRATEGY = SMA_STRATEGY
 STARTING_CASH = Decimal("100000.00")
 COMMISSION = Decimal("1.00")
 SLIPPAGE_BPS = 5
@@ -52,14 +53,13 @@ class ExpectedFill:
 
 
 class DailySma(Strategy):
-    def __init__(self, instrument, bars, days, fast, slow, shares):
+    def __init__(self, instrument, bars, days, plan, backend):
         super().__init__()
         self.instrument = instrument
         self.data_by_close = {bar.ts_event: bar for bar in bars}
         self.days = days
-        self.fast = fast
-        self.history = deque(maxlen=slow)
-        self.shares = shares
+        self.evaluator = open_evaluator(plan, backend=backend)
+        self.shares = plan.shares
         self.bar_type = bars[0].bar_type
         self.intent = None
         self.shares_held = 0
@@ -121,13 +121,17 @@ class DailySma(Strategy):
         close = bar.close.as_decimal()
         if bar.volume.as_decimal() == 0:
             self.audit["zero_volume_bars"] += 1
-        self.history.append(close)
-        if len(self.history) == self.history.maxlen:
+        instrument_id = str(bar.bar_type.instrument_id)
+        decision = self.evaluator.evaluate(ClosedBar(instrument_id, bar.ts_event, close))
+        if decision is not None:
+            if (decision.instrument_id != instrument_id or decision.ts_event != bar.ts_event
+                    or not isinstance(decision.target_shares, Decimal)
+                    or not decision.target_shares.is_finite()
+                    or decision.target_shares not in (0, self.shares)):
+                raise ResearchError("execution_audit_failed", "Invalid target from the strategy evaluator")
             day = self.days[bar.ts_event]
             self.equity[day] = self.cash + self.shares_held * close
-            fast_sum = sum(list(self.history)[-self.fast:])
-            target = self.shares if fast_sum * len(self.history) > sum(self.history) * self.fast else 0
-            self.intent = (bar.ts_event, target)
+            self.intent = (decision.ts_event, int(decision.target_shares))
 
     def on_order_filled(self, event):
         plan = self.orders[event.client_order_id]
@@ -156,10 +160,11 @@ class DailySma(Strategy):
         })
 
 
-def simulate(instrument, bars, days, fast, slow, shares):
+def simulate(instrument, bars, days, fast, slow, shares, *, backend=None):
     require_bar_timestamps(bars)
+    plan = SmaCrossoverPlan(str(instrument.id), fast, slow, shares)
+    strategy = DailySma(instrument.id, bars, days, plan, backend)
     engine = BacktestEngine(BacktestEngineConfig(logging=LoggingConfig(bypass_logging=True)))
-    strategy = DailySma(instrument.id, bars, days, fast, slow, shares)
     try:
         engine.add_venue(
             venue=instrument.id.venue, oms_type=OmsType.NETTING, account_type=AccountType.CASH,
@@ -196,7 +201,7 @@ def simulate(instrument, bars, days, fast, slow, shares):
         engine.dispose()
 
 
-def run_research(root, request):
+def run_research(root, request, *, backend=None):
     def request_day(value):
         try:
             instant = datetime.fromisoformat(value)
@@ -220,7 +225,7 @@ def run_research(root, request):
     metadata, instrument, bars, days = load_interval(root, request["instrument"], start, end)
     if len(bars) < slow + 1:
         raise ResearchError("insufficient_history", f"Require at least {slow + 1} consecutive XNYS sessions")
-    result, strategy = simulate(instrument, bars, days, fast, slow, shares)
+    result, strategy = simulate(instrument, bars, days, fast, slow, shares, backend=backend)
     ending_equity = strategy.equity[days[bars[-1].ts_event]]
     actual_start, actual_end = days[bars[0].ts_event], days[bars[-1].ts_event]
     turnover = {

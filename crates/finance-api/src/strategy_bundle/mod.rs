@@ -9,10 +9,11 @@ mod schema;
 
 pub use bindings::{Binding, BindingError, MemoryBindings, SqliteBindings, VersionBindings};
 pub use catalog::{Availability, Bars, Catalog, Universe, example_catalog};
-pub(crate) use compile::diagnose_version_conflict;
 pub use compile::{
     CompiledComponent, CompiledPlan, CompiledSleeve, ConflictRules, ResolvedInputs, compile,
+    compile_legacy_sma,
 };
+pub(crate) use compile::{diagnose_version_conflict, legacy_sma_parameters_valid};
 pub use parse::{InputFormat, MAX_BYTES};
 pub use registry::{Component, Input, Output, Warmup, component, components};
 pub use schema::bundle_schema;

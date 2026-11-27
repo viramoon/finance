@@ -32,8 +32,8 @@ _MAX_BATCH = 4096
 _INDEX_NAME = "projection.sqlite3"
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _MARKET_KINDS = frozenset((
-    Kind.BAR_CLOSED, Kind.TRADE, Kind.SNAPSHOT, Kind.DELTA, ContextKind.PERPETUAL_CONTEXT,
-    OptionHistoryKind.TRADE, OptionHistoryKind.QUOTE,
+    Kind.BAR_CLOSED, Kind.TRADE, Kind.SNAPSHOT, Kind.DELTA, *ContextKind,
+    *OptionHistoryKind,
 ))
 
 _PARQUET_SCHEMA = pa.schema([

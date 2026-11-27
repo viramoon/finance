@@ -9,6 +9,7 @@ import re
 
 from .portfolio_inputs import PortfolioAsset, UniverseSnapshot
 from .research_catalog import ResearchError, ID, bar_type, cash_equity, iso_date, nyse, price
+from .strategy_plan import SHA256, canonical_sha256
 
 from nautilus_trader.model.data import Bar
 from nautilus_trader.model.objects import Quantity
@@ -18,7 +19,6 @@ from .epoch import unix_nanos
 
 REPLAY_SCHEMA = "fertile.finance/strategy-replay/v1"
 MAX_REPLAY_BYTES = 32 * 1024 * 1024
-SHA256 = re.compile(r"[0-9a-f]{64}")
 _UNIX_NANOS = re.compile(r"(?:0|[1-9][0-9]{0,18})")
 _VOLUME = re.compile(r"[0-9]{1,12}")
 _PRICES = ("open", "high", "low", "close")
@@ -34,11 +34,6 @@ class StrategyReplay:
     data: dict
     calendar: dict
     availability: dict
-
-
-def canonical_sha256(value):
-    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _unique_object(pairs):

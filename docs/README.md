@@ -21,7 +21,7 @@
 | [frontend](https://github.com/viramoon/frontend) | React + TypeScript + Vite 单页应用；只调用 web |
 | [agent](https://github.com/viramoon/agent) | 独立的开发流程知识库；通用 skill、prompt、工作流、评估和复盘 |
 
-fertile 以 git submodule 引入 finance、web、frontend，agent 单独维护。finance 提供可独立运行的 collector、finance-projector、回测 worker 和 API，trader 入口由后续 issue 实现。web 托管 frontend 的构建产物。进程部署由 fertile 管理。[架构与进程边界](architecture.md)
+fertile 以 git submodule 引入 finance、web、frontend，agent 单独维护。finance 提供可独立运行的 collector、finance-projector、回测 worker、finance-decision 和 API，trader 入口由后续 issue 实现。web 托管 frontend 的构建产物。进程部署由 fertile 管理。[架构与进程边界](architecture.md)
 
 - **发布**：只有 fertile 对外带版本号。发布时更新各子模块指针 → 集成检查 → bump `VERSION` → 打 `vX.Y.Z` → 由发版脚本自动生成 `RELEASES.md` 条目（包含子模块 PR / issue），并自动给子模块打内部 tag `fertile-vX.Y.Z`。子模块不对外发版。Maas · Ruler 只按 fertile tag 部署和回滚。规则唯一入口是 [fertile docs/release.md](https://github.com/viramoon/fertile/blob/main/docs/release.md)，本次只记录脚本设计。
 - **部署**：服务部署以 [fertile deploy/](https://github.com/viramoon/fertile/tree/main/deploy) 为唯一准绳。agent 的 deploy-map.yaml 只管 skill / prompt / 工作流分发，涉及服务只引用 fertile。
@@ -36,7 +36,9 @@ fertile 以 git submodule 引入 finance、web、frontend，agent 单独维护�
 - [Nautilus 使用与升级](nautilus.md)
 - [连接恢复与熔断](connectivity.md)
 - [IBKR 接入](integrations/ib.md)
+- [Binance 公共行情适配](integrations/binance.md)
 - [Hyperliquid 公共永续行情](integrations/hyperliquid.md)
+- [历史期权链与 OPRA 费用估算](option-history.md)
 - [HTTP 与代码导出](api.md)
 - [行情标的、事件与流协议](market-protocol.md)
 - [历史价量补拉与逐笔归档](historical-pull.md)
@@ -45,6 +47,7 @@ fertile 以 git submodule 引入 finance、web、frontend，agent 单独维护�
 - [期权 GEX、gamma wall、flip 与 0DTE 计算接口](option-exposure.md)
 - [期权流观察与历史核验](option-flow.md)
 - [StrategyBundle v1 配置与编译](strategy-bundle.md)
+- [实时决策进程与共享求值](decision-process.md)
 - [离线因子评价与研究登记](factor-research.md)
 - [技术栈决策](adr/ADR-0001-tech-stack.md)
 - [依赖、许可与替换](adr/ADR-0002-nautilus-dependency.md)

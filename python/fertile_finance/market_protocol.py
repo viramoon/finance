@@ -139,6 +139,8 @@ class Kind(StrEnum):
 
 
 class ContextKind(StrEnum):
+    FUNDING_RATE = "funding_rate"
+    OPEN_INTEREST = "open_interest"
     PERPETUAL_CONTEXT = "perpetual_context"
 
 
@@ -151,6 +153,8 @@ type EventKind = Kind | ContextKind | OptionHistoryKind
 
 
 _MARKET_KINDS = frozenset((Kind.BAR_CLOSED, Kind.TRADE, Kind.SNAPSHOT, Kind.DELTA))
+_CONTEXT_KINDS = frozenset(ContextKind)
+_SEPARATE_CONTEXT_KINDS = _CONTEXT_KINDS - {ContextKind.PERPETUAL_CONTEXT}
 _BOOK_KINDS = frozenset((Kind.SNAPSHOT, Kind.DELTA))
 
 
@@ -212,7 +216,7 @@ def _choice[T: StrEnum](enum: type[T], value: object, path: str) -> T:
 
 
 def _event_kind(value: object, path: str) -> EventKind:
-    if value == ContextKind.PERPETUAL_CONTEXT:
+    if isinstance(value, str) and value in _CONTEXT_KINDS:
         return _choice(ContextKind, value, path)
     if value in (OptionHistoryKind.TRADE, OptionHistoryKind.QUOTE):
         return _choice(OptionHistoryKind, value, path)
@@ -454,7 +458,10 @@ class Capability(_WireObject):
             _require(all(isinstance(kind, OptionHistoryKind) for kind in kinds), kinds_path,
                      "historical option capabilities contain only historical option kinds")
         else:
-            version = CONTEXT_SCHEMA_VERSION if ContextKind.PERPETUAL_CONTEXT in kinds else SCHEMA_VERSION
+            version = CONTEXT_SCHEMA_VERSION if _CONTEXT_KINDS.intersection(kinds) else SCHEMA_VERSION
+            if _SEPARATE_CONTEXT_KINDS.intersection(kinds):
+                for index, kind in enumerate(kinds):
+                    _require(kind in _SEPARATE_CONTEXT_KINDS, f"{kinds_path}/{index}", "separate funding and open interest cannot share a capability with other kinds")
         _require(bool(kinds), kinds_path, "expected at least one market message kind")
         _require(len(set(kinds)) == len(kinds), kinds_path, "duplicate message kind")
         max_depth = _depth(data["max_depth"], f"{path}/max_depth")
@@ -557,6 +564,17 @@ class Status:
 
 
 @dataclass(frozen=True, slots=True)
+class FundingRate:
+    rate: DecimalText
+    next_funding_ts: U64Text | None
+
+
+@dataclass(frozen=True, slots=True)
+class OpenInterest:
+    quantity: DecimalText
+
+
+@dataclass(frozen=True, slots=True)
 class PerpetualContext:
     funding_rate: DecimalText
     open_interest: DecimalText
@@ -596,7 +614,7 @@ class OptionHistoryQuote:
 
 
 type Payload = (MarketPayload | Correction | Gap | Reset | Heartbeat | Status
-                | PerpetualContext | OptionHistoryTrade | OptionHistoryQuote)
+                | PerpetualContext | FundingRate | OpenInterest | OptionHistoryTrade | OptionHistoryQuote)
 
 
 def _quantity(value: object, path: str, *, positive: bool = False) -> DecimalText:
@@ -755,6 +773,18 @@ def _payload(kind: EventKind, value: object, exchange_ts: U64Text | None) -> Pay
             ),
         )
 
+    if kind in _SEPARATE_CONTEXT_KINDS:
+        _require(exchange_ts is not None, "/exchange_ts", "required for perpetual context")
+        if kind == ContextKind.FUNDING_RATE:
+            data = _object(value, path, ("rate", "next_funding_ts"))
+            next_ts = None
+            if data["next_funding_ts"] is not None:
+                next_ts = U64Text(data["next_funding_ts"], field=f"{path}/next_funding_ts")
+                _require(next_ts.integer >= exchange_ts.integer, f"{path}/next_funding_ts", "must be at or after exchange_ts")
+            return FundingRate(DecimalText(data["rate"], field=f"{path}/rate"), next_ts)
+        data = _object(value, path, ("quantity",))
+        return OpenInterest(_quantity(data["quantity"], f"{path}/quantity"))
+
     match kind:
         case Kind.GAP:
             data = _object(value, path, ("from_ts", "to_ts", "reason"))
@@ -822,15 +852,19 @@ class Event(_WireObject):
         ), ("native_id",))
         venue = _pattern(data["venue"], _VENUE_OR_CALENDAR, f"{path}/venue")
         kind = _event_kind(data["kind"], f"{path}/kind")
-        is_context = kind == ContextKind.PERPETUAL_CONTEXT
-        is_option_history = isinstance(kind, OptionHistoryKind)
-        expected_version = OPTION_HISTORY_SCHEMA_VERSION if is_option_history else (
-            CONTEXT_SCHEMA_VERSION if is_context else SCHEMA_VERSION
-        )
-        version = _version(data, expected_version)
         asset_kind = _choice(AssetKind, data["asset_kind"], f"{path}/asset_kind")
-        _require(not is_context or asset_kind == AssetKind.PERPETUAL, "/asset_kind", "context requires a perpetual instrument")
-        _require(not is_option_history or asset_kind == AssetKind.OPTION, "/asset_kind", "historical evidence requires an option instrument")
+        expected_version = data["schema_version"]
+        if isinstance(kind, OptionHistoryKind):
+            expected_version = OPTION_HISTORY_SCHEMA_VERSION
+        elif kind in _CONTEXT_KINDS:
+            if kind in _SEPARATE_CONTEXT_KINDS and expected_version == SCHEMA_VERSION:
+                raise ProtocolError("/kind", "invalid_value", "perpetual context requires version 2.0")
+            expected_version = CONTEXT_SCHEMA_VERSION
+        elif kind in _MARKET_KINDS or kind == Kind.CORRECTION or expected_version != CONTEXT_SCHEMA_VERSION:
+            expected_version = SCHEMA_VERSION
+        version = _version(data, expected_version)
+        _require(version != CONTEXT_SCHEMA_VERSION or asset_kind == AssetKind.PERPETUAL, "/asset_kind", "version 2.0 requires a perpetual instrument")
+        _require(not isinstance(kind, OptionHistoryKind) or asset_kind == AssetKind.OPTION, "/asset_kind", "historical evidence requires an option instrument")
         exchange_ts = (
             None if data["exchange_ts"] is None
             else U64Text(data["exchange_ts"], field=f"{path}/exchange_ts")
@@ -927,6 +961,10 @@ class Event(_WireObject):
                 "does not match source capability",
             )
 
+        if isinstance(self.kind, Kind):
+            separate = bool(_SEPARATE_CONTEXT_KINDS.intersection(capability.message_kinds))
+            _require((self.schema_version == CONTEXT_SCHEMA_VERSION) == separate,
+                     "/schema_version", "does not match the supplied capability")
         path = "/payload"
         kind_path = "/kind"
         kind, payload = self.kind, self.payload

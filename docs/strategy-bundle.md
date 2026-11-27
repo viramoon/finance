@@ -2,6 +2,8 @@
 
 `StrategyBundle` 把离线研究所需的策略组件、数据与时钟、组合预算、风控和模拟执行模型固化为一份可校验、可编译为 JSON 的声明。当前引擎为 `nautilus_cash_equity`，模式为 `backtest`，范围是多头现金权益、整股和非负权重。[回测作业接口](backtest-jobs.md) 接受内联配置与登记版本，也支持既有的 `DemoStrategy` 与 `SmaCrossover`。
 
+`finance-strategy compile-legacy-sma` 单独为现有的 `SmaCrossover` 生成单标的观察计划。计划版本、共享求值和回放方式见 [实时决策接口](decision-process.md)。
+
 ## 格式与组件
 
 根对象包含 `apiVersion: fertile.finance/strategy/v1`、`kind: StrategyBundle`、`metadata` 和 `spec`。`metadata.id` 与 `metadata.version` 标识一份发布版本。版本为三段用点分隔的数字，每段最多 10 位，数值零写作 `0`，其余数值用无前导零的十进制表示。`metadata.title` 是 1 至 256 个 Unicode 字符的显示标题。组件版本使用注册表中的完整 `id@version`。格式、策略和组件各有独立版本。
@@ -188,8 +190,8 @@ initial_cash = Decimal(plan["bundle"]["spec"]["portfolio"]["initial_cash"]["amou
 
 配置回测将编译计划、点时成分和数据快照、引擎版本、成本与运行区间锁入 `run_manifest`。执行数据、归因和复验见 [配置策略作业](backtest-jobs.md#配置策略作业)。
 
-配置回测 worker 的默认 Python 求值器在当时可见的闭合日线上支持 `factor.close_return@1.0.0` 和 `indicator.rsi_wilder@1.0.0`，成功作业的 `run_manifest.indicator_evaluator` 记录其版本。策略执行到其他指标时，默认求值器在内部抛出 `unsupported_strategy_component`。子进程将它映射为 `strategy_runtime_invalid`，作业详情返回 `status: "failed"` 和 `error: "strategy_runtime_invalid"`。
+配置回测 worker 和实时决策默认通过 `finance-strategy evaluate-indicators` 调用 [Rust 指标内核](indicators.md)。每个因子按编译计划的组件版本、参数和 `output` 选择单列值。历史组件 `factor.close_return@1.0.0` 映射到 F6 的收盘收益率，`lookback_sessions` 映射为 `period`。策略比较使用 F6 声明精度的十进制值，预热或未定义时继续按缺值处理。成功作业的 `run_manifest.indicator_evaluator` 记录 `fertile.finance/f6-strategy-indicators/v1`。指标求值失败时作业返回 `strategy_runtime_invalid`。
 
-Python 运行器的 `indicator_evaluator` 回调只接收点时闭合历史、组件版本 ID 和参数，返回一个 `Decimal` 值或缺值。编译计划保留 `output`，当前回调没有该参数。同一序列上使用相同参数的布林上轨和下轨会收到相同的回调实参。接入 [Rust 指标内核](indicators.md) 的多列指标需要扩展求值接口，把所选 `output` 连同点时闭合序列、组件版本和参数交给适配器。
+Python 研究运行器仍支持替换默认后端。显式传入的旧 `indicator_evaluator` 回调接收点时闭合历史、组件版本 ID 和参数，返回 `Decimal` 或缺值。多输出选择由生产后端按编译计划执行。
 
 F8 提供离线评价及版本选用检查。接入研究因子时，调用方通过 `FactorResearchCatalog.select_for_backtest` 确认版本可选。[因子研究接口](factor-research.md)

@@ -47,3 +47,26 @@ class HyperliquidProtocolTests(unittest.TestCase):
             self.assertIsNone(row["exchange_ts"])
             self.assertEqual(Event.from_json(row["event_json"]).to_dict(), original)
             self.assertEqual(read_latest_event(root, *event.stream_key, event.epoch, event.seq), event)
+
+
+    def test_v1_reset_precedes_existing_f5_v2_context_in_the_same_stream(self):
+        path = Path(__file__).resolve().parents[1] / "protocol" / "v2" / "examples.json"
+        examples = json.loads(path.read_text())
+        raw, = examples["events"]
+        event = Event.from_json(json.dumps(raw))
+        instrument, = map(Instrument.from_dict, examples["instruments"])
+        capability, = map(Capability.from_dict, examples["capabilities"])
+        raw_reset = raw | {
+            "schema_version": "1.0",
+            "kind": "reset",
+            "seq": "0",
+            "cursor": f'{raw["epoch"]}:0',
+            "payload": {"reason": "synthetic_reconnect"},
+        }
+        reset = Event.from_json(json.dumps(raw_reset))
+
+        self.assertEqual(reset.to_dict(), raw_reset)
+        self.assertEqual(event.to_dict(), raw)
+        reset.validate_against(instrument, capability)
+        event.validate_against(instrument, capability)
+        event.validate_successor(reset)

@@ -1,5 +1,10 @@
 use finance_api::{ApiDoc, AppState, config::Settings, read_stream, router};
-use finance_market_protocol::{SchemaVersion, schema_export::close_event_envelopes};
+use finance_market_protocol::{
+    SchemaVersion,
+    schema_export::{
+        CONTROL_KINDS, V2_CONTEXT_KINDS, V3_OPTION_HISTORY_KINDS, close_event_envelopes,
+    },
+};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -30,25 +35,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )?;
         // REST reads versioned records from the WAL. The common envelope and
         // kind union alone do not express which version is valid for each kind.
+        let v2_kinds: Vec<_> = V2_CONTEXT_KINDS.into_iter().chain(CONTROL_KINDS).collect();
+        let versioned_kinds: Vec<_> = V2_CONTEXT_KINDS
+            .into_iter()
+            .chain(V3_OPTION_HISTORY_KINDS)
+            .collect();
         spec.pointer_mut("/components/schemas/Event/allOf")
             .and_then(Value::as_array_mut)
             .ok_or("missing REST event envelope schema")?
             .push(json!({"oneOf": [
                 {"properties": {
                     "schema_version": {"const": SchemaVersion::V1},
-                    "kind": {"not": {"enum": [
-                        "perpetual_context", "option_history_trade", "option_history_quote"
-                    ]}}
+                    "kind": {"not": {"enum": versioned_kinds}}
                 }},
                 {"properties": {
                     "schema_version": {"const": SchemaVersion::V2},
-                    "kind": {"const": "perpetual_context"},
+                    "kind": {"enum": v2_kinds},
                     "asset_kind": {"const": "perpetual"},
                     "revision": {"const": "0"}
                 }},
                 {"properties": {
                     "schema_version": {"const": SchemaVersion::V3},
-                    "kind": {"enum": ["option_history_trade", "option_history_quote"]},
+                    "kind": {"enum": V3_OPTION_HISTORY_KINDS},
                     "asset_kind": {"const": "option"},
                     "revision": {"const": "0"},
                     "exchange_ts": {"$ref": "#/components/schemas/U64Text"}

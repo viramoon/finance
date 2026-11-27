@@ -2,6 +2,7 @@
 
 #[path = "chain.rs"]
 mod chain;
+mod option_minutes;
 
 use super::{
     ConfirmedContract, ContractKind, ContractQuery, GreeksSource, LiquidHours, MarketDataSource,

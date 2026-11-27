@@ -68,7 +68,7 @@ Nasdaq TotalView 在 `finance-ib` 内存展示接口保留 IBKR 按位置更新�
 
 ## Schema 导出与兼容规则
 
-v1 的标的、能力和事件都带 `schema_version: "1.0"`。仓库交付以下独立的 JSON Schema Draft 2020-12 和跨仓样本。
+v1.0 标的、能力和事件均带 `schema_version: "1.0"`。仓库交付以下独立的 JSON Schema Draft 2020-12 和跨仓样本。
 
 | 文件 | 内容 |
 | --- | --- |
@@ -87,21 +87,33 @@ cargo test --locked -p finance-market-protocol
 PYTHONPATH=python python -m unittest discover -s tests -p test_market_protocol.py -v
 ```
 
-读取端按完整 `schema_version` 选择 schema，拒绝未知版本、未知字段、未知种类和缺少必填字段。任意增删字段或种类、缩窄值域、改变单位或事件语义都需要显式协商并以新的主版本发布，旧 schema 和样本保留给旧读者。只修订文档或更正生成物中与既定 v1.0 规则不一致的部分时保留原协议版本。协议版本独立于代码包版本和 fertile 发布版本。
+读取端按完整 `schema_version` 选择 schema，拒绝未知版本、未知字段、未知种类和缺少必填字段。
+
+**协议主版本在首次随 fertile 集成发布时冻结。** 首次发布前可在候选主版本内追加消息种类，生产者和读取端按同一个候选契约联调。冻结后，增删字段或消息种类、缩窄值域、改变单位或事件语义都须显式协商并使用新主版本，保留旧 schema 和样本供旧读者使用。只修订文档或更正生成物中与既定协议规则不一致的部分时保留原协议版本。协议版本独立于代码包版本和 fertile 发布版本。
+
+v1.0 的 schema、样本和读取行为沿用既有契约。v2.0 由 F5 引入，仍处于首次集成发布前。F4 在该候选版本中追加 `funding_rate`、`open_interest` 和用于独立上下文流的 `gap`、`reset`、`heartbeat`、`status`。已有 Hyperliquid `perpetual_context` 样本及同一流中的 v1.0 控制消息继续可读。
 
 跨仓消费方应从同一个 finance 提交取 schema 和样本，并在自身测试中核对识别的版本、消息分支以及精确字段。finance → web → frontend 的 HTTP OpenAPI 指针继续按原有流程更新。
 
-### v2.0 永续上下文
+## 永续上下文 2.0
 
-`schema_version: "2.0"` 的事件种类为 `perpetual_context`，适用于 `asset_kind: "perpetual"`。保留原信封、位置和时钟定义；缺源端时钟时 `exchange_ts` 为 null。`payload` 由三个十进制字符串组成。资金费率 `funding_rate` 可为负，未平仓量 `open_interest` 非负，标记价格 `mark_price` 大于零。标记价格与未平仓量保留源值的精度，可超出交易价格和数量的网格。原始事件修订为 `"0"`。
+`schema_version: "2.0"` 的永续观测适用于 `asset_kind: "perpetual"`。记录沿用原信封、位置和时钟定义，修订为 `"0"`，价量以十进制字符串保留源精度。
 
-能力声明包含 `perpetual_context` 时使用 2.0，可同时声明 v1.0 市场数据种类。标的及 `reset`、`gap` 等控制消息沿用 v1.0。读者须按每条记录的版本选择 schema，跨版本控制消息也参与同一流分区的 epoch、seq 校验。
+| `kind` | `payload` |
+| --- | --- |
+| `perpetual_context` | 同一时点的 `funding_rate`、非负 `open_interest` 和正数 `mark_price`。没有源端时钟时 `exchange_ts` 为 `null`。 |
+| `funding_rate` | 有符号的十进制比率 `rate` 和必填的 `next_funding_ts`。已知时为不早于 `exchange_ts` 的 UTC 纳秒字符串，未知时为 `null`。 |
+| `open_interest` | 非负十进制字符串 `quantity`，保留供应商的基础资产数量和有效位。 |
 
-生成 [事件 schema](../protocol/v2/event.schema.json)、[能力 schema](../protocol/v2/capability.schema.json) 和 [合成样本](../protocol/v2/examples.json) 的命令如下。
+声明 `perpetual_context` 的能力使用 2.0，可同时声明 v1.0 市场消息。盘口、成交及该产品的控制消息沿用 1.0。分别声明 `funding_rate` 或 `open_interest` 的能力使用独立的 2.0 产品，`max_depth` 为 0，观测要求 `exchange_ts`，控制消息也使用 2.0。标的主数据使用 1.0。读取端按每条记录的版本选择 schema，跨版本控制消息仍参与同一分区的 epoch 和 seq 校验。
+
+生成 [事件 schema](../protocol/v2/event.schema.json)、[能力 schema](../protocol/v2/capability.schema.json) 和 [合成样本](../protocol/v2/examples.json)：
 
 ```sh
 cargo run --locked --offline -q -p finance-market-protocol --bin export-market-protocol -- protocol/v2 --v2
 ```
+
+接口与恢复规则见 [Hyperliquid](integrations/hyperliquid.md)、[Binance](integrations/binance.md) 及 [ADR-0034](adr/ADR-0034-hyperliquid-context-stream.md)。
 
 ### v3.0 期权历史证据
 
@@ -114,8 +126,6 @@ cargo run --locked --offline -q -p finance-market-protocol --bin export-market-p
 ```sh
 cargo run --locked --offline -q -p finance-market-protocol --bin export-market-protocol -- protocol/v3 --v3
 ```
-
-接口与恢复规则见 [Hyperliquid](integrations/hyperliquid.md) 及 [ADR-0034](adr/ADR-0034-hyperliquid-context-stream.md)。
 
 ## 首批读契约的 WS 与 SSE 消息
 
@@ -131,7 +141,7 @@ cargo run --locked --offline -q -p finance-market-protocol --bin export-market-p
 
 ## 解码与错误定位
 
-Rust 使用 `finance_market_protocol::decode_json::<T>(input)`，其中 `T` 为 `Instrument`、`Capability` 或 `Event`。通过错误的 `path()` 和 `kind().as_str()` 读取诊断。Python 使用 `fertile_finance.market_protocol` 的同名类型及 `from_json(input)`，通过 `ProtocolError.path` 和 `ProtocolError.kind` 读取诊断。Python 的 `Kind` 枚举对应 v1.0 消息种类，永续上下文使用 `ContextKind.PERPETUAL_CONTEXT`。
+Rust 使用 `finance_market_protocol::decode_json::<T>(input)`，其中 `T` 为 `Instrument`、`Capability` 或 `Event`。通过错误的 `path()` 和 `kind().as_str()` 读取诊断。Python 使用 `fertile_finance.market_protocol` 的同名类型及 `from_json(input)`，通过 `ProtocolError.path` 和 `ProtocolError.kind` 读取诊断。Python 的 `Kind` 枚举包含 v1.0 消息种类和 2.0 复用的控制消息种类。永续观测使用 `ContextKind`，v3.0 期权历史证据使用 `OptionHistoryKind`。
 
 路径使用相对于所读对象的 JSON Pointer，数组下标从零开始。语法错误等定位到整个输入的情况使用空路径。调用方可按错误种类分支，并用可读错误消息显示原因。
 

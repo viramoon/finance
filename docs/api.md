@@ -35,7 +35,7 @@ FERTILE_PROFILE=cloudbox cargo run --locked -p finance-api
 
 ## 行情与作业
 
-GET /api/v1/market/status 从 collector 持久状态读取各标的水位和新鲜度。没有状态文件时返回明确的缺失状态，collector 停止后会反映过期。可用性和精度验证见 [行情目录](../catalog/README.md)。
+GET /api/v1/market/status 从 collector 持久状态读取各标的水位和新鲜度。没有状态文件时返回明确的缺失状态，collector 停止后会反映过期。可用性和精度验证见 [行情目录](../catalog/README.md)。[Binance 公共行情](integrations/binance.md)通过 F3 和独立进程状态提供，现有 `/api/v1/market/status` 仍描述 bar collector。
 
 IBKR 顶档订阅与权限验收由 `finance-ib` 的 Rust 接口和私有 CLI 提供，运行时独立于 HTTP API 和 collector 持久状态。接口与权限结论见 [IBKR 接入](integrations/ib.md#美股-l1-和-opra-权限验收)。
 
@@ -45,7 +45,9 @@ IBKR 行情线预算、共享事件、已确认期权链和覆盖区间由 `fina
 
 Nasdaq TotalView 的页面焦点与场所深度由进程内 Rust 接口提供。接入共享行情所有者后，由 web 提供会话内展示入口。当前 HTTP 行情状态仍来自持久化采集状态。场所深度接口和接入边界见 [IBKR 接入](integrations/ib.md#nasdaq-totalview-场所深度)。
 
-POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /api/v1/backtests/{id} 查看执行进度与摘要，GET /api/v1/backtests 按 cursor 和 limit 翻页。提交使用同库事务完成幂等检查和容量检查，worker 独立执行。完整输入范围、超时和恢复见 [作业运维](backtest-jobs.md)。公网入口由 web 鉴权并限流。
+POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /api/v1/backtests/{id} 查看执行进度与摘要，GET /api/v1/backtests 按 cursor 和 limit 翻页。提交使用同库事务完成幂等检查和容量检查。多个 worker 可独立领取并续租，租约是服务端状态。完整输入范围、超时和恢复见 [作业运维](backtest-jobs.md)。公网入口由 web 鉴权并限流。
+
+`finance-decision` 的信号与检查点保存在本地决策库，读写边界见 [实时决策接口](decision-process.md)。
 
 ## 配置策略提交与结果
 
@@ -82,7 +84,7 @@ POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /a
 
 行情查询的 `as_of` 是 API 的 UTC 观察时间。事件时间与覆盖分别由 F1 时钟、持久和投影水位、质量报告说明。`position`、`generation`、`epoch`、`seq`、`revision` 与 UTC 纳秒时间在 JSON 和查询参数中均使用十进制字符串，`after` 默认 `"0"`。价格与数量沿用 F1 的精确十进制字符串。`offset` 默认 0，`limit` 默认 100、最大 500，`next_offset: null` 表示已到列表末尾。[F1 事件](market-protocol.md) · [F3 存储](market-wal.md)
 
-WAL 的 `records[].event` 和投影的 `record.event` 保留原始 `schema_version`。消费端逐条按版本解码。`2.0` 的 `kind` 为 `perpetual_context`，`3.0` 的 `kind` 为 `option_history_trade` 或 `option_history_quote`，相应历史产品的重置消息仍用 `1.0`。OpenAPI 的通用事件联合类型包含新证据类型。首批独立导出的 WS/SSE 消息继续使用 `1.0`。[版本化行情协议](market-protocol.md)
+WAL 的 `records[].event` 和投影的 `record.event` 保留原始 `schema_version`。同一 WAL 页面可包含多个版本，消费端按每条记录的版本与消息种类解码。Hyperliquid 使用 `2.0` 的 `perpetual_context`。Binance 使用 `2.0` 的 `funding_rate`、`open_interest` 及该产品的控制消息。期权逐笔证据使用 `3.0` 的 `option_history_trade` 和 `option_history_quote`，其重置消息使用 `1.0`。OpenAPI 含上述事件类型。独立导出的 WS/SSE 消息使用 `1.0`。[版本化行情协议](market-protocol.md)
 
 市场响应的 `access` 来自 F3 的落盘策略，含 `license`、`display_live`、`record_local`、`derive_non_display`、`backup_personal_drive`。事件另携带原 `license`。仅展示产品由生产者在内存处理，不进入这些查询和生成物。项目禁止再分发。参数不合法返回 `400 / market_query_invalid`。产品未登记或目标投影位置缺失返回 `404 / market_product_not_found` 或 `market_projection_not_found`。策略、索引或 WAL 损坏返回 `500 / market_storage_error`，响应省略本地路径和数据正文。
 
@@ -146,6 +148,8 @@ utoipa 从 handler 注解和实际响应类型导出。流生成器使用 F1 v1.
 finance 合并后，web 先固定 `openapi/finance.commit` 的完整 SHA，从同一提交更新快照与客户端，并扩充 web 自己的契约。frontend 随后固定 `openapi/web.commit` 并生成客户端。fertile 最后更新已合并的子仓 gitlink 和集成快照 `contracts/finance.openapi.json`，并验证契约链。生成物由相应生成流程更新，破坏性接口变更需要兼容迁移计划。[fertile contracts](https://github.com/viramoon/fertile/tree/main/contracts)
 
 历史价量补拉通过本地命令运行。入口、JSON 运行报告和 Parquet 目录见批任务文档。[历史价量批任务](historical-pull.md)
+
+历史期权读取与 OPRA 费用估算通过 collector 的 Rust 库调用。IBKR 读取使用 `IbkrOptionHistory` 和 F9a 的只读 `PaperMarket` 会话，分别返回 `Expired`、`NoBars` 和请求错误。HTTP 与行情流的对外接口留待后续接入。[历史期权链](option-history.md)
 
 ## 历史回测与提交确认
 

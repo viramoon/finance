@@ -25,3 +25,8 @@ CREATE TABLE IF NOT EXISTS strategy_backtest_snapshots (
   snapshot_sha256 TEXT PRIMARY KEY NOT NULL,
   content BLOB NOT NULL
 ) STRICT;
+
+CREATE TABLE IF NOT EXISTS job_leases (
+  job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+  expires_at_ms INTEGER NOT NULL
+);

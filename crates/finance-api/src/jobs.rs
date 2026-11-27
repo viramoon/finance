@@ -4,6 +4,7 @@ use crate::{
     ApiError, AppState, BacktestSummary, ErrorBody,
     bundle_jobs::{self, BundleAdmission, BundleRequestView, BundleSubmission, QueuedBundle},
     error, research,
+    strategy_bundle::legacy_sma_parameters_valid,
 };
 use axum::{
     Json, Router,
@@ -79,7 +80,7 @@ impl JobRequest {
                 }
                 validate_daily_dates(self.start, self.end, LAST_RESEARCH_DAY)?;
                 if !matches!(params, (Some(fast), Some(slow), Some(shares))
-                    if 2 <= fast && fast < slow && slow <= 250 && (1..=1000).contains(&shares))
+                    if legacy_sma_parameters_valid(fast, slow, shares))
                 {
                     return Err(invalid(
                         "Require 2 <= fast_period < slow_period <= 250 and 1..1000 shares",
