@@ -10,7 +10,7 @@ fertile 的主项目与 submodule，基于 NautilusTrader 的交易与数据系�
 
 Nasdaq TotalView 提供八只自选标的的场所深度，最多同时钉住两只，另有一个名额跟随当前页面。SPY 保留综合顶档。场所簿仅供授权的会话在内存中展示。接口和权限见 [Nasdaq TotalView 场所深度](docs/integrations/ib.md#nasdaq-totalview-场所深度)。
 
-本地行情链路支持 F1 事件追加、恢复和独立 Parquet 投影，Hyperliquid 公共永续行情已接入。[本地行情 WAL、投影与封段接口](docs/market-wal.md)
+本地行情链路支持 F1 事件追加、恢复和独立 Parquet 投影。已接入 [Hyperliquid 公共永续行情](docs/integrations/hyperliquid.md) 和 [Binance 现货与 USDT 永续](docs/integrations/binance.md)，Binance 内置 profile 默认关闭。[本地行情 WAL、投影与封段接口](docs/market-wal.md)
 
 finance-api 提供 v1 行情 WAL、投影、水位、缺口及因子研究只读查询，并从代码导出 REST OpenAPI 和版本化 WS/SSE 消息契约。[首批读契约与导出命令](docs/api.md#首批读契约)
 

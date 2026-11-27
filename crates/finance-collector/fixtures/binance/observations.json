@@ -1,0 +1,6 @@
+{
+  "spot_trade": {"e":"trade","s":"BTCUSDT","E":1000,"T":999,"t":9007199254741011,"p":"10.010","q":"0.001000","m":true},
+  "perp_trade": {"e":"aggTrade","s":"BTCUSDT","E":1000,"T":999,"a":9007199254741011,"p":"10.010","q":"0.001000","m":false},
+  "funding": {"e":"markPriceUpdate","s":"BTCUSDT","E":1000,"r":"-0.00000001","T":2000},
+  "interest": {"symbol":"BTCUSDT","openInterest":"123.456789123456","time":1001}
+}

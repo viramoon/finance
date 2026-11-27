@@ -1,6 +1,6 @@
 use finance_market_protocol::{
     Capability, Event, Instrument, SchemaVersion,
-    schema_export::{event_schema_for_version, versioned_json_schema},
+    schema_export::{V2_CONTEXT_KINDS, event_schema_for_version, versioned_json_schema},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -75,13 +75,35 @@ fn capability_schema(id: &str, version: SchemaVersion) -> Result<Value, Box<dyn 
             root["$defs"]["MarketKind"]["enum"]
                 .as_array_mut()
                 .ok_or("capability schema is missing market kinds")?
-                .retain(|kind| kind != "perpetual_context");
+                .retain(|kind| {
+                    !kind
+                        .as_str()
+                        .is_some_and(|name| V2_CONTEXT_KINDS.contains(&name))
+                });
             root["properties"]["message_kinds"]["maxItems"] = 4.into();
         }
         SchemaVersion::V2 => {
             root["$defs"]["MarketKind"]["description"] =
                 "Market data kinds a source/product can advertise in version 2.0.".into();
-            root["properties"]["message_kinds"]["contains"] = json!({"const": "perpetual_context"});
+            root["oneOf"] = json!([
+                {
+                    "properties": {
+                        "message_kinds": {
+                            "contains": {"const": "perpetual_context"},
+                            "items": {"enum": ["bar_closed", "trade", "snapshot", "delta", "perpetual_context"]}
+                        }
+                    }
+                },
+                {
+                    "properties": {
+                        "message_kinds": {
+                            "maxItems": 2,
+                            "items": {"enum": ["funding_rate", "open_interest"]}
+                        },
+                        "max_depth": {"const": 0}
+                    }
+                }
+            ]);
         }
     }
     Ok(root)
@@ -94,7 +116,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     let (version, wire_version) = match args.next() {
         None => (SchemaVersion::V1, "1.0"),
-        Some(flag) if flag == "--v2" && args.next().is_none() => (SchemaVersion::V2, "2.0"),
+        Some(flag) if (flag == "--v2" || flag == "--context-v2") && args.next().is_none() => {
+            (SchemaVersion::V2, "2.0")
+        }
         _ => return Err("usage: export-market-protocol OUTPUT_DIRECTORY [--v2]".into()),
     };
     let id = |name| format!("urn:viramoon:finance:market-protocol:{wire_version}:{name}");

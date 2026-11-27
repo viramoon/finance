@@ -15,6 +15,8 @@
         "trade",
         "snapshot",
         "delta",
+        "funding_rate",
+        "open_interest",
         "perpetual_context"
       ],
       "type": "string"
@@ -34,6 +36,42 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "Advertised market data capability of a source/product pair.",
+  "oneOf": [
+    {
+      "properties": {
+        "message_kinds": {
+          "contains": {
+            "const": "perpetual_context"
+          },
+          "items": {
+            "enum": [
+              "bar_closed",
+              "trade",
+              "snapshot",
+              "delta",
+              "perpetual_context"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "properties": {
+        "max_depth": {
+          "const": 0
+        },
+        "message_kinds": {
+          "items": {
+            "enum": [
+              "funding_rate",
+              "open_interest"
+            ]
+          },
+          "maxItems": 2
+        }
+      }
+    }
+  ],
   "properties": {
     "can_backfill": {
       "type": "boolean"
@@ -47,9 +85,6 @@
       "type": "integer"
     },
     "message_kinds": {
-      "contains": {
-        "const": "perpetual_context"
-      },
       "items": {
         "$ref": "#/$defs/MarketKind"
       },

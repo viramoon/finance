@@ -157,6 +157,15 @@ FINANCE_F3_TEST_PYTHON="$FINANCE_PYTHON" \
   cargo test --locked -p finance-collector --test market_wal_projector -- --include-ignored
 ```
 
+### Binance 公共行情
+
+`finance-binance` 在内置 profile 下输出 `disabled_by_profile` 并退出。只在经审核的部署中使用 [Binance profile](docs/integrations/binance.md) 显式开启。启用前确认产品许可、数据根与 Nautilus 源码构建环境，进程的 `PYTHONPATH` 指向 finance 的 `python/`。该任务无需本地监听。使用独立日志区分 `synchronizing`、`live`、`recovering` 和 `region_restricted`。看到 403/451 时保留状态码并停止自动重启。盘口出现缺口时，通过 F3 的 `quality` 核对 `source_gap`、恢复快照和历史缺口范围。资金费率的 `next_funding_ts: null` 表示交易所尚未给出下次结算时间，已收到的费率仍可使用。
+
+```sh
+cargo test --workspace --locked --offline
+PYTHONPATH=python python -m unittest discover -s tests -p test_binance_transport.py -v
+```
+
 ### Hyperliquid 公共行情
 
 由 fertile 部署显式启动独立的 `finance-hyperliquid` 进程，配置参考 [hyperliquid.yaml](config/collector/hyperliquid.yaml)。启用前核对标的、产品条款和各用途权限。设置已有的 `FINANCE_PYTHON` 为源码构建的 Python、`PYTHONPATH=python`，并为 `FERTILE_DATA_ROOT` 明确指定数据根。启用落盘前应创建该目录。下列启动命令会连接公共 Hyperliquid。

@@ -5,6 +5,11 @@ use serde_json::{Map, Value, json};
 use std::error::Error;
 use utoipa::ToSchema;
 
+/// Context observations reserved for the v2.0 event envelope.
+pub const V2_CONTEXT_KINDS: [&str; 3] = ["perpetual_context", "funding_rate", "open_interest"];
+/// Controls shared by the v1.0 and v2.0 event envelopes.
+pub const CONTROL_KINDS: [&str; 4] = ["gap", "reset", "heartbeat", "status"];
+
 fn use_local_refs(value: &mut Value) {
     match value {
         Value::Object(object) => {
@@ -73,8 +78,11 @@ pub fn event_schema_for_version(id: &str, version: SchemaVersion) -> Result<Valu
         .and_then(Value::as_array_mut)
         .ok_or("event schema is missing the message union")?
         .retain(|branch| {
-            let context = branch["properties"]["kind"]["enum"][0] == "perpetual_context";
-            context == (version == SchemaVersion::V2)
+            let kind = branch["properties"]["kind"]["enum"][0]
+                .as_str()
+                .unwrap_or_default();
+            CONTROL_KINDS.contains(&kind)
+                || V2_CONTEXT_KINDS.contains(&kind) == (version == SchemaVersion::V2)
         });
 
     let defs = root["$defs"]
@@ -82,7 +90,9 @@ pub fn event_schema_for_version(id: &str, version: SchemaVersion) -> Result<Valu
         .ok_or("missing event definitions")?;
     match version {
         SchemaVersion::V1 => {
-            defs.remove("PerpetualContext");
+            for name in ["PerpetualContext", "FundingRate", "OpenInterest"] {
+                defs.remove(name);
+            }
             defs["Message"]["description"] =
                 "The version 1.0 kind tag and its corresponding payload.".into();
         }
@@ -95,13 +105,8 @@ pub fn event_schema_for_version(id: &str, version: SchemaVersion) -> Result<Valu
                 "BookSnapshot",
                 "BookUpdate",
                 "ClosedBar",
-                "ConnectionState",
                 "Correction",
-                "Gap",
-                "Heartbeat",
                 "MarketMessage",
-                "Reset",
-                "Status",
                 "Trade",
                 "TradeSide",
             ] {

@@ -108,6 +108,21 @@ wire_object! {
 }
 
 wire_object! {
+    pub struct FundingRate {
+        pub rate: DecimalText,
+        #[serde(deserialize_with = "required_nullable")]
+        #[schema(required = true, inline)]
+        pub next_funding_ts: Option<U64Text>,
+    }
+}
+
+wire_object! {
+    pub struct OpenInterest {
+        pub quantity: DecimalText,
+    }
+}
+
+wire_object! {
     pub struct Gap {
         pub from_ts: U64Text,
         pub to_ts: U64Text,
@@ -152,6 +167,8 @@ pub enum Message {
     Trade(Trade),
     Snapshot(BookSnapshot),
     Delta(BookDelta),
+    FundingRate(FundingRate),
+    OpenInterest(OpenInterest),
     Correction(Correction),
     Gap(Gap),
     Reset(Reset),
@@ -270,10 +287,27 @@ impl Event {
     }
 
     pub fn validate(&self) -> Result<(), ValidationError> {
-        let context = matches!(&self.message, Message::PerpetualContext(_));
-        require_schema_version(
-            (self.schema_version == SchemaVersion::V2) == context,
-            "schema version 2.0 is reserved for perpetual_context events",
+        let v2 = self.schema_version == SchemaVersion::V2;
+        let context = self.message.context_kind();
+        if !v2 {
+            if context == Some(MarketKind::PerpetualContext) {
+                require_schema_version(false, "perpetual_context requires schema version 2.0")?;
+            } else if context.is_some() {
+                let mut error =
+                    ValidationError::new("kind", "perpetual context requires version 2.0");
+                error.kind = ErrorKind::InvalidValue;
+                return Err(error);
+            }
+        } else {
+            require_schema_version(
+                self.message.market_payload().is_none(),
+                "2.0 does not support this message kind",
+            )?;
+        }
+        require(
+            !v2 || self.asset_kind == AssetKind::Perpetual,
+            "asset_kind",
+            "version 2.0 requires a perpetual instrument",
         )?;
         validate_venue(&self.instrument_id, &self.venue)?;
         require(self.epoch.get() > 0, "epoch", "must be greater than zero")?;
@@ -302,6 +336,28 @@ impl Event {
             )?,
         }
         match &self.message {
+            Message::FundingRate(rate) => {
+                let ts = self.exchange_ts.ok_or_else(|| {
+                    ValidationError::new("exchange_ts", "required for funding rates")
+                })?;
+                require(
+                    rate.next_funding_ts.is_none_or(|next| ts <= next),
+                    "payload.next_funding_ts",
+                    "must be at or after exchange_ts",
+                )?;
+            }
+            Message::OpenInterest(interest) => {
+                require(
+                    self.exchange_ts.is_some(),
+                    "exchange_ts",
+                    "required for open interest",
+                )?;
+                require(
+                    interest.quantity.value() >= Decimal::ZERO,
+                    "payload.quantity",
+                    "must be nonnegative",
+                )?;
+            }
             Message::Reset(_) => require(self.seq.get() == 0, "seq", "a reset starts at zero")?,
             Message::Gap(gap) => require(
                 gap.from_ts <= gap.to_ts,
@@ -309,11 +365,6 @@ impl Event {
                 "must be at or after payload.from_ts",
             )?,
             Message::PerpetualContext(context) => {
-                require(
-                    self.asset_kind == AssetKind::Perpetual,
-                    "asset_kind",
-                    "context requires a perpetual instrument",
-                )?;
                 require(
                     context.open_interest.value() >= Decimal::ZERO,
                     "payload.open_interest",
@@ -366,13 +417,18 @@ impl Event {
             "product",
             "does not match the supplied capability",
         )?;
-        if matches!(&self.message, Message::PerpetualContext(_)) {
+        if self.message.context_kind().is_none() {
             require(
-                capability
-                    .message_kinds
-                    .contains(&MarketKind::PerpetualContext),
+                (self.schema_version == SchemaVersion::V2) == capability.has_separate_context(),
+                "schema_version",
+                "does not match the supplied capability",
+            )?;
+        }
+        if let Some(kind) = self.message.context_kind() {
+            require(
+                capability.message_kinds.contains(&kind),
                 "kind",
-                "perpetual_context is unsupported by the source/product",
+                "context kind is unsupported by the source/product",
             )?;
         }
         if let Some(market) = self.message.market_payload() {
@@ -487,8 +543,19 @@ impl Correction {
 }
 
 impl Message {
+    fn context_kind(&self) -> Option<MarketKind> {
+        match self {
+            Self::FundingRate(_) => Some(MarketKind::FundingRate),
+            Self::OpenInterest(_) => Some(MarketKind::OpenInterest),
+            Self::PerpetualContext(_) => Some(MarketKind::PerpetualContext),
+            _ => None,
+        }
+    }
+
     fn decode_payload(kind: &str, payload: &str) -> Result<Self, DecodeError> {
         match kind {
+            "funding_rate" => decode_at(payload, "/payload").map(Self::FundingRate),
+            "open_interest" => decode_at(payload, "/payload").map(Self::OpenInterest),
             "correction" => Correction::decode_payload(payload).map(Self::Correction),
             "gap" => decode_at(payload, "/payload").map(Self::Gap),
             "reset" => decode_at(payload, "/payload").map(Self::Reset),
@@ -511,7 +578,9 @@ impl Message {
                 MarketMessage::Snapshot(snapshot) => MarketPayload::Snapshot(snapshot),
                 MarketMessage::Delta(delta) => MarketPayload::Delta(delta),
             }),
-            Self::Gap(_)
+            Self::FundingRate(_)
+            | Self::OpenInterest(_)
+            | Self::Gap(_)
             | Self::Reset(_)
             | Self::Heartbeat(_)
             | Self::Status(_)

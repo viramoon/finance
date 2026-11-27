@@ -81,6 +81,44 @@ def yahoo(symbol, exchange, full_exchange, asset, timestamps, quote, adjusted_cl
 '''
 
 
+def binance():
+    symbol = "BTCUSDT"
+    base = 9_007_199_254_741_000
+
+    def diff(event, first, last, bids, asks, *, previous=None):
+        row = {"e": "depthUpdate", "s": symbol, "E": event}
+        if previous is not None:
+            row["T"] = event - 1
+        row.update(U=first, u=last)
+        if previous is not None:
+            row["pu"] = previous
+        return dict(row, b=bids, a=asks)
+
+    depth = {
+        "spot_snapshot": dict(lastUpdateId=base, bids=[["10.01", "3.000"]], asks=[["10.03", "4.000"]]),
+        "spot_bridge": diff(1001, base, base + 1, [["10.02", "2.000"]], [["10.03", "0.000"]]),
+        "spot_next": diff(1002, base + 2, base + 3,
+                          [["10.01", "0.000"], ["10.02", "1.000"]], [["10.04", "5.000"]]),
+        "spot_gap": diff(1003, base + 5, base + 6, [["10.02", "9.000"]], []),
+        "spot_recovery": dict(lastUpdateId=base + 5, bids=[["10.01", "1.000"]], asks=[["10.04", "3.000"]]),
+        "perp_snapshot": dict(lastUpdateId=800, E=1000, T=999,
+                              bids=[["10.01", "3.000"]], asks=[["10.03", "4.000"]]),
+        "perp_bridge": diff(1001, 799, 800, [["10.01", "3.000"]], [], previous=798),
+        "perp_next": diff(1002, 805, 809, [["10.01", "0.000"]], [["10.04", "2.000"]], previous=800),
+        "perp_gap": diff(1003, 810, 811, [["10.01", "9.000"]], [], previous=808),
+    }
+    observations = {
+        "spot_trade": dict(e="trade", s=symbol, E=1000, T=999, t=base + 11, p="10.010", q="0.001000", m=True),
+        "perp_trade": dict(e="aggTrade", s=symbol, E=1000, T=999, a=base + 11, p="10.010", q="0.001000", m=False),
+        "funding": dict(e="markPriceUpdate", s=symbol, E=1000, r="-0.00000001", T=2000),
+        "interest": dict(symbol=symbol, openInterest="123.456789123456", time=1001),
+    }
+    result = {}
+    for name, rows in (("depth", depth), ("observations", observations)):
+        lines = [f"  {json.dumps(key)}: {json.dumps(row, separators=(',', ':'))}" for key, row in rows.items()]
+        result[f"crates/finance-collector/fixtures/binance/{name}.json"] = "{\n" + ",\n".join(lines) + "\n}\n"
+    return result
+
 def hyperliquid():
     # Fixed, fictional venue messages. Prices and sizes are quoted strings.
     base = 1_700_000_000_000
@@ -195,6 +233,7 @@ def fixtures():
         ),
     }
     return {
+        **binance(),
         **{f"tests/fixtures/historical/{name}": text for name, text in historical.items()},
         **hyperliquid(),
         "config/collector/replay.csv": rows(
