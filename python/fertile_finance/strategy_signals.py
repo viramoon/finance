@@ -1,7 +1,7 @@
 """Generate close-time StrategyBundle targets from explicit state snapshots."""
 
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, localcontext
@@ -76,7 +76,10 @@ def mark_equity(cash, bars, members, holdings):
 class BundleSignalEvaluator:
     """Keep indicator history and accept the portfolio state at each closed session."""
 
-    def __init__(self, plan: dict, *, indicator_evaluator: IndicatorEvaluator | None = None):
+    def __init__(
+        self, plan: dict, *, indicator_evaluator: IndicatorEvaluator | None = None,
+        stopped: Callable[[], bool] | None = None,
+    ):
         if plan.get("plan_version") != BUNDLE_PLAN_VERSION:
             raise ResearchError("unsupported_strategy_plan", "Supply a trusted version 1 compiled strategy plan")
         spec = plan["bundle"]["spec"]
@@ -84,7 +87,7 @@ class BundleSignalEvaluator:
         self.factors = spec["factors"]
         self.modules = spec["modules"]
         self.indicator_evaluator = indicator_evaluator
-        self.indicator_backend = RustIndicatorEvaluator() if indicator_evaluator is None else None
+        self.indicator_backend = RustIndicatorEvaluator(stopped=stopped) if indicator_evaluator is None else None
         # External observations also load compiler plans from a local file.
         # Reject malformed cyclic graphs before an observation traverses them.
         TopologicalSorter({name: component.get("depends_on", ()) for name, component in self.factors.items()}).prepare()

@@ -31,6 +31,8 @@ fn run(args: Vec<OsString>) -> Result<ExitCode, &'static str> {
             json_line(io::stdout().lock(), &component_registry())?
         }
         [command] if command == "evaluate-indicators" => {
+            #[cfg(target_os = "linux")]
+            indicator_stream::bind_parent_lifetime()?;
             indicator_stream::run(io::stdin().lock(), io::stdout().lock())?
         }
         [command] if command == "--help" || command == "-h" => println!("{USAGE}"),

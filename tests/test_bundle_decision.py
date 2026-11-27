@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -408,6 +409,107 @@ raise SystemExit(result)
                 self.assertEqual(actual, values, (instrument, selected))
                 self.assertIsNone(actual[1]["value"])
                 self.assertIsNotNone(actual[-1]["value"])
+
+    def test_sigterm_reaps_unresponsive_indicator_without_committing_session(self):
+        plan = _plan(ranking=True)
+        spec = plan["bundle"]["spec"]
+        spec["clock"]["warmup_sessions"] = 1
+        spec["factors"]["momentum"]["params"]["lookback_sessions"] = 1
+        plan["content_sha256"] = canonical_sha256(plan["bundle"])
+        self.plan_path.write_text(json.dumps(plan), encoding="utf-8")
+
+        instrument = "AAA.XNYS"
+        frames = []
+        for day, warmup in (("2024-03-01", True), ("2024-03-04", False)):
+            bar = dict.fromkeys(("open", "high", "low", "close"), "100")
+            bar.update(volume="100", first_available_ts=str(nyse().schedule.at[day, "close"].value))
+            frames.append({
+                "schema": SESSION_SCHEMA, "session": day, "warmup": warmup, "members": [instrument],
+                "cash": "10000", "bars": {instrument: bar}, "pending_reductions": [],
+                "sleeves": {"topTwo": {"shares": {}, "sessions_held": {}, "exited": []}},
+            })
+        prefix = _encode(frames[0])
+        self.replay_path.write_bytes(prefix + _encode(frames[1]))
+
+        indicator = self.root / "silent-indicator"
+        marker = self.root / "indicator.pid"
+        indicator.write_text(f"#!{sys.executable}\n" + """
+import json
+import os
+from pathlib import Path
+import signal
+import sys
+
+def local_only(event, _args):
+    assert not event.startswith("socket."), event
+
+sys.addaudithook(local_only)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+assert sys.argv[1:] == ["evaluate-indicators"]
+assert json.loads(sys.stdin.readline())["action"] == "start"
+pidfile = Path(os.environ["FINANCE_TEST_INDICATOR_PID"])
+ready = pidfile.with_suffix(".ready")
+ready.write_text(str(os.getpid()), encoding="ascii")
+ready.replace(pidfile)
+signal.pause()
+""", encoding="utf-8")
+        indicator.chmod(0o700)
+
+        def cleanup_indicator():
+            if marker.exists():
+                pid = int(marker.read_text(encoding="ascii"))
+                try:
+                    argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+                    if os.fsencode(indicator) in argv:
+                        os.kill(pid, signal.SIGKILL)
+                except (FileNotFoundError, ProcessLookupError):
+                    pass
+
+        self.addCleanup(cleanup_indicator)
+        guard = """
+import os
+import sys
+
+def local_only(event, args):
+    assert not event.startswith("socket."), event
+    if event == "subprocess.Popen":
+        indicator = os.environ["FINANCE_STRATEGY_BIN"]
+        assert args[0] == indicator and args[1] == [indicator, "evaluate-indicators"], args
+
+sys.addaudithook(local_only)
+from fertile_finance.decision import main
+raise SystemExit(main())
+"""
+        self.command = [sys.executable, "-B", "-c", guard, *self.arguments]
+        self.env.update(PYTHONPATH=str(REPO / "python"), FINANCE_STRATEGY_BIN=str(indicator),
+                        FINANCE_TEST_INDICATOR_PID=str(marker))
+        child = self._follow()
+        self._wait_for_checkpoint(child, len(prefix))
+        checkpoint = self._read("SELECT * FROM decision_checkpoint")
+        self.assertEqual(self._rows(), [])
+        deadline = time.monotonic() + 20
+        while not marker.exists():
+            if child.poll() is not None:
+                self.fail(child.communicate()[1])
+            if time.monotonic() >= deadline:
+                self.fail("Indicator did not receive the active session's request")
+            time.sleep(0.025)
+        pid = int(marker.read_text(encoding="ascii"))
+        os.kill(pid, 0)
+
+        child.terminate()
+        try:
+            _, stderr = child.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            # Let the decision process reap its helper even on the failure path.
+            cleanup_indicator()
+            child.communicate(timeout=5)
+            self.fail("Decision process did not stop with an indicator request outstanding")
+        self.assertEqual(child.returncode, 0, stderr)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+        self.assertEqual(self._read("SELECT * FROM decision_checkpoint"), checkpoint)
+        self.assertEqual(self._rows(), [])
 
     def test_bundle_invalid_session_does_not_advance_checkpoint(self):
         frames, _ = self.record_backtest(ranking=True)

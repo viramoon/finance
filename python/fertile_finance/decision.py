@@ -185,7 +185,7 @@ def _load_plan(raw):
     return SmaCrossoverPlan.from_json(raw)
 
 
-def _replay_adapter(plan):
+def _replay_adapter(plan, *, stopped=None):
     if isinstance(plan, SmaCrossoverPlan):
         return _SmaReplay(plan)
     plan = checked_bundle_plan(plan)
@@ -193,7 +193,7 @@ def _replay_adapter(plan):
         from .decision_bundle import BundleDecisionReplay
     except ImportError:
         raise DecisionError("StrategyBundle replay requires the source-built Nautilus Python environment") from None
-    return BundleDecisionReplay(plan)
+    return BundleDecisionReplay(plan, stopped=stopped)
 
 
 def _consume(
@@ -206,7 +206,7 @@ def _consume(
 ) -> None:
     # Read-only, nonblocking open also lets us reject non-regular inputs such as FIFOs.
     with (
-        closing(_replay_adapter(plan)) as adapter,
+        closing(_replay_adapter(plan, stopped=stopped)) as adapter,
         os.fdopen(os.open(replay_path, os.O_RDONLY | os.O_NONBLOCK), "rb") as replay,
     ):
         opened = os.fstat(replay.fileno())
@@ -248,7 +248,14 @@ def _consume(
                     if stopped():
                         return
                     _check_replay(replay_path, opened, consumed.offset)
-                decision = adapter.evaluate(frame, start)
+                try:
+                    decision = adapter.evaluate(frame, start)
+                except InterruptedError:
+                    if stopped():
+                        return
+                    raise
+                if stopped():
+                    return
                 if consumed.offset > checkpoint.offset:
                     _commit(connection, adapter, checkpoint, consumed, frame, decision)
                     checkpoint = consumed

@@ -1,6 +1,6 @@
 """Use the same Rust indicator engine as the chart for closed strategy bars."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import closing, suppress
 from dataclasses import dataclass
 from datetime import date
@@ -8,6 +8,7 @@ from decimal import Decimal
 import json
 import os
 from pathlib import Path
+import select
 import subprocess
 from typing import Protocol, TYPE_CHECKING
 
@@ -21,6 +22,8 @@ if TYPE_CHECKING:
 BUILTIN_EVALUATOR_ID = "fertile.finance/f6-strategy-indicators/v1"
 _CHUNK_BARS = 256
 _NS_PER_DAY = 86_400_000_000_000
+_MAX_REPLY_BYTES = 1024
+_STOP_POLL_MS = 50
 
 
 class IndicatorEvaluator(Protocol):
@@ -41,27 +44,75 @@ class _Series:
 class RustIndicatorEvaluator:
     """One local subprocess, with one incremental series per member and factor."""
 
-    def __init__(self):
+    def __init__(self, *, stopped: Callable[[], bool] | None = None):
         self.process = None
         self.series = {}
         self.next_id = 0
+        self.stopped = stopped
+
+    def _start(self):
+        executable = os.environ.get("FINANCE_STRATEGY_BIN", "finance-strategy")
+        if not executable or ("FINANCE_STRATEGY_BIN" in os.environ and not Path(executable).is_absolute()):
+            raise ResearchError("indicator_backend_unavailable", "FINANCE_STRATEGY_BIN must be an absolute path")
+        try:
+            guard = os.environ.get("FINANCE_JOB_GUARD_FD")
+            pass_fds = () if guard is None else (int(guard),)
+            if pass_fds and pass_fds[0] < 3:
+                raise ValueError("Invalid job guard descriptor")
+            # The helper shares the engine's open lock description, including
+            # if either ancestor dies before the helper stops computing.
+            self.process = subprocess.Popen(
+                [executable, "evaluate-indicators"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, bufsize=0, pass_fds=pass_fds,
+                env=dict(os.environ, FINANCE_INDICATOR_PARENT_PID=str(os.getpid())),
+            )
+            os.set_blocking(self.process.stdin.fileno(), False)
+            os.set_blocking(self.process.stdout.fileno(), False)
+        except (OSError, ValueError):
+            raise ResearchError("indicator_backend_unavailable", "Could not start the Rust indicator evaluator") from None
+
+    def _check_stop(self):
+        if self.stopped is not None and self.stopped():
+            raise InterruptedError("Indicator evaluation stopped")
+
+    def _transfer(self, request):
+        outgoing = memoryview(request)
+        stdin, stdout = self.process.stdin.fileno(), self.process.stdout.fileno()
+        poller = select.poll()
+        poller.register(stdin, select.POLLOUT)
+        timeout = _STOP_POLL_MS if self.stopped is not None else None
+        while outgoing:
+            self._check_stop()
+            if poller.poll(timeout):
+                try:
+                    outgoing = outgoing[os.write(stdin, outgoing):]
+                except BlockingIOError:
+                    continue
+        poller.unregister(stdin)
+        poller.register(stdout, select.POLLIN)
+        reply = bytearray()
+        while len(reply) <= _MAX_REPLY_BYTES:
+            self._check_stop()
+            if not poller.poll(timeout):
+                continue
+            try:
+                chunk = os.read(stdout, _MAX_REPLY_BYTES + 1 - len(reply))
+            except BlockingIOError:
+                continue
+            if not chunk:
+                break
+            reply.extend(chunk)
+            if reply.endswith(b"\n") and len(reply) <= _MAX_REPLY_BYTES:
+                return reply
+        raise ValueError("Incomplete or oversized indicator response")
 
     def _request(self, request):
+        self._check_stop()
         if self.process is None:
-            executable = os.environ.get("FINANCE_STRATEGY_BIN", "finance-strategy")
-            if not executable or ("FINANCE_STRATEGY_BIN" in os.environ and not Path(executable).is_absolute()):
-                raise ResearchError("indicator_backend_unavailable", "FINANCE_STRATEGY_BIN must be an absolute path")
-            try:
-                self.process = subprocess.Popen(
-                    [executable, "evaluate-indicators"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-                )
-            except OSError:
-                raise ResearchError("indicator_backend_unavailable", "Could not start the Rust indicator evaluator") from None
+            self._start()
         try:
-            self.process.stdin.write(json.dumps(request, allow_nan=False) + "\n")
-            self.process.stdin.flush()
-            reply = json.loads(self.process.stdout.readline(1024))
+            frame = (json.dumps(request, allow_nan=False) + "\n").encode("utf-8")
+            reply = json.loads(self._transfer(frame))
             if not isinstance(reply, dict) or reply.keys() != {"value"}:
                 raise ValueError("Invalid response")
             value = reply["value"]
@@ -69,6 +120,8 @@ class RustIndicatorEvaluator:
                 return None
             if isinstance(value, str) and (decimal := Decimal(value)).is_finite():
                 return decimal
+        except InterruptedError:
+            raise
         except (OSError, ValueError, ArithmeticError):
             pass
         raise ResearchError("indicator_evaluation_failed", "Rust indicator evaluation failed") from None
@@ -101,6 +154,8 @@ class RustIndicatorEvaluator:
     def close(self):
         if self.process is not None:
             process, self.process = self.process, None
+            if self.stopped is not None and self.stopped():
+                process.kill()
             with suppress(OSError):
                 process.stdin.close()
             try:

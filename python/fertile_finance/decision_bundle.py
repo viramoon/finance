@@ -87,7 +87,7 @@ def _pending_reductions(rows, sleeves):
 
 
 class BundleDecisionReplay:
-    def __init__(self, plan):
+    def __init__(self, plan, *, stopped=None):
         try:
             self.plan_sha256 = canonical_sha256(plan)
             self.checkpoint_identity = canonical_sha256({
@@ -99,7 +99,7 @@ class BundleDecisionReplay:
             if clock["calendar"] != "XNYS" or type(self.warmup_sessions) is not int or self.warmup_sessions < 0:
                 raise ValueError("Invalid StrategyBundle clock")
             self.recipes = {row["recipe"] for row in plan["sleeves"]}
-            self.evaluator = BundleSignalEvaluator(plan)
+            self.evaluator = BundleSignalEvaluator(plan, stopped=stopped)
         except _INVALID_INPUT:
             raise ValueError("Invalid compiled StrategyBundle plan") from None
         self.schedule = nyse().schedule

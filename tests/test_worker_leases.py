@@ -37,6 +37,39 @@ result.write_text(json.dumps({'pnl': '0'}))
 """
 
 
+INDICATOR_ENGINE = """
+from contextlib import closing
+import os
+from fertile_finance import __path__ as package_paths
+
+package_paths.append(os.environ["FINANCE_TEST_INDICATOR_SOURCE"])
+from fertile_finance.strategy_indicators import RustIndicatorEvaluator
+
+with closing(RustIndicatorEvaluator()) as evaluator:
+    evaluator._request({"action": "start", "series": 0, "id": "indicator.sma@1.0.0",
+                        "params": {"period": 2}, "output": "value"})
+"""
+
+INDICATOR_HELPER = """
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+assert sys.argv[1:] == ["evaluate-indicators"]
+assert json.loads(sys.stdin.readline())["action"] == "start"
+root = Path(__file__).parent
+ready = root / "helper-ready"
+pending = ready.with_suffix(".tmp")
+pending.write_text(json.dumps([os.getpid(), os.getppid()]))
+pending.replace(ready)
+# Deliberately outlive the engine without depending on pipe EOF or parent-death signals.
+while not (root / "helper-release").exists():
+    time.sleep(0.01)
+"""
+
+
 class WorkerLeaseTests(unittest.TestCase):
     def setUp(self):
         root = self.enterContext(TemporaryDirectory(dir="/tmp"))
@@ -124,6 +157,61 @@ class WorkerLeaseTests(unittest.TestCase):
             self.addCleanup(second.guard.close)
             self.assertEqual(second.attempt, 2)
 
+    def test_expired_lease_waits_for_indicator_helper_after_engine_kill(self):
+        self.insert_jobs(1)
+        self.prepare_engine(INDICATOR_ENGINE)
+        helper = self.root / "indicator-helper"
+        helper.write_text(f"#!{sys.executable}\n{INDICATOR_HELPER}")
+        helper.chmod(0o700)
+        ready = self.root / "helper-ready"
+        release = self.root / "helper-release"
+
+        def helper_exited(pid):
+            try:
+                return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z"
+            except FileNotFoundError:
+                return True
+
+        def release_helper():
+            release.touch()
+            if ready.exists():
+                pid, _ = json.loads(ready.read_text())
+                self.wait_for(lambda: helper_exited(pid))
+
+        env = {
+            "FINANCE_STRATEGY_BIN": str(helper),
+            "FINANCE_TEST_INDICATOR_SOURCE": str(Path(worker.__file__).parent),
+        }
+        with closing(worker.open_queue(self.directory)) as other, patch.object(worker, "clock_ms") as clock:
+            clock.return_value = 0
+            first = worker.claim(self.db, self.directory, 1)
+            self.addCleanup(first.guard.close)
+            with patch.object(worker, "REPO", self.engine_root), patch.dict(os.environ, env):
+                engine = worker.launch(self.directory, first, timeout=10, memory_mb=8192)
+            self.addCleanup(engine.scratch.cleanup)
+            self.addCleanup(worker.kill_job, engine.process)
+            self.addCleanup(release_helper)
+
+            self.wait_for(ready.is_file)
+            helper_pid, engine_pid = json.loads(ready.read_text())
+            self.assertEqual(engine_pid, engine.process.pid)
+            first.guard.close()
+            engine.process.kill()
+            self.assertEqual(engine.process.wait(timeout=5), -signal.SIGKILL)
+            self.assertFalse(helper_exited(helper_pid))
+
+            clock.return_value = 1_000
+            worker.recover(other, self.directory)
+            self.assertEqual(other.execute("SELECT status,attempt FROM jobs").fetchone(), ("running", 1))
+            self.assertIsNone(worker.claim(other, self.directory, 1))
+
+            release_helper()
+            worker.recover(other, self.directory)
+            second = worker.claim(other, self.directory, 1)
+            self.assertIsNotNone(second)
+            self.addCleanup(second.guard.close)
+            self.assertEqual(second.attempt, 2)
+
     def test_migrates_existing_queue_and_recovers_legacy_running_rows(self):
         self.insert_jobs(3)
         with self.db:
@@ -150,12 +238,12 @@ class WorkerLeaseTests(unittest.TestCase):
         self.assertEqual(row.attempt, 2)
         self.assertEqual(self.db.execute("SELECT expires_at_ms FROM job_leases").fetchone(), (1_000,))
 
-    def prepare_engine(self):
+    def prepare_engine(self, script=ENGINE):
         self.engine_root = self.root / "engine"
         package = self.engine_root / "fertile_finance"
         package.mkdir(parents=True)
         (package / "__init__.py").touch()
-        (package / "backtest_job.py").write_text(ENGINE)
+        (package / "backtest_job.py").write_text(script)
         self.audit = self.directory / "fixture-executions.jsonl"
         self.gate = self.directory / "fixture-gate"
 

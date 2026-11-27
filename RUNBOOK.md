@@ -184,7 +184,7 @@ curl -sS http://127.0.0.1:8081/api/v1/market/status
 
 ### 实时决策与并行回测
 
-多个 `scripts/finance-backtest-worker` 实例可共用同一宿主本地盘上的 `FERTILE_DATA_ROOT`。升级前让旧 worker 完成在途作业并停止，再启动新 worker。每个实例单独配置并发和资源限制。作业租约默认 15 秒，实例用 `FINANCE_WORKER_LEASE_SECONDS` 或 `--lease-seconds` 设置续租周期的基准。迁移、超时和重复执行防护见 [作业手册](docs/backtest-jobs.md#worker-运行与恢复)。
+多个 `scripts/finance-backtest-worker` 实例可共用同一宿主本地盘上的 `FERTILE_DATA_ROOT`。升级前让旧 worker 完成在途作业并停止，再启动新 worker。每个实例单独配置并发和资源限制。作业租约默认 15 秒，实例用 `FINANCE_WORKER_LEASE_SECONDS` 或 `--lease-seconds` 设置续租周期的基准。配置作业的指标子进程也持有执行锁。租约过期后，恢复仍须等旧作业的执行进程释放该锁。迁移、超时和重复执行防护见 [作业手册](docs/backtest-jobs.md#worker-运行与恢复)。
 
 使用 `finance-strategy` 编译单标的计划，并为 `finance-decision` 指定已有的绝对数据根和获准计算与留存的 F1 回放文件。以下 `TEST.XNYS` 为合成标的，回放需由输入方准备。
 
@@ -206,7 +206,7 @@ FINANCE_STRATEGY_BIN="$PWD/target/debug/finance-strategy" \
 
 升级配置策略的求值器版本时，保留原决策库，用新的数据根和原始获准回放重建基线。启动配置策略时若指标求值报错，核对 `FINANCE_STRATEGY_BIN`、二进制版本与执行权限，再核对闭合行情和计划的指标选择。
 
-一次性回放在读完后退出。对持续追加的同一文件加 `--follow`，运维可单独向该进程发送 SIGTERM 再使用同一参数启动。保留回放文件已提交的字节前缀和 `finance-state/decisions/decisions.sqlite3`。重启会重建指标状态、核对前缀并从持久断点续读。遇到缺口、更正或输入文件替换，先核对源和覆盖范围。用已复核的新输入基线和新数据根建立独立记录。进程健康由守护器检查，消费进度用决策库中的持久检查点核对。此进程只读行情，写入本地策略目标和消费进度，无端口或账户配置。文件格式、边界与诊断见 [实时决策接口](docs/decision-process.md)。
+一次性回放在读完后退出。对持续追加的同一文件加 `--follow`。向决策进程发送 SIGTERM 可中断正在等待的指标管道读写。进程回收指标子进程后退出，使用同一参数即可恢复。保留回放文件已提交的字节前缀和 `finance-state/decisions/decisions.sqlite3`。重启会重建指标状态、核对前缀并从持久断点续读。遇到缺口、更正或输入文件替换，先核对源和覆盖范围。用已复核的新输入基线和新数据根建立独立记录。进程健康由守护器检查，消费进度用决策库中的持久检查点核对。此进程只读行情，写入本地策略目标和消费进度，无端口或账户配置。文件格式、边界与诊断见 [实时决策接口](docs/decision-process.md)。
 
 ### 历史价量补拉
 

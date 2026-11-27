@@ -73,7 +73,7 @@ def recover(db, directory):
                     try:
                         fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     except BlockingIOError:
-                        # A paused worker or its surviving engine can still run.
+                        # A paused worker or surviving execution process can still run.
                         continue
                 for scratch in directory.glob(f"run-{job_id}-{attempt}-*"):
                     if scratch.is_dir() and not scratch.is_symlink():
@@ -166,6 +166,7 @@ def launch(root, claim, timeout, memory_mb):
     (work / "request.json").write_text(claim.request)
     result = work / "result.json"
     worker_pid = os.getpid()
+    guard_fd = claim.guard.fileno()
 
     def limit_child():
         die_with_parent(worker_pid)
@@ -175,6 +176,7 @@ def launch(root, claim, timeout, memory_mb):
     env = dict(
         os.environ,
         FINANCE_WORKER_PID=str(worker_pid),
+        FINANCE_JOB_GUARD_FD=str(guard_fd),
         OPENBLAS_NUM_THREADS="1",
         OMP_NUM_THREADS="1",
         RAYON_NUM_THREADS="2",
@@ -194,9 +196,8 @@ def launch(root, claim, timeout, memory_mb):
             stderr=subprocess.STDOUT,
             start_new_session=True,
             preexec_fn=limit_child,
-            # Keep the execution guard held until the engine itself exits, even
-            # if the worker has already been killed and its lease has expired.
-            pass_fds=(claim.guard.fileno(),),
+            # The engine also passes this descriptor to its indicator helper.
+            pass_fds=(guard_fd,),
         )
     return Running(process, result, scratch, time.monotonic() + timeout)
 

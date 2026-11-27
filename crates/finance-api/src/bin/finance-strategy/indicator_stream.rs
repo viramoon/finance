@@ -16,6 +16,28 @@ const MAX_FRAME_BYTES: usize = 128 * 1024;
 const MAX_BARS: usize = 256;
 const INVALID: &str = "Invalid indicator stream request.";
 
+#[cfg(target_os = "linux")]
+pub(super) fn bind_parent_lifetime() -> Result<(), &'static str> {
+    use rustix::process::{Pid, Signal, getppid, set_parent_process_death_signal};
+
+    const FAILED: &str = "Could not bind indicator evaluator to its parent process.";
+    let Some(expected) = std::env::var_os("FINANCE_INDICATOR_PARENT_PID") else {
+        return Ok(());
+    };
+    let expected = expected
+        .to_str()
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|pid| *pid > 0)
+        .and_then(Pid::from_raw)
+        .ok_or(FAILED)?;
+    set_parent_process_death_signal(Some(Signal::KILL)).map_err(|_| FAILED)?;
+    // The process could have been reparented before registering the signal.
+    if getppid() != Some(expected) {
+        return Err(FAILED);
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
