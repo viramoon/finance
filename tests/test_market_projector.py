@@ -116,6 +116,144 @@ class MarketProjectionTests(unittest.TestCase):
         self.assertEqual(self.latest(trade), trade)
         self.assertEqual(self.latest(quote), quote)
 
+    def option_history_wal(self):
+        path = _EXAMPLES.parents[1] / "v3" / "examples.json"
+        examples = json.loads(path.read_text(encoding="utf-8"))
+        wal = MemoryWal(*(Event.from_dict(event) for event in examples["events"]))
+        trade = wal.events[-1]
+        self.product = (trade.source, trade.product)
+        self.marker = self.root.joinpath("finance-state", "market-projection", *self.product, "watermark.json")
+        return wal
+
+    def synthetic_worktree(self, path, *, linked=False):
+        path.mkdir(parents=True, exist_ok=True)
+        if linked:
+            (path / ".git").write_text("gitdir: synthetic-checkout\n", encoding="utf-8")
+        else:
+            (path / ".git").mkdir()
+            (path / ".git" / "HEAD").write_text("ref: refs/heads/synthetic\n", encoding="utf-8")
+
+    def test_option_history_projection_rejects_link_to_worktree_at_source_directory(self):
+        wal = self.option_history_wal()
+        source, _ = self.product
+        for components in (("catalog", "market-events"), ("finance-state", "market-projection")):
+            with self.subTest(components=components):
+                data_root = self.root / components[-1]
+                checkout = self.root.joinpath("checkout", components[-1])
+                self.synthetic_worktree(checkout)
+                parent = data_root.joinpath(*components)
+                parent.mkdir(parents=True)
+                link = parent / source
+                link.symlink_to(checkout, target_is_directory=True)
+                with self.assertRaises(OSError), open_projection(data_root, *self.product) as projection:
+                    projection.project_batch(wal, 20)
+                self.assertEqual(list(checkout.iterdir()), [checkout / ".git"])
+                self.assertFalse((data_root / self.marker.relative_to(self.root)).exists())
+
+    def test_option_history_projection_rejects_nested_worktree_directories(self):
+        wal = self.option_history_wal()
+        for components, linked in (
+            (("catalog", "market-events"), False),
+            (("finance-state", "market-projection"), True),
+        ):
+            with self.subTest(components=components):
+                data_root = self.root / components[-1]
+                checkout = data_root.joinpath(*components, *self.product)
+                self.synthetic_worktree(checkout, linked=linked)
+                with (
+                    self.assertRaisesRegex(ProjectionError, "outside Git worktrees"),
+                    open_projection(data_root, *self.product) as projection,
+                ):
+                    projection.project_batch(wal, 20)
+                self.assertEqual(list(checkout.iterdir()), [checkout / ".git"])
+
+    def test_option_history_projection_rejects_linked_index_and_sidecars(self):
+        wal = self.option_history_wal()
+        checkout = self.root / "checkout"
+        self.synthetic_worktree(checkout)
+        target = checkout / "protected"
+        target.write_bytes(b"fixed synthetic content")
+        state = self.marker.parent
+        state.mkdir(parents=True)
+        for name in ("projection.sqlite3", "projection.sqlite3-journal", "projection.sqlite3-wal", "projection.sqlite3-shm"):
+            with self.subTest(name=name):
+                link = state / name
+                link.symlink_to(target)
+                with patch.object(market_projector.sqlite3, "connect") as connect:
+                    with self.assertRaises((OSError, ProjectionError)):
+                        self.project(wal)
+                    connect.assert_not_called()
+                self.assertEqual(target.read_bytes(), b"fixed synthetic content")
+                self.assertTrue(link.is_symlink())
+                link.unlink()
+
+    def test_option_history_projection_rejects_state_replacement_before_transaction(self):
+        wal = self.option_history_wal()
+        state = self.marker.parent
+        held = self.root / "held-state"
+        checkout = self.root / "checkout"
+        self.synthetic_worktree(checkout)
+        read = wal.read_after
+
+        def replace_state(*args):
+            state.rename(held)
+            state.symlink_to(checkout, target_is_directory=True)
+            return read(*args)
+
+        with open_projection(self.root, *self.product) as projection, patch.object(wal, "read_after", replace_state):
+            with self.assertRaises((OSError, ProjectionError)):
+                projection.project_batch(wal, 20)
+        self.assertEqual(list(checkout.iterdir()), [checkout / ".git"])
+        self.assertEqual(json.loads((held / "watermark.json").read_text(encoding="utf-8")), {
+            "projected_through": "0",
+        })
+        state.unlink()
+        held.rename(state)
+        self.assertEqual(self.project(wal), 2)
+        self.assertEqual(self.watermark(), "2")
+
+    def test_option_history_projection_rechecks_sidecar_links_before_transaction(self):
+        wal = self.option_history_wal()
+        checkout = self.root / "checkout"
+        self.synthetic_worktree(checkout)
+        target = checkout / "protected"
+        target.write_bytes(b"fixed synthetic content")
+        journal = self.marker.parent / "projection.sqlite3-journal"
+        read = wal.read_after
+
+        def add_journal_link(*args):
+            journal.symlink_to(target)
+            return read(*args)
+
+        with open_projection(self.root, *self.product) as projection, patch.object(wal, "read_after", add_journal_link):
+            with self.assertRaisesRegex(ProjectionError, "invalid projection file"):
+                projection.project_batch(wal, 20)
+        self.assertEqual(target.read_bytes(), b"fixed synthetic content")
+        self.assertTrue(journal.is_symlink())
+        journal.unlink()
+        self.assertEqual(self.watermark(), "0")
+        self.assertEqual(self.partitions(), [])
+
+    def test_option_history_projection_rechecks_catalog_before_parquet_publication(self):
+        wal = self.option_history_wal()
+        catalog = self.root.joinpath("catalog", "market-events", *self.product)
+        held = self.root / "held-catalog"
+        checkout = self.root / "checkout"
+        self.synthetic_worktree(checkout)
+        with open_projection(self.root, *self.product) as projection:
+            catalog.rename(held)
+            catalog.symlink_to(checkout, target_is_directory=True)
+            with self.assertRaises((OSError, ProjectionError)):
+                projection.project_batch(wal, 20)
+        self.assertEqual(list(checkout.iterdir()), [checkout / ".git"])
+        self.assertEqual(list(held.iterdir()), [])
+        self.assertEqual(self.watermark(), "0")
+        catalog.unlink()
+        held.rename(catalog)
+        self.assertEqual(self.project(wal, limit=1), 2)
+        self.assertEqual(self.watermark(), "2")
+        self.assertEqual(self.latest(wal.events[-1]), wal.events[-1])
+
     def test_retry_after_parquet_publish_keeps_original_range_on_a_growing_wal(self):
         wal = MemoryWal(self.first, self.second)
         publish = market_projector._publish_parquet

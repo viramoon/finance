@@ -121,9 +121,12 @@ impl Checkpoint {
         }
     }
 
-    fn load(dir: &WalDirectory, source: &Token, product: &Token) -> Result<Option<Self>> {
-        dir.open_optional(CHECKPOINT)?
-            .map(|file| Self::decode(file, source, product))
+    fn decode_optional(
+        file: Option<File>,
+        source: &Token,
+        product: &Token,
+    ) -> Result<Option<Self>> {
+        file.map(|file| Self::decode(file, source, product))
             .transpose()
     }
 
@@ -284,7 +287,8 @@ impl WalWriter {
         bind_policy: impl FnOnce(&WalDirectory, bool) -> Result<()>,
     ) -> Result<Self> {
         let lock = dir.lock()?;
-        let mut state = match Checkpoint::load(&dir, source, product)? {
+        let checkpoint = dir.open_optional(CHECKPOINT)?;
+        let mut state = match Checkpoint::decode_optional(checkpoint, source, product)? {
             Some(state) => state,
             None => {
                 ensure!(
@@ -473,10 +477,11 @@ impl WalWriter {
             ],
         )?;
         let _lock = dir.lock()?;
-        let prior = dir
-            .open_optional(CHECKPOINT)?
-            .map(|file| Checkpoint::decode(file, &manifest.source, &manifest.product))
-            .transpose()?;
+        let prior = Checkpoint::decode_optional(
+            dir.open_optional(CHECKPOINT)?,
+            &manifest.source,
+            &manifest.product,
+        )?;
         if let Some(prior) = &prior {
             ensure!(
                 prior.active_bytes.get() == 0 && &prior.manifest == manifest,
@@ -635,7 +640,11 @@ impl WalReader {
 
     fn open_in(dir: Option<WalDirectory>, source: &Token, product: &Token) -> Result<Self> {
         let checkpoint = if let Some(dir) = &dir {
-            let checkpoint = Checkpoint::load(dir, source, product)?;
+            let checkpoint = Checkpoint::decode_optional(
+                dir.open_optional_snapshot(CHECKPOINT)?,
+                source,
+                product,
+            )?;
             if checkpoint.is_some() {
                 // A reader can race the rename before the writer syncs the
                 // directory. Make the visible prefix durable before a reader
@@ -745,7 +754,7 @@ mod tests {
     use serde_json::Value;
     use std::{
         fs::OpenOptions,
-        os::unix::fs::symlink,
+        os::unix::fs::{MetadataExt, symlink},
         path::PathBuf,
         process::{Command, Stdio},
         thread,
@@ -848,6 +857,42 @@ mod tests {
         assert_eq!(restarted.flush().unwrap(), 2);
         let rows = reader(root.path()).read_after(0, 10).unwrap();
         assert_eq!((rows[0].generation.get(), rows[1].generation.get()), (1, 2));
+    }
+
+    #[test]
+    fn reader_keeps_opened_checkpoint_during_atomic_commit() {
+        let root = tempfile::tempdir().unwrap();
+        let mut writer = writer(root.path());
+        writer.append(&event(0)).unwrap();
+        assert_eq!(writer.flush().unwrap(), 1);
+        writer.append(&event(1)).unwrap();
+
+        WalDirectory::after_next_snapshot_open(move |checkpoint| {
+            assert_eq!(checkpoint.metadata().unwrap().nlink(), 1);
+            assert_eq!(writer.flush().unwrap(), 2);
+            assert_eq!(checkpoint.metadata().unwrap().nlink(), 0);
+        });
+        let old = reader(root.path());
+        assert_eq!(old.durable_position(), 1);
+        let old_rows = old.read_after(0, 5).unwrap();
+        assert_eq!(old_rows.len(), 1);
+        assert_eq!(old_rows[0].event, event(0));
+
+        let new = reader(root.path());
+        assert_eq!(new.durable_position(), 2);
+        let new_rows = new.read_after(1, 5).unwrap();
+        assert_eq!(new_rows.len(), 1);
+        assert_eq!(new_rows[0].event, event(1));
+    }
+
+    #[test]
+    fn reader_rejects_checkpoint_linked_to_another_path() {
+        let root = tempfile::tempdir().unwrap();
+        let writer = writer(root.path());
+        let checkpoint = writer.product_dir().join(CHECKPOINT);
+        fs::hard_link(&checkpoint, root.path().join("checkpoint-link")).unwrap();
+        assert_eq!(checkpoint.metadata().unwrap().nlink(), 2);
+        assert!(WalReader::open(root.path(), SOURCE, PRODUCT).is_err());
     }
 
     #[test]

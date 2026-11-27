@@ -52,13 +52,6 @@ impl OptionHistoryIngress {
             recording_root = data_root
                 .canonicalize()
                 .context("option history data root")?;
-            ensure!(
-                !recording_root.ancestors().any(|dir| {
-                    let marker = dir.join(".git");
-                    marker.is_file() || marker.join("HEAD").is_file()
-                }),
-                "option history must be recorded outside Git worktrees"
-            );
             recording_root.as_path()
         } else {
             data_root

@@ -238,6 +238,32 @@ fn rolling_volume_rate_compares_matching_underlying_expiry_and_session_segment()
 }
 
 #[test]
+fn positive_volume_after_three_zero_rates_is_elevated() {
+    let option = contract(1, 10, 21);
+    let mut engine = ObservationEngine::default();
+    data_type(&mut engine, &option, 1, MarketDataType::Realtime);
+    for second in 0..4 {
+        assert!(volume(&mut engine, &option, 1, "10", second).is_none());
+    }
+
+    let clue = volume(&mut engine, &option, 1, "11", 4).unwrap();
+    let evidence = volume_evidence(&clue);
+    assert_eq!(clue.status, ObservationStatus::PendingVerification);
+    assert_eq!(clue.window(), (time(3), time(4)));
+    assert_eq!(evidence.delta_contracts.as_str(), "1");
+    assert_eq!(evidence.comparison.baseline_samples, 3);
+    assert_eq!(
+        evidence.comparison.typical_rate,
+        Some(BaselineVolumeRate {
+            contracts: 0,
+            elapsed_millis: 1_000,
+        })
+    );
+    assert_eq!(evidence.comparison.elevated, Some(true));
+    assert_eq!(engine.summary(time(4)).counts.elevated_volume, 1);
+}
+
+#[test]
 fn even_volume_baseline_averages_the_two_central_rates_exactly() {
     let mut engine = ObservationEngine::default();
     let option = contract(1, 10, 21);

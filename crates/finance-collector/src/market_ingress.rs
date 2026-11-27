@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    fs::File,
     io::BufReader,
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -266,7 +267,7 @@ impl MarketIngress {
         if let Some(writer) = &self.writer {
             let dir = writer.directory();
             let mut reports: Vec<QualityReport> =
-                read_json(dir, "quality.json")?.unwrap_or_default();
+                decode_json_metadata(dir.open_optional("quality.json")?)?.unwrap_or_default();
             if !reports.contains(&report) {
                 reports.push(report);
                 dir.publish_json("quality.json", &reports)?;
@@ -465,7 +466,15 @@ fn read_policy(
     source: &Token,
     product: &Token,
 ) -> Result<Option<ProductPolicy>> {
-    let policy: Option<ProductPolicy> = read_json(dir, "access.json")?;
+    decode_policy(dir.open_optional_snapshot("access.json")?, source, product)
+}
+
+fn decode_policy(
+    file: Option<File>,
+    source: &Token,
+    product: &Token,
+) -> Result<Option<ProductPolicy>> {
+    let policy: Option<ProductPolicy> = decode_json_metadata(file)?;
     if let Some(policy) = &policy {
         policy.validate()?;
         ensure!(
@@ -524,7 +533,11 @@ fn ensure_backup(policy: &ProductPolicy) -> Result<()> {
 fn bind_policy(dir: &WalDirectory, policy: &ProductPolicy, allow_new: bool) -> Result<()> {
     // Validate the quality file before opening a writable generation, too.
     dir.open_optional("quality.json")?;
-    if let Some(existing) = read_policy(dir, &policy.source, &policy.product)? {
+    if let Some(existing) = decode_policy(
+        dir.open_optional("access.json")?,
+        &policy.source,
+        &policy.product,
+    )? {
         ensure!(
             existing == *policy,
             "WAL policy binding changed; use a separate data root"
@@ -536,8 +549,11 @@ fn bind_policy(dir: &WalDirectory, policy: &ProductPolicy, allow_new: bool) -> R
 }
 
 fn read_json<T: DeserializeOwned>(dir: &WalDirectory, name: &str) -> Result<Option<T>> {
-    dir.open_optional(name)?
-        .map(|file| serde_json::from_reader(BufReader::new(file)).map_err(Into::into))
+    decode_json_metadata(dir.open_optional_snapshot(name)?)
+}
+
+fn decode_json_metadata<T: DeserializeOwned>(file: Option<File>) -> Result<Option<T>> {
+    file.map(|file| serde_json::from_reader(BufReader::new(file)).map_err(Into::into))
         .transpose()
 }
 

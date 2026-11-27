@@ -7,7 +7,7 @@ F9e 为已确认的 SMART USD 美股期权提供进程内接口。观察结果�
 - 调用 `LiveOptionFlow::watch(line_handle, ObservationEngine::default(), policy, usage)` 订阅已有 [行情线调度器](integrations/ib-line-budget.md)。启动调度器前建立观察者可接收首批行情类型回调。调用方在调度器停止时取消等待。观察者与页面共用现有行数。
 - 只处理实际 `marketDataType=1`、非延迟的合约回调。轮换、断线、行情类型改变、会话段改变或消费滞后时重置对应采样状态。消费滞后后需要新的实际行情类型证据。交易时段使用经确认合约的 `liquid_hours`。每条线索附调度预算快照，F9b 可查询时另附已覆盖、未覆盖和未知的时窗。样本时钟相同形成零宽窗口，或窗口末端晚于调度时钟时，覆盖为 `None`。覆盖依据 F9b 的合格行情回调，描述本地观测范围。
 - `ObservationEngine::summary(as_of)` 返回观察数、放量线索数、超基线数、价差扩大数、读者滞后数和最近线索接收时间。默认规则 `ibkr_l1_observation_v2` 按同标的 conId、同到期日及交易段开始后每 30 分钟分组。分组滚动保留近七天的最近 32 个样本，至少 3 个才有中位数基线。奇数样本取排序后的中间值，偶数样本取中间两个值的算术平均。速率基线用精确的张数分子与毫秒分母表示。
-- 同一连续窗口内两次累计量的正差记为放量线索。30 秒以上的差分、计数回退和失去覆盖后的首个样本重建基线。按窗口毫秒数比较历史速率，达到中位数的两倍标为放量超基线。保留独立带时标的 last/size 样本。有合格采样价时可估算 `采样价 × 量差 × 实际合约乘数`，该金额对应整个差分区间的估计。两个相邻累计量快照之间可能包含多笔或漏采，单笔规模留待历史证据。
+- 同一连续窗口内两次累计量的正差记为放量线索。30 秒以上的差分、计数回退和失去覆盖后的首个样本重建基线。按窗口毫秒数比较历史速率，达到中位数的两倍标为放量超基线。中位数为零时，有可计算速率的正差也标为超基线。基线样本不足或窗口不足一毫秒时，`elevated` 为空。保留独立带时标的 last/size 样本。有合格采样价时可估算 `采样价 × 量差 × 实际合约乘数`，该金额对应整个差分区间的估计。两个相邻累计量快照之间可能包含多笔或漏采，单笔规模留待历史证据。
 - 报价线索比较有效双边价差与分组中位数，规则要求五秒内的价量和至少两倍的价差。价差中位数超出精确十进制可表示范围时，该次比较不产生线索。每条线索的状态是 `pending_verification`，页面可显示“观察到放量/报价异动，待核验”。
 
 ## 历史逐笔核验
@@ -26,7 +26,7 @@ F9e 为已确认的 SMART USD 美股期权提供进程内接口。观察结果�
 
 ## 许可、存储与集成
 
-`ibkr/opra` 用于内存观察。`ibkr/opra-history` 独立审核，`FlowUse::PrivateDisplay` 需要 `display_live`，`FlowUse::NonDisplayDerivation` 需要 `derive_non_display`。历史源和 F3 入口使用同一个工作树外的 `FERTILE_DATA_ROOT`。开启 `record_local` 时，F3 `MarketIngress` 从已解析的数据根逐级打开无符号链接的 `finance-state/market-wal/ibkr/opra-history`，并通过持有的产品目录句柄读写原始记录和元数据。可展示历史数据也可在 F3 的短时内存缓存读取。历史请求仍在已有 `finance-state/historical` 维护限速状态，该目录仅写入限速元数据。告警、外发和个人盘备份各按已有授权边界处理。
+`ibkr/opra` 用于内存观察。`ibkr/opra-history` 独立审核，`FlowUse::PrivateDisplay` 需要 `display_live`，`FlowUse::NonDisplayDerivation` 需要 `derive_non_display`。历史源和 F3 入口使用同一个工作树外的 `FERTILE_DATA_ROOT`。开启 `record_local` 时，F3 `MarketIngress` 从已解析的数据根逐级打开 `finance-state/market-wal/ibkr/opra-history`，拒绝符号链接及嵌套的 Git 工作树，并通过持有的产品目录句柄读写原始记录和元数据。可展示历史数据也可在 F3 的短时内存缓存读取。历史请求仍在已有 `finance-state/historical` 维护限速状态，该目录仅写入限速元数据。告警、外发和个人盘备份各按已有授权边界处理。
 
 历史原始数据分别以 `option-history-trades`、`option-history-quotes` 流发布，按 F3 写者代次重置。本地结果确认时返回持久水位。每次重新查询取得独立的批次证据，页内重叠去重范围限本次查询。若记录失败，按 F3 恢复查看已确认前缀后重试。选择性传入 F9b 覆盖时，仅在已知常规交易时段且 TRADES 请求完成的未观察区间记录 `tick_backfilled`。计数是该区间收到的原始交易流记录数，包括保留的供应商标记。查询和覆盖采用半开区间，转换为 F3 质量报告时将结束时间减一纳秒，使报告的含端点区间指向相同范围。条件码和报价均进入投影供追溯。
 

@@ -26,6 +26,39 @@ fn worktree(path: &Path) {
 }
 
 #[test]
+fn recording_refuses_nested_git_worktrees_in_every_wal_directory() {
+    let components = ["finance-state", "market-wal", IBKR, OPRA_HISTORY];
+    for end in 1..=components.len() {
+        for linked_worktree in [false, true] {
+            let data_root = tempfile::tempdir().unwrap();
+            let checkout = components[..end]
+                .iter()
+                .fold(data_root.path().to_owned(), |dir, component| {
+                    dir.join(component)
+                });
+            fs::create_dir_all(&checkout).unwrap();
+            if linked_worktree {
+                fs::write(checkout.join(".git"), "gitdir: ../synthetic\n").unwrap();
+            } else {
+                worktree(&checkout);
+            }
+
+            let error =
+                OptionHistoryIngress::open(data_root.path(), policy(), FlowUse::PrivateDisplay)
+                    .err()
+                    .expect("must reject nested worktrees");
+            assert!(format!("{error:#}").contains("outside Git worktrees"));
+            let entries = checkout
+                .read_dir()
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>();
+            assert_eq!(entries, [".git"]);
+        }
+    }
+}
+
+#[test]
 fn recording_rejects_linked_wal_directory_components() {
     let data_root = tempfile::tempdir().unwrap();
     let checkout = tempfile::tempdir().unwrap();

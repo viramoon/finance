@@ -250,7 +250,7 @@ impl BaselineVolumeRate {
 
     fn is_elevated(self, current: VolumeRate) -> Option<bool> {
         // Cross multiplication remains below 2 × 6×10³² × 30,000.
-        (self.contracts > 0).then(|| {
+        (current.elapsed_millis > 0).then(|| {
             current.contracts * u128::from(self.elapsed_millis)
                 >= 2 * self.contracts * u128::from(current.elapsed_millis)
         })

@@ -3,15 +3,47 @@ use std::{
     fs::File,
     io::{self, Write},
     os::unix::{ffi::OsStrExt, fs::MetadataExt},
-    path::{Component, Path},
+    path::{self, Component, Path},
 };
 
 use anyhow::{Context, Result};
 use rustix::{
-    fs::{AtFlags, Dir, Mode, OFlags, mkdirat, open, openat, renameat, unlinkat},
+    fs::{AtFlags, Dir, FileType, Mode, OFlags, mkdirat, open, openat, renameat, statat, unlinkat},
     io::Errno,
 };
 use serde::Serialize;
+
+#[cfg(test)]
+type SnapshotHook = Box<dyn FnOnce(&File)>;
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_SNAPSHOT_OPEN: std::cell::RefCell<Option<SnapshotHook>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+enum Links {
+    Attached,
+    Snapshot,
+}
+
+fn check_regular_file(file: File, links: Links) -> io::Result<File> {
+    let metadata = file.metadata()?;
+    let valid_links = match links {
+        Links::Attached => metadata.nlink() == 1,
+        // An atomic replacement can unlink the old inode while a reader
+        // still holds its immutable contents through the open descriptor.
+        Links::Snapshot => metadata.nlink() <= 1,
+    };
+    if !metadata.is_file() || !valid_links {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "WAL requires a regular file with an admissible link count",
+        ));
+    }
+    Ok(file)
+}
 
 const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
@@ -25,9 +57,32 @@ pub(crate) struct WalDirectory {
     path: std::path::PathBuf,
 }
 
-fn open_anchor(path: &Path) -> io::Result<File> {
+fn require_outside_worktree(dir: &File) -> io::Result<()> {
+    match statat(dir, ".git", AtFlags::SYMLINK_NOFOLLOW) {
+        Err(Errno::NOENT) => return Ok(()),
+        Err(error) => return Err(error.into()),
+        Ok(marker) if FileType::from_raw_mode(marker.st_mode) == FileType::Directory => {
+            let git = openat(dir, ".git", DIRECTORY_FLAGS, Mode::empty())?;
+            match statat(&git, "HEAD", AtFlags::SYMLINK_NOFOLLOW) {
+                Err(Errno::NOENT) => return Ok(()),
+                Err(error) => return Err(error.into()),
+                Ok(_) => {}
+            }
+        }
+        Ok(_) => {}
+    }
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "WAL data must be recorded outside Git worktrees",
+    ))
+}
+
+fn open_anchor(path: &Path, for_write: bool) -> io::Result<File> {
     let start = if path.is_absolute() { "/" } else { "." };
     let mut dir = File::from(open(start, DIRECTORY_FLAGS, Mode::empty())?);
+    if for_write {
+        require_outside_worktree(&dir)?;
+    }
     for component in path.components() {
         if !matches!(component, Component::RootDir | Component::CurDir) {
             dir = File::from(openat(
@@ -36,6 +91,9 @@ fn open_anchor(path: &Path) -> io::Result<File> {
                 DIRECTORY_FLAGS,
                 Mode::empty(),
             )?);
+            if for_write {
+                require_outside_worktree(&dir)?;
+            }
         }
     }
     Ok(dir)
@@ -58,7 +116,8 @@ impl WalDirectory {
     }
 
     pub(super) fn open(data_root: &Path, components: &[&str]) -> Result<Self> {
-        let mut dir = open_anchor(data_root).context("opening WAL restore data root")?;
+        let absolute = path::absolute(data_root).context("resolving WAL data root")?;
+        let mut dir = open_anchor(&absolute, true).context("opening WAL restore data root")?;
         for &component in components {
             let child = match openat(&dir, component, DIRECTORY_FLAGS, Mode::empty()) {
                 Err(Errno::NOENT) => {
@@ -71,16 +130,19 @@ impl WalDirectory {
                 opened => opened,
             }
             .with_context(|| format!("opening WAL restore directory {component}"))?;
-            // Also sync directories created when the sealed files were copied.
+            let child = File::from(child);
+            require_outside_worktree(&child)
+                .with_context(|| format!("checking WAL directory {component}"))?;
+            // Persist the directory entries, including those created when sealed files were copied.
             dir.sync_all()?;
-            dir = File::from(child);
+            dir = child;
         }
         Ok(Self::new(dir, data_root, components))
     }
 
     pub(crate) fn open_existing(anchor: &Path, components: &[&str]) -> Result<Option<Self>> {
         let result: io::Result<_> = (|| {
-            let mut dir = open_anchor(anchor)?;
+            let mut dir = open_anchor(anchor, false)?;
             for &component in components {
                 dir = File::from(openat(&dir, component, DIRECTORY_FLAGS, Mode::empty())?);
             }
@@ -110,21 +172,17 @@ impl WalDirectory {
         Ok(file)
     }
 
-    fn open_regular(&self, name: &str, flags: OFlags, permissions: u32) -> io::Result<File> {
-        let file = File::from(openat(
+    fn open_file(&self, name: &str, flags: OFlags, permissions: u32) -> io::Result<File> {
+        Ok(File::from(openat(
             &self.file,
             name,
             flags | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
             Mode::from_bits_truncate(permissions),
-        )?);
-        let metadata = file.metadata()?;
-        if !metadata.is_file() || metadata.nlink() != 1 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "WAL restore requires a regular file with exactly one link",
-            ));
-        }
-        Ok(file)
+        )?))
+    }
+
+    fn open_regular(&self, name: &str, flags: OFlags, permissions: u32) -> io::Result<File> {
+        check_regular_file(self.open_file(name, flags, permissions)?, Links::Attached)
     }
 
     pub(super) fn open_segment(&self, name: &str) -> Result<File> {
@@ -152,11 +210,36 @@ impl WalDirectory {
     }
 
     pub(crate) fn open_optional(&self, name: &str) -> Result<Option<File>> {
-        match self.open_regular(name, OFlags::RDONLY, 0) {
-            Ok(file) => Ok(Some(file)),
+        self.open_optional_metadata(name, Links::Attached)
+    }
+
+    pub(crate) fn open_optional_snapshot(&self, name: &str) -> Result<Option<File>> {
+        self.open_optional_metadata(name, Links::Snapshot)
+    }
+
+    fn open_optional_metadata(&self, name: &str, links: Links) -> Result<Option<File>> {
+        match self.open_file(name, OFlags::RDONLY, 0) {
+            Ok(file) => {
+                #[cfg(test)]
+                if matches!(links, Links::Snapshot)
+                    && let Some(hook) = AFTER_SNAPSHOT_OPEN.with(|slot| slot.borrow_mut().take())
+                {
+                    hook(&file);
+                }
+                check_regular_file(file, links)
+                    .map(Some)
+                    .with_context(|| format!("opening WAL restore {name}"))
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error).with_context(|| format!("opening WAL restore {name}")),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn after_next_snapshot_open(hook: impl FnOnce(&File) + 'static) {
+        AFTER_SNAPSHOT_OPEN.with(|slot| {
+            assert!(slot.borrow_mut().replace(Box::new(hook)).is_none());
+        });
     }
 
     pub(super) fn segment_count(&self) -> Result<usize> {
