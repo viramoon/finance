@@ -29,6 +29,8 @@ use super::{
 pub const OPRA_HISTORY: &str = "opra-history";
 
 pub struct HistoricalFlow {
+    pub access: ProductPolicy,
+    pub window: HistoricalWindow,
     pub evidence: HistoricalEvidence,
     pub observation_coverage: Option<CoverageReport>,
     pub durable_through: Option<U64Text>,
@@ -109,6 +111,8 @@ impl OptionHistoryIngress {
             self.report_backfilled(instrument, &contract.liquid_hours, coverage, window, &ticks)?;
         }
         Ok(HistoricalFlow {
+            access: self.policy.clone(),
+            window,
             evidence,
             observation_coverage: coverage,
             durable_through,

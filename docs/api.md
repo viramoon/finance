@@ -40,7 +40,7 @@ GET /api/v1/market/status 从 bar collector 持久状态读取各标的水位和
 
 IBKR 顶档订阅与权限验收由 `finance-ib` 的 Rust 接口和私有 CLI 提供。共享行情所有者通过 `finance_collector::line_budget::LineHandle` 提供行情线预算、确认的期权链与覆盖，在核对许可后接入第三批查询。Nasdaq TotalView 的页面焦点由所有者在进程内控制。[IBKR 顶档权限](integrations/ib.md#美股-l1-和-opra-权限验收) · [行情线预算](integrations/ib-line-budget.md) · [场所深度](integrations/ib.md#nasdaq-totalview-场所深度)
 
-期权流观察及历史核验使用进程内 `finance_collector::option_flow` 接口。启用历史产品本地记录时，已有 WAL、投影和质量查询可读取已获准的原始证据。本期的领域报告由调用方在进程内取得，`/options/flow` 的专用 HTTP 查询交由后续读契约接入。[期权流接口](option-flow.md)
+期权流观察及历史核验由 `finance_collector::option_flow` 生产，可通过[第四批期权流读契约](#第四批期权流读契约)查询已取得的结果。获准本地记录的历史原始证据可通过已有的 WAL、投影和质量接口读取。[期权流接口](option-flow.md)
 
 POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /api/v1/backtests/{id} 查看执行进度与摘要，GET /api/v1/backtests 按 cursor 和 limit 翻页。提交使用同库事务完成幂等检查和容量检查。多个 worker 可独立领取并续租，租约是服务端状态。完整输入范围、超时和恢复见 [作业运维](backtest-jobs.md)。公网入口由 web 鉴权并限流。
 
@@ -195,7 +195,24 @@ IBKR 响应的 `access` 是 API 的显示用途许可，来源为 `ibkr`，产�
 - 场所深度将 `run_depth` 的显示回调交给 `DepthFrames::publish`，包括 reset、inactive 和冷启动空簿。
 - 敞口由 `ExposureSource` 查找估值快照、时序阈值和可选价格网格，计算走 F9d 的 `evaluate`。历史由 `HistorySource` 查找 F12 的 `ContractHistory` 结果。两个查找接口读取内存，由所有者提供生命周期与留存策略。
 
-数据源未接入时返回 `503 / market_read_source_unavailable`。数据源已接入但深度、估值或历史窗口不可用时返回 `404 / market_read_not_found`。查询参数无效返回 `400 / market_read_query_invalid`。覆盖键、估值快照键或历史标的和窗口与请求不匹配，链快照时钟无法转换为美东日期，或估值计算失败时，返回 `500 / market_read_failed` 和固定消息 `Could not read market data`，省略底层详情。IBKR 响应和敞口计算结果只在进程内与授权的私有请求中使用。F9e 的原始逐笔证据沿用已授权的 F3 查询。专用 `/options/flow`、页面焦点写接口和行情所有者的部署接线留待后续集成。本批复用 F1/F3 数据通道与既有 WS/SSE 导出。[期权流观察与历史核验](option-flow.md)
+数据源未接入时返回 `503 / market_read_source_unavailable`。数据源已接入但深度、估值或历史窗口不可用时返回 `404 / market_read_not_found`。查询参数无效返回 `400 / market_read_query_invalid`。覆盖键、估值快照键或历史标的和窗口与请求不匹配，链快照时钟无法转换为美东日期，或估值计算失败时，返回 `500 / market_read_failed` 和固定消息 `Could not read market data`，省略底层详情。IBKR 响应和敞口计算结果只在进程内与授权的私有请求中使用。页面焦点写接口和行情所有者的部署接线留待后续集成。本批复用 F1/F3 数据通道与既有 WS/SSE 导出。
+
+## 第四批期权流读契约
+
+两条路由只读，成功和错误响应均使用 `Cache-Control: private, no-store`。web 须核对会话和相应 IBKR 产品的私有展示授权。查询使用正整数 `con_id` 与 RFC3339 `start`、`end`，时窗为 `[start, end)`。`offset` 从 0 开始，`limit` 默认 20，范围 1～100，`next_offset: null` 表示到达末页。
+
+| 请求 | 查询与分页 | OpenAPI 响应及主要 schema |
+| --- | --- | --- |
+| `GET /api/v1/options/flow/observations` | 按接收时间查内存观察快照，保留所有者的记录顺序。同一接收时刻可有多条记录。`as_of` 是快照时间。 | `OptionFlowObservationPage`。`items` 包含 `FlowObservation`、`BudgetStatus` 和可空的 `SubscriptionCoverage`，线索保留 `pending_verification`、规则版本及 `volume_increase` 或 `quote_widening` 的证据。 |
+| `GET /api/v1/options/flow/verification` | 查单一美东交易日期内已经取得的精确成交窗口，边界须为整秒。`quote_start` 是原报告的报价起点。仅对 `trades` 分页，`counts` 与 `issues` 始终覆盖整份报告。 | `OptionFlowVerificationPage`。含 `VerifiedTrade`、`HistoricalCounts`、`HistoricalIssue`、可空的 `observation_coverage` 和 `durable_through`。逐笔返回请求页证据、原始条件码及映射、成交状态、配对报价、方向估计及原因和权利金。 |
+
+观察记录和历史逐笔没有共享的成交标识。放量线索的权利金估计覆盖整个采样区间。历史逐笔的方向是带置信度的估计，参与者身份为 `unknown`。同秒同价的来源行以各自的出现序号保留。`issues` 按 `kind`（`trades` 或 `bid_ask`）给出未完成或不可回补的半开区间 `[start, end)`，并保留发现时间 `observed_at` 和原因 `reason`。已有报告可以包含零笔逐笔和 `expired_contract` 等原因。继续分页时保留原筛选条件，若 `as_of` 或 `verified_at` 变化，从首页重新读取。
+
+`access` 分别返回来自 `ibkr/opra` 与 `ibkr/opra-history` 的 `ProductPolicy`，包含 `license` 和四项用途标记。历史报告的 `observation_coverage` 另外要求 OPRA 展示许可，其 `access` 属于 OPRA。价格、数量、合约乘数、阈值和金额沿用十进制字符串 `DecimalText`。观察 `generation`、修订 `revision` 与 F3 `durable_through` 沿用无符号 64 位整数字符串 `U64Text`。速率基线的 `contracts` 是无符号整数字符串，`elapsed_millis` 是分母。`durable_through` 对应历史产品的 F3 本地位置，未获本地记录许可时为 `null`。展示专用结果仅可通过授权的私有内存视图读取。契约生成只读取代码和固定合成样本，查询路径没有文件导出或落盘入口。历史原始证据仍遵循 [F3](#首批读契约) 和 [F1 v3 事件 schema](../protocol/v3/event.schema.json)。
+
+共享行情所有者通过 `MarketReadSources.flow_observations` 和 `flow_verifications` 提供本地快照查询及当前许可。查询只读取结果。未接入源返回 `503 / market_read_source_unavailable`，无符合条件的快照、报告或展示许可返回 `404 / market_read_not_found`，非法参数返回 `400 / market_read_query_invalid`。所有者返回的键、窗口、许可或水位冲突时返回 `500 / market_read_failed`。每次观察查询先校验整个快照再分页。任一记录冲突时，同一快照的所有分页请求均返回 `500`，包括超出记录范围的请求。合法观察快照可返回空页。授权所有者负责快照生命周期，独立 API 进程默认无这些数据源。[领域接口和生产者规则](option-flow.md)
+
+第四批导出新增 REST schema。WS/SSE 继续发布[首批流契约](market-protocol.md#首批读契约的-ws-与-sse-消息)。期权流主动推送与续传、页面焦点写接口、集成连通性测试入口及共享行情所有者部署接线仍待后续契约或集成。web 接入按产品鉴权与限流，浏览器页面由 frontend 交付。
 
 ## 示例批任务
 

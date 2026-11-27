@@ -261,7 +261,9 @@ fn router_with_read_sources(
         market_options::lines::coverage,
         market_options::lines::chain,
         market_options::analytics::exposure,
-        market_options::analytics::history
+        market_options::analytics::history,
+        market_options::flow::observations,
+        market_options::flow::verification
     ),
     components(schemas(
         BacktestSummary,

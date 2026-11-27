@@ -4,12 +4,13 @@ use finance_ib::historical::option_ticks::{
 };
 use rust_decimal::Decimal;
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use crate::option_flow::decimal::exact_difference;
 
 const RULE_VERSION: &str = "historical-quote-test-v1";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EstimatedSide {
     EstimatedBuy,
@@ -17,14 +18,14 @@ pub enum EstimatedSide {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InferenceConfidence {
     Estimate,
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum QuoteReason {
     AtOrAboveAsk,
@@ -49,13 +50,13 @@ pub enum QuoteReason {
     PrecisionUnavailable,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct QuoteEvidence {
     pub quote: HistoricalTick<HistoryQuote>,
     pub age_ms: i64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct SideInference {
     pub direction: EstimatedSide,
     pub confidence: InferenceConfidence,

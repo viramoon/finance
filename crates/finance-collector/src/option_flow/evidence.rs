@@ -17,13 +17,14 @@ use finance_ib::{
 use finance_market_protocol::{DecimalText, Token};
 use rust_decimal::Decimal;
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use super::decimal::exact_premium;
 pub use quotes::{EstimatedSide, InferenceConfidence, QuoteEvidence, QuoteReason, SideInference};
 pub use revisions::{TradeAction, TradeLink, TradeOccurrence, TradeStatus};
 
 /// Exact raw condition tokens are interpreted only under an identified mapping.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MappedCondition {
     Regular,
@@ -77,7 +78,7 @@ impl Default for ConditionMapping {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(tag = "status", content = "condition", rename_all = "snake_case")]
 pub enum ConditionMeaning {
     Empty,
@@ -85,7 +86,7 @@ pub enum ConditionMeaning {
     Mapped(MappedCondition),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, ToSchema)]
 pub struct ConditionInterpretation {
     pub mapping_version: Token,
     pub meaning: ConditionMeaning,
@@ -146,13 +147,13 @@ impl VerificationPolicy {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ParticipantIdentity {
     Unknown,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, ToSchema)]
 pub struct SuspectedScale {
     /// A size heuristic, independent of any provider block condition.
     pub block_contracts_threshold: Option<DecimalText>,
@@ -160,7 +161,7 @@ pub struct SuspectedScale {
     pub institution_scale_premium_threshold: Option<DecimalText>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct VerifiedTrade {
     pub trade: HistoricalTick<HistoryTrade>,
     pub condition: ConditionInterpretation,
@@ -172,7 +173,7 @@ pub struct VerifiedTrade {
     pub link: Option<TradeLink>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, ToSchema)]
 pub struct HistoricalCounts {
     pub verified: usize,
     /// Verified active prints with unknown direction.

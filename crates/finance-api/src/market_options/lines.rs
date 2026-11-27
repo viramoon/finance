@@ -268,6 +268,21 @@ pub(crate) struct SubscriptionCoverage {
     unknown: Vec<SubscriptionCoverageInterval>,
 }
 
+impl SubscriptionCoverage {
+    pub(crate) fn from_report(access: ProductPolicy, report: &CoverageReport) -> Self {
+        let intervals =
+            |entries: &[CoverageInterval]| entries.iter().copied().map(Into::into).collect();
+        Self {
+            access,
+            con_id: report.key.con_id,
+            last_observed_at: report.last_observed_at,
+            covered: intervals(&report.covered),
+            uncovered: intervals(&report.uncovered),
+            unknown: intervals(&report.unknown),
+        }
+    }
+}
+
 #[utoipa::path(
     get, path = "/api/v1/market/subscriptions/coverage", params(SubscriptionCoverageQuery),
     responses(
@@ -296,12 +311,8 @@ pub(crate) async fn coverage(
     {
         return Err(failed());
     }
-    Ok(Json(SubscriptionCoverage {
-        access: lines.access(OPRA),
-        con_id: query.con_id,
-        last_observed_at: report.last_observed_at,
-        covered: report.covered.into_iter().map(Into::into).collect(),
-        uncovered: report.uncovered.into_iter().map(Into::into).collect(),
-        unknown: report.unknown.into_iter().map(Into::into).collect(),
-    }))
+    Ok(Json(SubscriptionCoverage::from_report(
+        lines.access(OPRA),
+        &report,
+    )))
 }
