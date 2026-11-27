@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use log::{error, warn};
 use time::OffsetDateTime;
 
@@ -12,7 +12,7 @@ use crate::client::ClientRequestBuilders;
 use crate::contracts::Contract;
 use crate::messages::IncomingMessages;
 use crate::protocol::{check_version, Features};
-use crate::subscriptions::common::SubscriptionItem;
+use crate::subscriptions::common::{RoutedItem, SubscriptionItem};
 use crate::subscriptions::r#async::Subscription;
 use crate::transport::{AsyncInternalSubscription, AsyncMessageBus};
 use crate::{Client, Error, MAX_RETRIES};
@@ -455,6 +455,33 @@ impl<T: TickDecoder<T> + Send> TickSubscription<T> {
             message_bus,
             cancelled: AtomicBool::new(false),
         }
+    }
+
+    // The legacy stream treats a missing end marker and lag as exhaustion.
+    // Finite page evidence requires a contiguous response with an explicit end.
+    pub(super) async fn collect_completed(mut self) -> Result<(i32, Vec<T>), Error> {
+        let mut rows = Vec::new();
+        while let Some(item) = self.messages.stream.next().await {
+            let routed = item.map_err(|lag| match lag {
+                tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(skipped) => Error::ResponseLagged(skipped),
+            })?;
+            if matches!(&routed, RoutedItem::Response(message) if message.message_type() != T::MESSAGE_TYPE) {
+                return Err(Error::UnexpectedEndOfStream);
+            }
+            match classify::<T>(routed) {
+                TickAction::Batch(mut ticks, done) => {
+                    rows.append(&mut ticks);
+                    if done {
+                        self.done = true;
+                        return Ok((self.request_id, rows));
+                    }
+                }
+                TickAction::Notice(notice) => return Err(Error::Notice(notice)),
+                TickAction::Error(error) => return Err(error),
+                TickAction::Skip | TickAction::EndOfStream => return Err(Error::UnexpectedEndOfStream),
+            }
+        }
+        Err(Error::UnexpectedEndOfStream)
     }
 
     /// Cancel the historical-ticks request. Safe to call after completion (no-op).

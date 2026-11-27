@@ -6,7 +6,7 @@ mod chain;
 use super::{
     ConfirmedContract, ContractKind, ContractQuery, GreeksSource, LiquidHours, MarketDataSource,
     MarketDataType, MarketError, MarketEvent, MarketNotice, MarketRequest, MarketSubscription,
-    OptionContract, OptionGreeks, OptionRight, QuoteField,
+    OptionContract, OptionGreeks, OptionRight, Product, QuoteField,
 };
 use crate::{PaperPeer, Session};
 use async_trait::async_trait;
@@ -36,7 +36,7 @@ use tokio::{
 mod depth_transport;
 pub use depth_transport::PaperDepthSubscription;
 
-/// A verified paper session for L1 and Nasdaq venue depth.
+/// A verified paper session for L1, Nasdaq venue depth and option history.
 /// The connection manager verifies the account before creating this handle.
 pub struct PaperMarket {
     peer: Arc<PaperPeer>,
@@ -45,6 +45,15 @@ pub struct PaperMarket {
 }
 
 impl PaperMarket {
+    /// Historical option pages use the same paper verification and contract
+    /// cache, with the caller's external data root for the shared pacing lock.
+    pub fn option_history(
+        &self,
+        root: &std::path::Path,
+    ) -> crate::historical::option_ticks::PaperOptionHistory<'_> {
+        crate::historical::option_ticks::PaperOptionHistory::new(&self.peer, &self.confirmed, root)
+    }
+
     pub(crate) async fn new(peer: Arc<PaperPeer>, bound: Duration) -> Result<Self, MarketError> {
         let market = Self {
             peer,
@@ -237,6 +246,7 @@ impl MarketDataSource for PaperMarket {
             peer: self.peer.clone(),
             timeout: self.timeout,
             request_id,
+            product: confirmed.product(),
             interest_right,
             pending: None,
         })
@@ -478,6 +488,7 @@ pub struct PaperSubscription {
     peer: Arc<PaperPeer>,
     timeout: Duration,
     request_id: i32,
+    product: Product,
     interest_right: Option<OptionRight>,
     pending: Option<MarketEvent>,
 }
@@ -532,6 +543,10 @@ impl MarketSubscription for PaperSubscription {
                 };
                 while let Some(item) = subscription.next().await {
                     match item {
+                        Ok(SubscriptionItem::Data(ExactTickTypes::Size {
+                            tick_type: TickType::Volume | TickType::DelayedVolume,
+                            ..
+                        })) if self.product != Product::Opra => continue,
                         Ok(SubscriptionItem::Data(tick)) => {
                             let (event, pending) =
                                 tick_events(tick, self.interest_right, Utc::now());
@@ -625,7 +640,12 @@ fn tick_events(
         }
         ExactTickTypes::Size { tick_type, size } => {
             let value = quantity(size);
-            if let Some((field, delayed)) = quote_field(&tick_type) {
+            let field = match tick_type {
+                TickType::Volume => Some((QuoteField::CumulativeVolume, false)),
+                TickType::DelayedVolume => Some((QuoteField::CumulativeVolume, true)),
+                _ => quote_field(&tick_type),
+            };
+            if let Some((field, delayed)) = field {
                 Some(MarketEvent::Quote {
                     field,
                     value,
@@ -929,6 +949,32 @@ mod tests {
         assert!(decimal(f64::MAX).is_none());
         assert!(decimal(f64::NAN).is_none());
         assert!(positive_decimal(-1.0).is_none());
+    }
+
+    #[test]
+    fn cumulative_option_volume_is_exact_and_retains_its_latency_class() {
+        let now = utc("2040-01-20T15:00:00Z");
+        for (tick_type, delayed) in [(TickType::Volume, false), (TickType::DelayedVolume, true)] {
+            assert_eq!(
+                tick_events(
+                    ExactTickTypes::Size {
+                        tick_type,
+                        size: Some("9007199254740993".into()),
+                    },
+                    Some(OptionRight::Call),
+                    now,
+                ),
+                (
+                    Some(MarketEvent::Quote {
+                        field: QuoteField::CumulativeVolume,
+                        value: Some("9007199254740993".parse().unwrap()),
+                        delayed,
+                        received_at: now,
+                    }),
+                    None,
+                )
+            );
+        }
     }
 
     #[test]
