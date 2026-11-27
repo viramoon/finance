@@ -9,11 +9,16 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use finance_ib::depth::permission::{PRODUCT as TOTALVIEW_PRODUCT, SOURCE as TOTALVIEW_SOURCE};
 use finance_market_protocol::{Capability, Event, Instrument, InstrumentId, Token, U64Text};
+use rustix::{
+    fs::{Mode, OFlags, open},
+    io::Errno,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tempfile::NamedTempFile;
 use utoipa::ToSchema;
 
 use crate::market_wal::{WAL_SUBDIRECTORIES, WalManifest, WalReader, WalWriter};
+use crate::projection_read::{ProjectionArtifact, projection_read_path};
 
 const DISPLAY_TTL: Duration = Duration::from_secs(5);
 const DISPLAY_EVENTS: usize = 256;
@@ -368,6 +373,8 @@ fn empty_watermarks() -> Watermarks {
 }
 
 pub fn read_watermarks(data_root: &Path, source: &Token, product: &Token) -> Result<Watermarks> {
+    let projected_path =
+        projection_read_path(data_root, source, product, ProjectionArtifact::Watermark)?;
     let Some(policy) = recording_policy(data_root, source, product)? else {
         return Ok(empty_watermarks());
     };
@@ -379,13 +386,26 @@ pub fn read_watermarks(data_root: &Path, source: &Token, product: &Token) -> Res
 
     // Read the projection position first to avoid comparing a new projector cursor to
     // an older WAL checkpoint during concurrent commits.
-    let projected_path = data_root
-        .join("finance-state/market-projection")
-        .join(source.as_str())
-        .join(product.as_str())
-        .join("watermark.json");
-    let projected = read_json::<ProjectionWatermark>(&projected_path)?
-        .map_or(0, |mark| mark.projected_through.get());
+    let mut projected = 0;
+    if let Some(path) = projected_path {
+        match open(
+            path,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => {
+                let file = File::from(fd);
+                ensure!(
+                    file.metadata()?.is_file(),
+                    "projection watermark must be a regular file"
+                );
+                let mark: ProjectionWatermark = serde_json::from_reader(BufReader::new(file))?;
+                projected = mark.projected_through.get();
+            }
+            Err(Errno::NOENT) => (),
+            Err(error) => return Err(error.into()),
+        }
+    }
     let reader = WalReader::open(&wal_root(data_root), source.as_str(), product.as_str())?;
     let durable = reader.durable_position();
     ensure!(
