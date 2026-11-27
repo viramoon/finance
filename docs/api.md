@@ -130,9 +130,9 @@ finance-api 读取现有 `FERTILE_DATA_ROOT` 下的 `finance-state/bars/v1/<sour
 | `/market/binance/status` | 无 | `BinanceReadStatus`。禁用或 profile 文件缺失时为 `disabled_by_profile`、`products: []`。启用时为 `enabled_by_profile` 及配置中各产品的 `ProductPolicy`。配置无法读取或校验时返回 `500 / binance_profile_invalid`。 |
 | `/market/book` | `symbol` 为 QQQ、AAPL、MSFT、NVDA、AMZN、GOOGL、META、TSLA | `DepthBook`。Nasdaq TotalView 的具体场所、L1/TotalView/EDS 确认状态、请求和返回档数、同步状态及精确价量。 |
 | `/market/subscriptions` | 无 | `SubscriptionBudget`。账户上限、预留、各池实际占用、确认数、观察数和发现状态。 |
-| `/market/subscriptions/coverage` | 正整数 OPRA `con_id`，UTC RFC3339 的 `start`、`end` | `SubscriptionCoverage`。半开区间内的 `covered`、`uncovered`、`unknown`，以及最近一次观察时间。未知合约在有效区间内返回 `unknown`。 |
-| `/options/chain` | 正整数 `underlying_con_id`，可选 `expiry`（YYYY-MM-DD）、排他游标 `after_con_id` 和 `limit` | `OptionChainPage`。返回已确认未过期的合约、乘数与执行价等，按 `con_id` 升序。每页默认 100 条，最大 500 条，`next_after_con_id: null` 表示查询到末页。 |
-| `/options/exposure` | F1 `underlying_id`，可选 UTC RFC3339 `as_of` 和 `scenario` | `OptionExposureResponse` 包装 `ExposureReport`，包含情景、估值时点、`all`、`zero_dte`、`later` 的 GEX、wall、flip 和 `ExposureCoverage`。默认 `absolute`，另有 `dealer_short`、`dealer_long` 和 `call_long_put_short`。 |
+| `/market/subscriptions/coverage` | 正整数 OPRA `con_id`，UTC RFC3339 的 `start`、`end` | `SubscriptionCoverage`。半开区间内的 `covered`、`uncovered`、`unknown`，以及最近一次观察时间。未知合约在有效区间内返回 `unknown`。报告键须匹配所查合约和带 OI 的共享 OPRA 行。 |
+| `/options/chain` | 正整数 `underlying_con_id`，可选 `expiry`（YYYY-MM-DD）、排他游标 `after_con_id` 和 `limit` | `OptionChainPage`。返回已确认未过期的合约、乘数与执行价等，按 `con_id` 升序。API 在分页前排除早于候选集 `as_of` 对应美东日期的到期日，保留当日到期合约。每页默认 100 条，最大 500 条，`next_after_con_id: null` 表示查询到末页。 |
+| `/options/exposure` | F1 `underlying_id`，可选 UTC RFC3339 `as_of` 和 `scenario` | `OptionExposureResponse` 包装 `ExposureReport`，包含情景、估值时点、`all`、`zero_dte`、`later` 的 GEX、wall、`GammaFlip` 和 `ExposureCoverage`。默认 `absolute`，另有 `dealer_short`、`dealer_long` 和 `call_long_put_short`。 |
 | `/options/history` | 正整数 `underlying_con_id`，UTC Unix 纳秒字符串 `start`、`end`，可选 `offset`、`limit` | `OptionHistoryPage`。每个 `HistoricalOptionResult` 保留 `available`、`no_bars`、`expired` 或 `request_failed`，可用时附一分钟 `OptionMinuteBar`（F1 `ClosedBar` 外加 `close_ts`）。按已发布批次的合约顺序分页，默认 20 条，最多 50 条，`next_offset: null` 表示末页。 |
 
 Binance profile 状态是配置意图。启用后的采集进程状态仍由 F4 日志报告。行情正文通过 F3 的 `/market/products`、`/market/wal`、`/market/projection/latest`、`/market/watermarks` 和 `/quality/gaps` 读取，`source=binance`，`product` 依次可选 `spot`、`usdt-perp`、`usdt-perp-context`。读取仍受 F3 已登记的记录许可约束。永续上下文用 v2.0 的 `funding_rate` 和 `open_interest`。策略状态包含许可元数据，仅展示品种的行情正文留在内存。相关标识与降级行为见 [Binance 公共行情](integrations/binance.md)。
@@ -149,7 +149,7 @@ IBKR 响应的 `access` 是 API 的显示用途许可，来源为 `ibkr`，产�
 - 场所深度将 `run_depth` 的显示回调交给 `DepthFrames::publish`，包括 reset、inactive 和冷启动空簿。
 - 敞口由 `ExposureSource` 查找估值快照、时序阈值和可选价格网格，计算走 F9d 的 `evaluate`。历史由 `HistorySource` 查找 F12 的 `ContractHistory` 结果。两个查找接口读取内存，由所有者提供生命周期与留存策略。
 
-数据源未接入时返回 `503 / market_read_source_unavailable`；数据源已接入但深度、估值或历史窗口不可用时返回 `404 / market_read_not_found`。查询参数无效返回 `400 / market_read_query_invalid`，数据源返回不匹配结果或估值失败返回 `500 / market_read_failed`。IBKR 响应和敞口计算结果只在进程内与授权的私有请求中使用。F9e 的期权流观察与逐笔证据、页面焦点写接口和行情所有者的部署接线留待后续集成。本批复用 F1/F3 数据通道与既有 WS/SSE 导出。
+数据源未接入时返回 `503 / market_read_source_unavailable`。数据源已接入但深度、估值或历史窗口不可用时返回 `404 / market_read_not_found`。查询参数无效返回 `400 / market_read_query_invalid`。覆盖键、估值快照键或历史标的和窗口与请求不匹配，链快照时钟无法转换为美东日期，或估值计算失败时，返回 `500 / market_read_failed` 和固定消息 `Could not read market data`，省略底层详情。IBKR 响应和敞口计算结果只在进程内与授权的私有请求中使用。F9e 的期权流观察与逐笔证据、页面焦点写接口和行情所有者的部署接线留待后续集成。本批复用 F1/F3 数据通道与既有 WS/SSE 导出。
 
 ## 示例批任务
 

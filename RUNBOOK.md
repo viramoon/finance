@@ -77,6 +77,8 @@ cargo test --locked --offline -p finance-api --test bars --test market_options -
 
 若 `/api/v1/market/binance/status` 返回 `disabled_by_profile`，核对 API 的 `FINANCE_BINANCE_CONFIG` 和 `FERTILE_PROFILE`。若配置已启用，采集端实际状态查看独立日志，数据持久进度查看 F3 水位。独立 API 的期权查询返回 `market_read_source_unavailable` 时，检查部署是否接入获准的共享行情所有者。接入后，深度的 `permission_unconfirmed` 表示须核对 L1、TotalView 和 EDS，`reset` 时清空两侧。历史窗口 404 时核对所有者取得的窗口，`expired` 表示该合约在 F12 读取时已不可得。[第三批接口与权限](docs/api.md#第三批读契约)
 
+排查期权链时，按快照 `as_of` 的美东日期核对到期日。订阅覆盖返回 `500 / market_read_failed` 时，在行情所有者侧核对响应键的 `con_id`、OPRA 产品和 OI 请求参数。
+
 ## 离线因子研究验收
 
 在仓库根目录用含研究依赖的现有 Python 环境执行。定向测试在内存生成截面和收盘价，月频登记读取仓库内原报告并核对证据哈希。

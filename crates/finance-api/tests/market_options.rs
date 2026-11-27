@@ -29,7 +29,7 @@ use finance_ib::{
 };
 use finance_market_protocol::{Capability, Event, Instrument, decode_json};
 use serde_json::{Value, json};
-use std::{fs, path::Path, sync::Arc};
+use std::{fs, path::Path, process::Command, sync::Arc};
 use tower::ServiceExt;
 use utoipa::OpenApi;
 
@@ -74,6 +74,13 @@ fn assert_private_access(body: &Value, product: &str) {
             "source": "ibkr", "product": product, "license": LICENSE, "display_live": true,
             "record_local": false, "derive_non_display": false, "backup_personal_drive": false
         })
+    );
+}
+
+fn assert_market_read_failed(body: Value) {
+    assert_eq!(
+        body,
+        json!({"error": {"code": "market_read_failed", "message": "Could not read market data"}})
     );
 }
 
@@ -208,7 +215,19 @@ async fn binance_context_uses_f3_for_licensed_events_and_preserves_max_sequence(
 }
 
 // Fixed synthetic IDs, expiry dates, strike and observation intervals.
-struct ReplayLines;
+struct ReplayLines {
+    as_of: DateTime<Utc>,
+    coverage_key: Option<RequestKey>,
+}
+
+impl Default for ReplayLines {
+    fn default() -> Self {
+        Self {
+            as_of: AS_OF.parse().unwrap(),
+            coverage_key: None,
+        }
+    }
+}
 
 impl OptionLineSource for ReplayLines {
     fn option_chain(&self) -> (DateTime<Utc>, bool, Vec<ConfirmedContract>) {
@@ -216,6 +235,8 @@ impl OptionLineSource for ReplayLines {
             (29, 8, "2025-03-14"),
             (23, 9, "2025-03-07"),
             (20, 8, "2025-03-07"),
+            (19, 8, "2025-03-06"),
+            (31, 8, "2025-03-06"),
         ]
         .map(|(con_id, underlying_con_id, expiry)| ConfirmedContract {
             con_id,
@@ -230,13 +251,13 @@ impl OptionLineSource for ReplayLines {
             }),
             liquid_hours: Vec::new(),
         });
-        (AS_OF.parse().unwrap(), false, contracts.to_vec())
+        (self.as_of, false, contracts.to_vec())
     }
 
     fn status(&self) -> BudgetStatus {
         BudgetStatus {
             phase: SchedulerPhase::Online,
-            as_of: AS_OF.parse().unwrap(),
+            as_of: self.as_of,
             account_lines: 100,
             reserve_lines: 30,
             stock_lines: 9,
@@ -255,19 +276,19 @@ impl OptionLineSource for ReplayLines {
         end: DateTime<Utc>,
     ) -> Option<CoverageReport> {
         assert_eq!(con_id, 20);
-        if end > AS_OF.parse::<DateTime<Utc>>().unwrap() {
+        if end > self.as_of {
             return None;
         }
         let first = start + chrono::TimeDelta::seconds(30);
         let last = end - chrono::TimeDelta::seconds(30);
         Some(CoverageReport {
-            key: RequestKey {
+            key: self.coverage_key.unwrap_or(RequestKey {
                 con_id,
                 product: Product::Opra,
                 parameters: RequestParameters {
                     option_open_interest: true,
                 },
-            },
+            }),
             last_observed_at: Some(last),
             unknown: vec![CoverageInterval { start, end: first }],
             covered: vec![CoverageInterval {
@@ -285,7 +306,9 @@ async fn option_chain_filters_and_pages_and_budget_preserves_coverage() {
     let app = app(
         root.path(),
         MarketReadSources {
-            option_lines: Some(licensed::<Arc<dyn OptionLineSource>>(Arc::new(ReplayLines))),
+            option_lines: Some(licensed::<Arc<dyn OptionLineSource>>(Arc::new(
+                ReplayLines::default(),
+            ))),
             ..Default::default()
         },
     );
@@ -341,6 +364,107 @@ async fn option_chain_filters_and_pages_and_budget_preserves_coverage() {
     );
     assert_eq!(coverage["last_observed_at"], "2025-03-07T16:01:30Z");
     get(&app, "/api/v1/market/subscriptions/coverage?con_id=20&start=2025-03-07T16:00:00Z&end=2025-03-07T16:03:00Z", StatusCode::BAD_REQUEST).await;
+}
+
+#[tokio::test]
+async fn custom_option_chain_filters_expiry_at_eastern_midnight() {
+    let root = tempfile::tempdir().unwrap();
+    let path = "/api/v1/options/chain?underlying_con_id=8&expiry=2025-03-06";
+    // In March before daylight saving starts, Eastern midnight is 05:00 UTC.
+    for (as_of, expected) in [
+        ("2025-03-07T04:59:59Z", json!([19, 31])),
+        ("2025-03-07T05:00:00Z", json!([])),
+    ] {
+        let lines = ReplayLines {
+            as_of: as_of.parse().unwrap(),
+            ..Default::default()
+        };
+        let app = app(
+            root.path(),
+            MarketReadSources {
+                option_lines: Some(licensed::<Arc<dyn OptionLineSource>>(Arc::new(lines))),
+                ..Default::default()
+            },
+        );
+        let body = get(&app, path, StatusCode::OK).await;
+        let ids: Vec<_> = body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["con_id"].clone())
+            .collect();
+        assert_eq!(json!(ids), expected, "{as_of}");
+        assert_eq!(body["next_after_con_id"], Value::Null);
+    }
+}
+
+#[tokio::test]
+async fn option_coverage_rejects_mismatched_opra_keys_without_details() {
+    let root = tempfile::tempdir().unwrap();
+    let requested = RequestKey {
+        con_id: 20,
+        product: Product::Opra,
+        parameters: RequestParameters {
+            option_open_interest: true,
+        },
+    };
+    for key in [
+        RequestKey {
+            con_id: 21,
+            ..requested
+        },
+        RequestKey {
+            product: Product::EquityL1,
+            ..requested
+        },
+        RequestKey {
+            parameters: RequestParameters::default(),
+            ..requested
+        },
+    ] {
+        let lines = ReplayLines {
+            coverage_key: Some(key),
+            ..Default::default()
+        };
+        let app = app(
+            root.path(),
+            MarketReadSources {
+                option_lines: Some(licensed::<Arc<dyn OptionLineSource>>(Arc::new(lines))),
+                ..Default::default()
+            },
+        );
+        let response = get(
+            &app,
+            "/api/v1/market/subscriptions/coverage?con_id=20&start=2025-03-07T16:00:00Z&end=2025-03-07T16:02:00Z",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .await;
+        assert_market_read_failed(response);
+    }
+}
+
+#[tokio::test]
+async fn option_chain_rejects_an_unrepresentable_source_clock() {
+    let root = tempfile::tempdir().unwrap();
+    let lines = ReplayLines {
+        as_of: DateTime::<Utc>::MAX_UTC,
+        ..Default::default()
+    };
+    let app = app(
+        root.path(),
+        MarketReadSources {
+            option_lines: Some(licensed::<Arc<dyn OptionLineSource>>(Arc::new(lines))),
+            ..Default::default()
+        },
+    );
+    assert_market_read_failed(
+        get(
+            &app,
+            "/api/v1/options/chain?underlying_con_id=8",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .await,
+    );
 }
 
 #[tokio::test]
@@ -537,6 +661,177 @@ async fn exposure_uses_f9d_scenarios_walls_coverage_and_exact_valuation() {
     assert!(fs::read_dir(root.path()).unwrap().next().is_none());
 }
 
+fn exposure_with_gamma_grid() -> ExposureInput {
+    // With equal observed gamma and OI, C - P is zero at the valuation spot.
+    // The synthetic revaluation grid has signs -, 0, +, +, - under C - P.
+    let options = [
+        (
+            "SYNTH-C.OPRA",
+            "call",
+            ["0.01", "0.02", "0.04", "0.04", "0.01"],
+        ),
+        (
+            "SYNTH-P.OPRA",
+            "put",
+            ["0.03", "0.02", "0.02", "0.02", "0.03"],
+        ),
+    ];
+    let contracts = options.map(|(id, right, _)| {
+        json!({
+            "instrument_id": id, "right": right, "expiry": "2025-03-07", "strike": "100",
+            "multiplier": "100", "gamma": {"value": "0.02", "observed_at": AS_OF},
+            "open_interest": {"value": "1", "observed_at": AS_OF, "business_date": null}
+        })
+    });
+    let grid_rows = options.map(|(id, _, gammas)| {
+        json!({
+            "instrument_id": id, "implied_volatility": "0.2500", "gammas": gammas
+        })
+    });
+    ExposureInput {
+        chain: serde_json::from_value(json!({
+            "underlying_id": "SYNTH.XNAS", "as_of": AS_OF, "session_date": "2025-03-07",
+            "spot": {"value": "100", "observed_at": AS_OF}, "universe_complete": true,
+            "contracts": contracts
+        }))
+        .unwrap(),
+        timing: TimingPolicy {
+            max_spot_age_seconds: 120,
+            max_gamma_age_seconds: 120,
+            max_spot_gamma_skew_seconds: 120,
+        },
+        gamma_grid: Some(
+            serde_json::from_value(json!({
+                "as_of": AS_OF, "model": "synthetic spot gamma grid",
+                "annual_risk_free_rate": "0.0375", "annual_dividend_yield": "0.0125",
+                "spots": ["90.0", "100.0", "110.0", "120.0", "130.0"], "contracts": grid_rows
+            }))
+            .unwrap(),
+        ),
+    }
+}
+
+#[tokio::test]
+async fn exposure_http_preserves_grid_crossings_no_flip_and_provenance() {
+    let root = tempfile::tempdir().unwrap();
+    let input = Arc::new(exposure_with_gamma_grid());
+    let source: Arc<ExposureSource> = Arc::new(move |_, _| Some(input.clone()));
+    let app = app(
+        root.path(),
+        MarketReadSources {
+            exposure: Some(licensed(source)),
+            ..Default::default()
+        },
+    );
+    let path = "/api/v1/options/exposure?underlying_id=SYNTH.XNAS";
+    let crossed = get(
+        &app,
+        &format!("{path}&scenario=call_long_put_short"),
+        StatusCode::OK,
+    )
+    .await;
+    let no_flip = get(
+        &app,
+        &format!("{path}&scenario=dealer_short"),
+        StatusCode::OK,
+    )
+    .await;
+    assert_private_access(&crossed, "opra");
+    assert_private_access(&no_flip, "opra");
+    let crossings = json!({
+        "status": "crossings",
+        "crossings": [
+            {"lower_spot": "100.0", "upper_spot": "100.0"},
+            {"lower_spot": "120.0", "upper_spot": "130.0"}
+        ],
+    });
+    for view in ["all", "zero_dte"] {
+        assert_eq!(crossed["report"][view]["flip"], crossings);
+        assert_eq!(
+            no_flip["report"][view]["flip"],
+            json!({"status": "no_flip"})
+        );
+    }
+    assert_eq!(
+        crossed["report"]["later"]["flip"],
+        json!({
+            "status": "unavailable", "reason": "no_eligible_contracts"
+        })
+    );
+    assert_eq!(
+        crossed["report"]["gamma_grid"],
+        json!({
+            "as_of": AS_OF, "model": "synthetic spot gamma grid",
+            "annual_risk_free_rate": "0.0375", "annual_dividend_yield": "0.0125",
+            "spots": ["90.0", "100.0", "110.0", "120.0", "130.0"],
+            "implied_volatilities": [
+                {"instrument_id": "SYNTH-C.OPRA", "implied_volatility": "0.2500"},
+                {"instrument_id": "SYNTH-P.OPRA", "implied_volatility": "0.2500"}
+            ]
+        })
+    );
+    assert_eq!(
+        no_flip["report"]["gamma_grid"],
+        crossed["report"]["gamma_grid"]
+    );
+}
+
+#[tokio::test]
+async fn exposure_and_history_mismatches_return_only_the_public_error() {
+    let root = tempfile::tempdir().unwrap();
+    let input = Arc::new(exposure_with_gamma_grid());
+    // Invalid strike errors contain a contract ID in the underlying calculation.
+    let mut invalid = exposure_with_gamma_grid();
+    invalid.chain.underlying_id = "SYNTH-INVALID.XNAS".parse().unwrap();
+    invalid.chain.contracts[0].instrument_id = "SYNTH-PRIVATE-CONTRACT.OPRA".parse().unwrap();
+    invalid.chain.contracts[0].strike = "0".parse().unwrap();
+    let invalid = Arc::new(invalid);
+    let exposure: Arc<ExposureSource> = Arc::new(move |id, _| {
+        let snapshot = if id == &invalid.chain.underlying_id {
+            &invalid
+        } else {
+            &input
+        };
+        Some(snapshot.clone())
+    });
+    let batch = Arc::new(HistoryInput {
+        underlying_con_id: 8,
+        window: BarWindow {
+            start: START.into(),
+            end: (START + MINUTE).into(),
+        },
+        as_of: AS_OF.parse().unwrap(),
+        contracts: vec![ContractHistory {
+            instrument_id: "SYNTH-PRIVATE-HISTORY.OPRA".parse().unwrap(),
+            bars: Err(std::io::Error::other("synthetic private provider detail").into()),
+        }],
+    });
+    let history: Arc<HistorySource> = Arc::new(move |_, _| Some(batch.clone()));
+    let app = app(
+        root.path(),
+        MarketReadSources {
+            exposure: Some(licensed(exposure)),
+            history: Some(licensed(history)),
+            ..Default::default()
+        },
+    );
+    for path in [
+        "/api/v1/options/exposure?underlying_id=OTHER.XNAS",
+        "/api/v1/options/exposure?underlying_id=SYNTH.XNAS&as_of=2025-03-07T16:02:01Z",
+        "/api/v1/options/exposure?underlying_id=SYNTH-INVALID.XNAS",
+        &format!(
+            "/api/v1/options/history?underlying_con_id=9&start={START}&end={}",
+            START + MINUTE
+        ),
+        &format!(
+            "/api/v1/options/history?underlying_con_id=8&start={START}&end={}",
+            START + 2 * MINUTE
+        ),
+    ] {
+        assert_market_read_failed(get(&app, path, StatusCode::INTERNAL_SERVER_ERROR).await);
+    }
+}
+
 #[tokio::test]
 async fn historical_chain_retains_f12_outcomes_and_exact_nanosecond_and_decimal_text() {
     let root = tempfile::tempdir().unwrap();
@@ -705,4 +1000,79 @@ fn batch3_openapi_matches_routes_and_typed_schemas() {
     assert_eq!(end["schema"]["type"], "string");
     assert!(end["schema"]["pattern"].as_str().is_some());
     assert!(spec["paths"].get("/api/v1/options/flow").is_none());
+}
+
+#[test]
+fn batch3_openapi_exports_flip_variants_and_market_read_errors() {
+    let output = Command::new(env!("CARGO_BIN_EXE_finance-api"))
+        .arg("export-openapi")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let spec: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let schemas = &spec["components"]["schemas"];
+    assert_eq!(
+        schemas["ExposureView"]["properties"]["flip"]["$ref"],
+        "#/components/schemas/GammaFlip"
+    );
+    let variants = schemas["GammaFlip"]["oneOf"].as_array().unwrap();
+    assert_eq!(variants.len(), 3);
+    let variant = |status| {
+        variants
+            .iter()
+            .find(|variant| variant["properties"]["status"]["enum"] == json!([status]))
+            .unwrap()
+    };
+    assert_eq!(variant("no_flip")["required"], json!(["status"]));
+    assert_eq!(
+        variant("no_flip")["properties"].as_object().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        variant("unavailable")["required"],
+        json!(["reason", "status"])
+    );
+    let crossings = variant("crossings");
+    assert_eq!(crossings["required"], json!(["crossings", "status"]));
+    assert_eq!(crossings["properties"]["crossings"]["type"], "array");
+    assert_eq!(
+        crossings["properties"]["crossings"]["items"]["$ref"],
+        "#/components/schemas/FlipCrossing"
+    );
+    assert_eq!(
+        schemas["FlipCrossing"]["required"],
+        json!(["lower_spot", "upper_spot"])
+    );
+    for bound in ["lower_spot", "upper_spot"] {
+        assert_eq!(
+            schemas["FlipCrossing"]["properties"][bound]["$ref"],
+            "#/components/schemas/DecimalText"
+        );
+    }
+
+    for path in [
+        "/api/v1/market/subscriptions/coverage",
+        "/api/v1/options/chain",
+        "/api/v1/options/exposure",
+        "/api/v1/options/history",
+    ] {
+        assert_eq!(
+            spec["paths"][path]["get"]["responses"]["500"]["content"]["application/json"]["schema"]
+                ["$ref"],
+            "#/components/schemas/ErrorBody",
+            "{path}"
+        );
+    }
+    assert_eq!(schemas["ErrorBody"]["required"], json!(["error"]));
+    assert_eq!(
+        schemas["ErrorBody"]["properties"]["error"]["$ref"],
+        "#/components/schemas/ErrorDetail"
+    );
+    assert_eq!(
+        schemas["ErrorDetail"]["required"],
+        json!(["code", "message"])
+    );
+    for key in ["code", "message"] {
+        assert_eq!(schemas["ErrorDetail"]["properties"][key]["type"], "string");
+    }
 }

@@ -1,4 +1,4 @@
-use super::{OPRA, ReadSources, invalid, parse, unavailable};
+use super::{OPRA, ReadSources, failed, invalid, parse, unavailable};
 use crate::{ApiError, ErrorBody};
 use axum::{
     Json,
@@ -9,15 +9,20 @@ use finance_collector::{
     line_budget::{BudgetStatus, CoverageInterval, CoverageReport, LineHandle, SchedulerPhase},
     market_ingress::ProductPolicy,
 };
-use finance_ib::market::{ConfirmedContract, ContractKind, OptionRight};
+use finance_ib::market::{
+    ConfirmedContract, ContractKind, OptionRight, Product, option_market_date,
+};
 use finance_market_protocol::DecimalText;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
 /// Read the existing scheduler without opening, cancelling or rotating a line.
 pub trait OptionLineSource: Send + Sync {
+    /// Confirmed contracts and the clock for this roster. HTTP filters expiry
+    /// against the Eastern date of this clock before serving the page.
     fn option_chain(&self) -> (DateTime<Utc>, bool, Vec<ConfirmedContract>);
     fn status(&self) -> BudgetStatus;
+    /// Coverage for the requested conId on the shared OPRA line with OI enabled.
     fn option_coverage(
         &self,
         con_id: i32,
@@ -77,11 +82,16 @@ struct OptionChainContract {
 }
 
 impl OptionChainContract {
-    fn for_underlying(contract: ConfirmedContract, query: &OptionChainQuery) -> Option<Self> {
+    fn for_underlying(
+        contract: ConfirmedContract,
+        query: &OptionChainQuery,
+        market_date: NaiveDate,
+    ) -> Option<Self> {
         let ContractKind::Option(option) = contract.kind else {
             return None;
         };
-        if option.underlying_con_id != query.underlying_con_id
+        if option.expiry < market_date
+            || option.underlying_con_id != query.underlying_con_id
             || query.expiry.is_some_and(|date| date != option.expiry)
             || query
                 .after_con_id
@@ -120,6 +130,7 @@ pub(crate) struct OptionChainPage {
     responses(
         (status = 200, body = OptionChainPage),
         (status = 400, body = ErrorBody),
+        (status = 500, body = ErrorBody),
         (status = 503, body = ErrorBody)
     )
 )]
@@ -137,10 +148,11 @@ pub(crate) async fn chain(
     }
     let lines = sources.option_lines.as_ref().ok_or_else(unavailable)?;
     let (as_of, discovery_complete, mut contracts) = lines.source.option_chain();
+    let market_date = option_market_date(as_of).map_err(|_| failed())?;
     contracts.sort_unstable_by_key(|contract| contract.con_id);
     let mut matching = contracts
         .into_iter()
-        .filter_map(|contract| OptionChainContract::for_underlying(contract, &query));
+        .filter_map(|contract| OptionChainContract::for_underlying(contract, &query, market_date));
     let items: Vec<_> = matching.by_ref().take(limit).collect();
     let next_after_con_id = if matching.next().is_some() {
         items.last().map(|item| item.con_id)
@@ -261,6 +273,7 @@ pub(crate) struct SubscriptionCoverage {
     responses(
         (status = 200, body = SubscriptionCoverage),
         (status = 400, body = ErrorBody),
+        (status = 500, body = ErrorBody),
         (status = 503, body = ErrorBody)
     )
 )]
@@ -277,9 +290,15 @@ pub(crate) async fn coverage(
         .source
         .option_coverage(query.con_id, query.start, query.end)
         .ok_or_else(invalid)?;
+    if report.key.con_id != query.con_id
+        || report.key.product != Product::Opra
+        || !report.key.parameters.option_open_interest
+    {
+        return Err(failed());
+    }
     Ok(Json(SubscriptionCoverage {
         access: lines.access(OPRA),
-        con_id: report.key.con_id,
+        con_id: query.con_id,
         last_observed_at: report.last_observed_at,
         covered: report.covered.into_iter().map(Into::into).collect(),
         uncovered: report.uncovered.into_iter().map(Into::into).collect(),
