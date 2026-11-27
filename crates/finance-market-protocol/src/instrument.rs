@@ -107,6 +107,8 @@ wire_enum! {
         Snapshot = "snapshot",
         Delta = "delta",
         PerpetualContext = "perpetual_context",
+        OptionHistoryTrade = "option_history_trade",
+        OptionHistoryQuote = "option_history_quote",
     }
 }
 
@@ -124,7 +126,7 @@ wire_object! {
         pub schema_version: SchemaVersion,
         pub source: Token,
         pub product: Token,
-        #[schema(min_items = 1, max_items = 5)]
+        #[schema(min_items = 1, max_items = 7)]
         pub message_kinds: Vec<MarketKind>,
         #[schema(maximum = 4294967295u32)]
         pub max_depth: u32,
@@ -136,10 +138,24 @@ wire_object! {
 
 impl Capability {
     pub fn validate(&self) -> Result<(), ValidationError> {
+        let context = self.message_kinds.contains(&MarketKind::PerpetualContext);
+        let history = self
+            .message_kinds
+            .iter()
+            .any(|kind| kind.is_option_history());
         require_schema_version(
-            (self.schema_version == SchemaVersion::V2)
-                == self.message_kinds.contains(&MarketKind::PerpetualContext),
-            "capability uses version 2.0 exactly when it supports perpetual_context",
+            match self.schema_version {
+                SchemaVersion::V1 => !context && !history,
+                SchemaVersion::V2 => context && !history,
+                SchemaVersion::V3 => {
+                    history
+                        && self
+                            .message_kinds
+                            .iter()
+                            .all(|kind| kind.is_option_history())
+                }
+            },
+            "capability version must match its market message kinds (2.0 for perpetual_context, 3.0 for option history)",
         )?;
         require(
             !self.message_kinds.is_empty(),
@@ -160,5 +176,11 @@ impl Capability {
             "max_depth",
             "must be positive for snapshot/delta products and zero for other products",
         )
+    }
+}
+
+impl MarketKind {
+    pub(crate) fn is_option_history(self) -> bool {
+        matches!(self, Self::OptionHistoryTrade | Self::OptionHistoryQuote)
     }
 }

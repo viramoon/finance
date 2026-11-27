@@ -103,6 +103,18 @@ PYTHONPATH=python python -m unittest discover -s tests -p test_market_protocol.p
 cargo run --locked --offline -q -p finance-market-protocol --bin export-market-protocol -- protocol/v2 --v2
 ```
 
+### v3.0 期权历史证据
+
+`option_history_trade` 记录原始价格、张数、合约乘数、成交场所、条件码及映射版本。`option_history_quote` 记录报价、数量和供应商标记，缺值使用 `null`。两者都保留历史请求页号、请求起点、可用的请求 ID 和完整秒内的位置。`exchange_ts` 为 UTC 源秒对应的纳秒整数，`receive_ts` 为取得回调的 UTC 纳秒。请求 ID 的使用范围限同一 Gateway 会话，秒内位置用于区分重复成交。事件内交易数值用十进制字符串，批次位置用无符号十进制字符串。
+
+版本 3.0 的能力只声明上述历史证据种类，标的和 reset 仍使用版本 1.0。既有 v1 WS 和 SSE 继续使用各自的 v1 模式。业务核验结果通过 [期权流接口](option-flow.md) 返回。
+
+生成 [事件 schema](../protocol/v3/event.schema.json)、[能力 schema](../protocol/v3/capability.schema.json) 与 [固定合成样本](../protocol/v3/examples.json)。
+
+```sh
+cargo run --locked --offline -q -p finance-market-protocol --bin export-market-protocol -- protocol/v3 --v3
+```
+
 接口与恢复规则见 [Hyperliquid](integrations/hyperliquid.md) 及 [ADR-0034](adr/ADR-0034-hyperliquid-context-stream.md)。
 
 ## 首批读契约的 WS 与 SSE 消息

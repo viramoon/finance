@@ -104,6 +104,18 @@ class MarketProjectionTests(unittest.TestCase):
         self.assertEqual(table["seq"].to_pylist(), [2**64 - 2, 2**64 - 1])
         self.assertEqual(self.latest(second), second)
 
+    def test_option_history_raw_quotes_and_trades_keep_evidence_and_index(self):
+        path = _EXAMPLES.parents[1] / "v3" / "examples.json"
+        examples = json.loads(path.read_text(encoding="utf-8"))
+        quote, trade = [Event.from_dict(event) for event in examples["events"]]
+        self.product = (trade.source, trade.product)
+        self.assertEqual(self.project(MemoryWal(quote, trade)), 2)
+        partition, = self.partitions()
+        rows = pq.ParquetFile(partition.path).read().to_pylist()
+        self.assertEqual([json.loads(row["event_json"]) for row in rows], examples["events"])
+        self.assertEqual(self.latest(trade), trade)
+        self.assertEqual(self.latest(quote), quote)
+
     def test_retry_after_parquet_publish_keeps_original_range_on_a_growing_wal(self):
         wal = MemoryWal(self.first, self.second)
         publish = market_projector._publish_parquet

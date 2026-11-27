@@ -19,6 +19,12 @@
       "seed": "fixed",
       "source": "固定合成深度行用于隔离子进程展示。既有 v1/examples.json 的合成盘口快照用于同数据根 WAL 写入对照。用 sh scripts/export-totalview-review-sources.sh 从当前提交导出测试源码。"
     },
+    "crates/finance-collector/src/option_flow/observation/tests.rs": {
+      "sha256": "88698ded58c1029e038b02c479a1ea9ee34303dfd65f5d0abcd0309299d53bf2",
+      "generator": "scripts/export-ib-review-sources.sh",
+      "seed": "fixed",
+      "source": "固定虚拟会话、行情时钟、价量和轮换回调用于内存观察测试。测试调用形状触发表格检查。用 sh scripts/export-ib-review-sources.sh 从当前检出提交导出测试源码。"
+    },
     "crates/finance-ib/src/depth/focus/tests.rs": {
       "sha256": "9f2474868520829c569a1a2450c218ce1ccb6725e807dba870d99d8cd4d0ca94",
       "generator": "scripts/export-totalview-review-sources.sh",
@@ -49,6 +55,12 @@
       "seed": "fixed",
       "source": "手工构造的 v2 永续上下文固定输入，包含虚构费率、未平仓量和标记价，由 export-market-protocol 的 --v2 模式校验。"
     },
+    "crates/finance-market-protocol/fixtures/examples-v3.input.json": {
+      "sha256": "1f37cea31d722be302285355923dd3e4443a121bb60eee8159854b2ce994e887",
+      "generator": "crates/finance-market-protocol/src/bin/export-market-protocol.rs",
+      "seed": "fixed",
+      "source": "固定构造的虚拟期权、价量、时钟、空条件及可空报价。由 export-market-protocol --v3 校验并用于导出。"
+    },
     "crates/finance-market-protocol/fixtures/examples.input.json": {
       "sha256": "b5abfc5b2ce37543e46c5a093b608aebb4873ac4714a6e616276dae37a2558a5",
       "generator": "crates/finance-market-protocol/src/bin/export-market-protocol.rs",
@@ -72,6 +84,12 @@
       "generator": "crates/finance-market-protocol/src/bin/export-market-protocol.rs",
       "seed": "fixed",
       "source": "以 examples-v2.input.json 为固定输入。运行 export-market-protocol OUTPUT --v2 复现。"
+    },
+    "protocol/v3/examples.json": {
+      "sha256": "51f183837fa8c5b5d2fb0c8e659f6bc5167b6fc2d73146f64c0e2e3b6908c4f4",
+      "generator": "crates/finance-market-protocol/src/bin/export-market-protocol.rs",
+      "seed": "fixed",
+      "source": "以 examples-v3.input.json 为固定输入，运行 export-market-protocol OUTPUT --v3 复现。"
     },
     "tests/fixtures/factor_returns.csv": {
       "sha256": "46f724d546bcac2421c83587fba281f2c33a2996fa0876a7c1f375c23541210b",

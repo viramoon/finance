@@ -73,43 +73,66 @@ pub fn event_schema_for_version(id: &str, version: SchemaVersion) -> Result<Valu
         .and_then(Value::as_array_mut)
         .ok_or("event schema is missing the message union")?
         .retain(|branch| {
-            let context = branch["properties"]["kind"]["enum"][0] == "perpetual_context";
-            context == (version == SchemaVersion::V2)
+            let kind = &branch["properties"]["kind"]["enum"][0];
+            let kind_version = if kind == "perpetual_context" {
+                SchemaVersion::V2
+            } else if kind == "option_history_trade" || kind == "option_history_quote" {
+                SchemaVersion::V3
+            } else {
+                SchemaVersion::V1
+            };
+            kind_version == version
         });
 
     let defs = root["$defs"]
         .as_object_mut()
         .ok_or("missing event definitions")?;
-    match version {
-        SchemaVersion::V1 => {
-            defs.remove("PerpetualContext");
-            defs["Message"]["description"] =
-                "The version 1.0 kind tag and its corresponding payload.".into();
+    if version != SchemaVersion::V3 {
+        for name in [
+            "OptionHistoryBatch",
+            "OptionHistoryQuote",
+            "OptionHistoryTrade",
+        ] {
+            defs.remove(name);
         }
-        SchemaVersion::V2 => {
-            for name in [
-                "AssetKind",
-                "BookDelta",
-                "BookLevel",
-                "BookSide",
-                "BookSnapshot",
-                "BookUpdate",
-                "ClosedBar",
-                "ConnectionState",
-                "Correction",
-                "Gap",
-                "Heartbeat",
-                "MarketMessage",
-                "Reset",
-                "Status",
-                "Trade",
-                "TradeSide",
-            ] {
-                defs.remove(name);
-            }
-            root["allOf"][1]["properties"]["asset_kind"] = json!({"const": "perpetual"});
-            root["allOf"][1]["properties"]["revision"] = json!({"const": "0"});
+    }
+    if version != SchemaVersion::V2 {
+        defs.remove("PerpetualContext");
+    }
+    if version == SchemaVersion::V1 {
+        defs["Message"]["description"] =
+            "The version 1.0 kind tag and its corresponding payload.".into();
+    } else {
+        for name in [
+            "AssetKind",
+            "BookDelta",
+            "BookLevel",
+            "BookSide",
+            "BookSnapshot",
+            "BookUpdate",
+            "ClosedBar",
+            "ConnectionState",
+            "Correction",
+            "Gap",
+            "Heartbeat",
+            "MarketMessage",
+            "Reset",
+            "Status",
+            "Trade",
+            "TradeSide",
+        ] {
+            defs.remove(name);
         }
+        let asset = if version == SchemaVersion::V2 {
+            "perpetual"
+        } else {
+            "option"
+        };
+        root["allOf"][1]["properties"]["asset_kind"] = json!({"const": asset});
+        root["allOf"][1]["properties"]["revision"] = json!({"const": "0"});
+    }
+    if version == SchemaVersion::V3 {
+        root["allOf"][1]["properties"]["exchange_ts"] = json!({"$ref": "#/$defs/U64Text"});
     }
     Ok(root)
 }

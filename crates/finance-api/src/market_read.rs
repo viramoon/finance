@@ -360,6 +360,8 @@ fn event_matches(query: &ProjectionQuery, matched: &ProjectionMatch, event: &Eve
         Message::Snapshot(_) => (event.epoch, event.seq, "snapshot"),
         Message::Delta(_) => (event.epoch, event.seq, "delta"),
         Message::PerpetualContext(_) => (event.epoch, event.seq, "perpetual_context"),
+        Message::OptionHistoryTrade(_) => (event.epoch, event.seq, "option_history_trade"),
+        Message::OptionHistoryQuote(_) => (event.epoch, event.seq, "option_history_quote"),
         Message::Correction(correction) => (
             correction.target_epoch,
             correction.target_seq,

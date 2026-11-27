@@ -178,6 +178,19 @@ impl LineHandle {
             .collect()
     }
 
+    /// Resolve metadata for a single current option without cloning the chain.
+    pub fn option_contract(&self, con_id: i32) -> Option<ConfirmedContract> {
+        let today = option_market_date(self.0.now()).ok()?;
+        self.0
+            .state
+            .lock()
+            .expect("line state")
+            .options
+            .get(&con_id)
+            .filter(|contract| unexpired(contract, today))
+            .cloned()
+    }
+
     pub fn coverage(
         &self,
         key: RequestKey,

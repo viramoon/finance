@@ -43,6 +43,7 @@ fertile 以 git submodule 引入 finance、web、frontend，agent 单独维护�
 - [本地行情 WAL、投影与封段接口](market-wal.md)
 - [统一指标与回放口径](indicators.md)
 - [期权 GEX、gamma wall、flip 与 0DTE 计算接口](option-exposure.md)
+- [期权流观察与历史核验](option-flow.md)
 - [StrategyBundle v1 配置与编译](strategy-bundle.md)
 - [离线因子评价与研究登记](factor-research.md)
 - [技术栈决策](adr/ADR-0001-tech-stack.md)

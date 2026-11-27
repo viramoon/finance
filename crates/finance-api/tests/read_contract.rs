@@ -206,7 +206,10 @@ fn openapi_cli_is_deterministic_and_resolves_read_contract_refs() {
     assert_eq!(schemas["U64Text"]["type"], "string");
     assert_eq!(schemas["Event"]["unevaluatedProperties"], false);
     assert_eq!(schemas["MarketMessage"]["unevaluatedProperties"], false);
-    assert_eq!(schemas["SchemaVersion"]["enum"], json!(["1.0", "2.0"]));
+    assert_eq!(
+        schemas["SchemaVersion"]["enum"],
+        json!(["1.0", "2.0", "3.0"])
+    );
     let event_version = schemas["Event"]["allOf"]
         .as_array()
         .unwrap()
@@ -216,7 +219,9 @@ fn openapi_cli_is_deterministic_and_resolves_read_contract_refs() {
         event_version["oneOf"][0]["properties"],
         json!({
             "schema_version": {"const": "1.0"},
-            "kind": {"not": {"const": "perpetual_context"}}
+            "kind": {"not": {"enum": [
+                "perpetual_context", "option_history_trade", "option_history_quote"
+            ]}}
         })
     );
     assert_eq!(
@@ -226,6 +231,16 @@ fn openapi_cli_is_deterministic_and_resolves_read_contract_refs() {
             "kind": {"const": "perpetual_context"},
             "asset_kind": {"const": "perpetual"},
             "revision": {"const": "0"}
+        })
+    );
+    assert_eq!(
+        event_version["oneOf"][2]["properties"],
+        json!({
+            "schema_version": {"const": "3.0"},
+            "kind": {"enum": ["option_history_trade", "option_history_quote"]},
+            "asset_kind": {"const": "option"},
+            "revision": {"const": "0"},
+            "exchange_ts": {"$ref": "#/components/schemas/U64Text"}
         })
     );
 }

@@ -28,7 +28,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             "/components/schemas/Event",
             "/components/schemas/MarketMessage",
         )?;
-        // REST reads both versions from the same WAL. The common envelope and
+        // REST reads versioned records from the WAL. The common envelope and
         // kind union alone do not express which version is valid for each kind.
         spec.pointer_mut("/components/schemas/Event/allOf")
             .and_then(Value::as_array_mut)
@@ -36,13 +36,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .push(json!({"oneOf": [
                 {"properties": {
                     "schema_version": {"const": SchemaVersion::V1},
-                    "kind": {"not": {"const": "perpetual_context"}}
+                    "kind": {"not": {"enum": [
+                        "perpetual_context", "option_history_trade", "option_history_quote"
+                    ]}}
                 }},
                 {"properties": {
                     "schema_version": {"const": SchemaVersion::V2},
                     "kind": {"const": "perpetual_context"},
                     "asset_kind": {"const": "perpetual"},
                     "revision": {"const": "0"}
+                }},
+                {"properties": {
+                    "schema_version": {"const": SchemaVersion::V3},
+                    "kind": {"enum": ["option_history_trade", "option_history_quote"]},
+                    "asset_kind": {"const": "option"},
+                    "revision": {"const": "0"},
+                    "exchange_ts": {"$ref": "#/components/schemas/U64Text"}
                 }}
             ]}));
         println!("{}", serde_json::to_string_pretty(&spec)?);

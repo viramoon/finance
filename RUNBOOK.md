@@ -104,6 +104,17 @@ scripts/finance-backtest-worker
 
 Replay 可单独运行。paper 模式下 probe 用 client ID 91，collector 用 92，93 预留给 trader，凭据由盒子上的 Gateway 读取。连接、补数、权限与 pacing 故障定位见 [IB 接入](docs/integrations/ib.md)，水位、精度和杀进程恢复见 [catalog](catalog/README.md)，worker 的资源限制、队列恢复及幂等请求见 [作业说明](docs/backtest-jobs.md)。部署守护从 fertile 的 runbook 进入。
 
+### 离线验收期权流观察与核验
+
+```sh
+cargo test --locked --offline -p finance-ib option_ticks
+cargo test --locked --offline -p finance-collector option_flow
+cargo test --locked --offline -p finance-market-protocol option_history
+PYTHONPATH=python "$FINANCE_PYTHON" -m unittest discover -s tests -p 'test_market_projector.py' -v
+```
+
+测试用固定合成合约、逐笔和时钟，在临时目录检查观察与核验计数、同秒重复成交、方向估计、权限分流和 F3 回放。调用方在经授权的私有运行中提供 OPRA L1 与历史逐笔各自的许可策略。历史源按 paper 只读配置显式接入。记录模式用 `finance-market-wal` 的 `watermarks` 和 `quality` 对 `ibkr/opra-history` 核对持久位置及逐笔缺口。遇到 pacing 或权限问题，按原因处理并保留未核验区间。到期不可回补的区间保留覆盖状态。相关接口、字段和上下游边界见 [期权流观察与历史核验](docs/option-flow.md)。
+
 ### 私有验证美股 L1 与 OPRA
 
 经授权后，在美股常规交易时段使用已登录的本机 paper Gateway，确认 Gateway 的 API 设置为只读。选择一份已知活跃的 SMART USD 美股期权，使用该合约的 `conId`，按 [产品权限验收](docs/integrations/ib.md#美股-l1-和-opra-权限验收) 运行 `scripts/check-ib-entitlements.sh`。权限探针占用现有 probe client ID 91，逐标的开一条流并在进入下一项前取消。`pending` 保留具体原因。遇到 `gateway_disconnected` 时，先恢复只读 paper 会话再重新运行探针。遇到 `cancel_failed` 时，本轮行数回收结果未知，探针关闭连接并保留已完成标的的证据。发现休市、无回调或报价不完整时，于常规交易时段复测。探针只输出脱敏摘要，原始行情和账户资料留在私有环境。

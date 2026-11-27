@@ -2,6 +2,8 @@
 
 [F1 事件协议](market-protocol.md) 的生产者可以把已授权事件交给 `finance_collector::market_ingress::MarketIngress`。每个 source/product 有自己的 WAL 和投影游标。[Hyperliquid](integrations/hyperliquid.md) 同时发布 v1.0 事件和 v2.0 永续上下文，投影在现有 `event_json` 列保留完整事件并索引原始位置。旧 `BarSource`、Nautilus bar catalog 和 [旧采集状态](../catalog/README.md) 继续使用原有路径。本接口供后续适配器、查询实现和 fertile 备份接入。
 
+[IBKR 历史期权流](option-flow.md) 通过相同入口发布 v3.0 原始逐笔证据。Parquet 与 SQLite 索引保留新种类及各自的流位置。
+
 ## 生产者与许可
 
 - `MarketIngress::open(data_root, policy)` 接受调用方从已审核配置解析出的 `ProductPolicy`。策略绑定 `source`、`product`、`license` 以及 `display_live`、`record_local`、`derive_non_display`、`backup_personal_drive` 四个布尔值。项目禁用再分发。落盘前须准备数据根，打开时策略与该产品的 WAL 根绑定。权限或许可范围变动时，协调方应停写、按许可处置已有归档并选择新的数据根，再启用新策略。

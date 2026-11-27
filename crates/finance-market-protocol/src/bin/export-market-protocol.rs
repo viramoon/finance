@@ -70,18 +70,32 @@ fn capability_schema(id: &str, version: SchemaVersion) -> Result<Value, Box<dyn 
         .and_then(Value::as_object_mut)
         .ok_or("capability schema is missing max_depth")?
         .remove("format");
+    let kinds = root["$defs"]["MarketKind"]["enum"]
+        .as_array_mut()
+        .ok_or("capability schema is missing market kinds")?;
+    kinds.retain(|kind| {
+        let history = kind == "option_history_trade" || kind == "option_history_quote";
+        match version {
+            SchemaVersion::V1 => !history && kind != "perpetual_context",
+            SchemaVersion::V2 => !history,
+            SchemaVersion::V3 => history,
+        }
+    });
     match version {
         SchemaVersion::V1 => {
-            root["$defs"]["MarketKind"]["enum"]
-                .as_array_mut()
-                .ok_or("capability schema is missing market kinds")?
-                .retain(|kind| kind != "perpetual_context");
             root["properties"]["message_kinds"]["maxItems"] = 4.into();
         }
         SchemaVersion::V2 => {
             root["$defs"]["MarketKind"]["description"] =
                 "Market data kinds a source/product can advertise in version 2.0.".into();
             root["properties"]["message_kinds"]["contains"] = json!({"const": "perpetual_context"});
+            root["properties"]["message_kinds"]["maxItems"] = 5.into();
+        }
+        SchemaVersion::V3 => {
+            root["$defs"]["MarketKind"]["description"] =
+                "Historical option evidence kinds a source/product can advertise.".into();
+            root["properties"]["message_kinds"]["maxItems"] = 2.into();
+            root["properties"]["max_depth"] = json!({"const": 0});
         }
     }
     Ok(root)
@@ -90,12 +104,13 @@ fn capability_schema(id: &str, version: SchemaVersion) -> Result<Value, Box<dyn 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = env::args_os().skip(1);
     let Some(directory) = args.next() else {
-        return Err("usage: export-market-protocol OUTPUT_DIRECTORY [--v2]".into());
+        return Err("usage: export-market-protocol OUTPUT_DIRECTORY [--v2 | --v3]".into());
     };
     let (version, wire_version) = match args.next() {
         None => (SchemaVersion::V1, "1.0"),
         Some(flag) if flag == "--v2" && args.next().is_none() => (SchemaVersion::V2, "2.0"),
-        _ => return Err("usage: export-market-protocol OUTPUT_DIRECTORY [--v2]".into()),
+        Some(flag) if flag == "--v3" && args.next().is_none() => (SchemaVersion::V3, "3.0"),
+        _ => return Err("usage: export-market-protocol OUTPUT_DIRECTORY [--v2 | --v3]".into()),
     };
     let id = |name| format!("urn:viramoon:finance:market-protocol:{wire_version}:{name}");
     let directory = PathBuf::from(directory);
@@ -106,8 +121,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             versioned_json_schema::<Instrument>(&id("instrument"), version)?,
         ));
         include_str!("../../fixtures/examples.input.json")
-    } else {
+    } else if version == SchemaVersion::V2 {
         include_str!("../../fixtures/examples-v2.input.json")
+    } else {
+        include_str!("../../fixtures/examples-v3.input.json")
     };
     documents.extend([
         (
