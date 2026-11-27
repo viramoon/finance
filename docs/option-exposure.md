@@ -47,6 +47,6 @@ F9d 提供进程内 Rust 计算接口 `finance_collector::option_exposure::evalu
 
 ## 集成边界
 
-后续由 F9a 在 paper 只读链路确认期权合约并提供带时间的 OI 与 Greeks，由 F9b 提供候选清单与轮转覆盖。集成方负责来源与计价口径、交易会话日期、定价输入和产品许可。F10 可从该库接入对外读契约，按 finance → web → frontend → fertile 的契约链同步。
+F9a 在 paper 只读链路确认期权合约并提供带时间的 OI 与 Greeks，F9b 提供候选清单与轮转覆盖。集成方负责来源与计价口径、交易会话日期、定价输入和产品许可。第三批读契约使用该库计算 `GET /api/v1/options/exposure`，由行情所有者提供已授权的估值快照。[第三批接口](api.md#第三批读契约)
 
-本期计算接口属于 Rust 库，HTTP OpenAPI 与 F1 流使用各自已有契约。F1 当前可传输 bar、成交、订单簿和控制事件。实时展示核对 `display_live`，非展示衍生用途核对 `derive_non_display`。若将期权链或衍生结果持久化，先评审专用事件契约，取得 `record_local` 许可后经 [F3 `MarketIngress`](market-wal.md) 写入。个人盘备份还需核对 `backup_personal_drive`。
+HTTP 敞口响应在获准的私有会话中使用。实时展示核对 `display_live`，非展示衍生用途核对 `derive_non_display`。若将期权链或衍生结果持久化，先评审专用事件契约，取得 `record_local` 许可后经 [F3 `MarketIngress`](market-wal.md) 写入。个人盘备份还需核对 `backup_personal_drive`。

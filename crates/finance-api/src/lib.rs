@@ -1,4 +1,5 @@
 pub mod bars;
+mod binance_read;
 mod bundle_jobs;
 pub mod config;
 mod decision_read;
@@ -6,6 +7,7 @@ mod factor_read;
 pub mod indicators;
 pub mod jobs;
 pub mod market;
+pub mod market_options;
 mod market_read;
 mod read_store;
 pub mod read_stream;
@@ -185,16 +187,32 @@ async fn private_read(request: Request, next: Next) -> Response {
 }
 
 pub fn router(state: AppState) -> Router {
+    router_with_market_reads(state, market_options::MarketReadSources::default())
+}
+
+pub fn router_with_market_reads(
+    state: AppState,
+    sources: market_options::MarketReadSources,
+) -> Router {
     let source = Arc::new(bars::LocalBarsSource::new(state.data_root.clone()));
-    router_with_bars_source(state, source)
+    router_with_read_sources(state, source, sources)
 }
 
 pub fn router_with_bars_source(state: AppState, source: Arc<dyn bars::BarsSource>) -> Router {
+    router_with_read_sources(state, source, market_options::MarketReadSources::default())
+}
+
+fn router_with_read_sources(
+    state: AppState,
+    bars_source: Arc<dyn bars::BarsSource>,
+    sources: market_options::MarketReadSources,
+) -> Router {
     let restricted_reads = market_read::routes()
         .merge(factor_read::routes())
         .merge(bundle_jobs::routes())
         .merge(decision_read::routes())
         .merge(jobs::contract_routes())
+        .merge(market_options::routes(sources))
         .layer(middleware::from_fn(private_read));
     Router::new()
         .route("/healthz/live", get(live))
@@ -202,7 +220,7 @@ pub fn router_with_bars_source(state: AppState, source: Arc<dyn bars::BarsSource
         .route("/api/v1/backtests/sample", get(sample))
         .route("/api/v1/market/status", get(market::status))
         .route("/api/v1/backtests/datasets", get(research::datasets))
-        .merge(bars::routes(source))
+        .merge(bars::routes(bars_source))
         .merge(jobs::routes())
         .merge(restricted_reads)
         .with_state(state)
@@ -236,7 +254,14 @@ pub fn router_with_bars_source(state: AppState, source: Arc<dyn bars::BarsSource
         factor_read::list,
         factor_read::evaluations,
         factor_read::evaluation,
-        decision_read::signals
+        decision_read::signals,
+        binance_read::binance_status,
+        market_options::depth::book,
+        market_options::lines::subscriptions,
+        market_options::lines::coverage,
+        market_options::lines::chain,
+        market_options::analytics::exposure,
+        market_options::analytics::history
     ),
     components(schemas(
         BacktestSummary,

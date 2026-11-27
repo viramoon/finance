@@ -103,7 +103,7 @@ pub struct MinuteBar {
     pub volume: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, Serialize, utoipa::ToSchema)]
 pub struct OptionMinuteBar {
     pub close_ts: U64Text,
     pub data: ClosedBar,

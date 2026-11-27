@@ -9,6 +9,7 @@ default-run = "finance-api"
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 finance-collector = { path = "../finance-collector" }
+finance-ib = { path = "../finance-ib" }
 finance-market-protocol = { path = "../finance-market-protocol" }
 num-bigint-dig = { version = "0.8.6", default-features = false, features = ["u64_digit"] }
 num-integer = "0.1.47"

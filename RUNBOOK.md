@@ -78,6 +78,18 @@ PYTHONPATH=python "$FINANCE_PYTHON" -m unittest discover -s tests -p test_worker
 
 用 `GET /api/v1/backtests/worker-status` 核对队列和租约。出现缺失或过期的租约时，检查 worker 进程和本地锁，再按[回测作业恢复](docs/backtest-jobs.md#worker-运行与恢复)处置。发布决策信号前核对输入许可和计划哈希，在现有决策目录原子发布 `read-v1.json`。需要下线读取时撤下发布文件。出现 `decision_not_published` 时检查发布文件和数据库是否在同一数据根。升级旧 SMA 库时先用原回放启动新版决策进程，重验整个已提交前缀。出现许可变化时停止发布，在独立数据根用已审核的同许可回放重建。因子、决策和回测队列绑定数据根以下的实体路径。因子报告按因子版本和评价 ID 从 F8 快照定位。[查询参数、许可和发布格式](docs/api.md#第二批策略回测与研究契约)
 
+## 第三批读契约验收
+
+用进程内路由和合成输入核对 bars、指标、Binance profile 与期权响应。测试使用临时数据根。
+
+```sh
+cargo test --locked --offline -p finance-api --test bars --test market_options --test market_read --test read_contract --test read_stream
+```
+
+若 `/api/v1/market/binance/status` 返回 `disabled_by_profile`，核对 API 的 `FINANCE_BINANCE_CONFIG` 和 `FERTILE_PROFILE`。若配置已启用，采集端实际状态查看独立日志，数据持久进度查看 F3 水位。独立 API 的期权查询返回 `market_read_source_unavailable` 时，检查部署是否接入获准的共享行情所有者。接入后，深度的 `permission_unconfirmed` 表示须核对 L1、TotalView 和 EDS，`reset` 时清空两侧。历史窗口 404 时核对所有者取得的窗口，`expired` 表示该合约在 F12 读取时已不可得。[第三批接口与权限](docs/api.md#第三批读契约)
+
+排查期权链时，按快照 `as_of` 的美东日期核对到期日。订阅覆盖返回 `500 / market_read_failed` 时，在行情所有者侧核对响应键的 `con_id`、OPRA 产品和 OI 请求参数。
+
 ## 离线因子研究验收
 
 在仓库根目录用含研究依赖的现有 Python 环境执行。定向测试在内存生成截面和收盘价，月频登记读取仓库内原报告并核对证据哈希。

@@ -35,7 +35,7 @@ pub struct ContractGammaGrid {
     pub gammas: Vec<DecimalText>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct GammaGridProvenance {
     pub as_of: DateTime<Utc>,
     pub model: NonEmptyText,
@@ -45,13 +45,13 @@ pub struct GammaGridProvenance {
     pub implied_volatilities: Vec<ContractVolatility>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct ContractVolatility {
     pub instrument_id: InstrumentId,
     pub implied_volatility: DecimalText,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum GammaFlip {
     Unavailable {
@@ -64,7 +64,7 @@ pub enum GammaFlip {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FlipUnavailableReason {
     NotDirectionalScenario,
@@ -73,7 +73,7 @@ pub enum FlipUnavailableReason {
     MissingContractGamma,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct FlipCrossing {
     /// Adjacent opposite-sign samples, or the extent of a sampled zero run between opposite signs.
     pub lower_spot: DecimalText,

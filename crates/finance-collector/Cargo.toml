@@ -25,7 +25,7 @@ sha2 = "0.10"
 time = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
-utoipa = "5"
+utoipa = { version = "5", features = ["chrono"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

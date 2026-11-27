@@ -46,6 +46,6 @@
 
 - F9c 可用 `DepthBudget::allocate` 对已校验的 Nasdaq 股票 conId 分配独立深度名额。默认 `pinned_slots = 2`、`page_slot = true`。视图选中固定席位时复用对应名额。深度连接、资格校验和盘口事件由 F9c 处理。
 - F9d 和 F9e 可在同一进程读取 `LineHandle` 的合约、L1 回调和覆盖报告。F9d 据回调和缺失情况组成 OI/Greeks 估值输入。F9e 以观察窗口为边界描述实时线索，历史逐笔核验使用独立数据请求。
-- 行情和覆盖记录暂存内存，HTTP OpenAPI 和 `protocol/v1` 流契约维持现有版本。启用由 Rust 调用方负责，使用已有 paper 配置。部署、下游发布与持久化分别走对应集成和产品许可流程。[数据入仓防护](../data-guard.md)
+- 行情和覆盖记录暂存内存。所有者可将 `LineHandle` 接入第三批期权链、预算和覆盖查询，供获准的私有会话读取。启用由 Rust 调用方负责，使用已有 paper 配置。[第三批读契约](../api.md#第三批读契约) · [数据入仓防护](../data-guard.md)
 
 离线测试入口见 [运行手册](../../RUNBOOK.md#离线验收-ibkr-行情线预算)。

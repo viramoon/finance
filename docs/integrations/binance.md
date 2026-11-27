@@ -51,4 +51,4 @@ perpetual:
 - CLI 的 JSON 状态为 `disabled_by_profile`、`connecting`、`synchronizing`、`live`、`recovering`、`rate_limited`、`region_restricted` 或 `stopped`。 `live` 表示所选深度流已完成快照桥接。暂时断开以 1–60 秒退避重连。418/429 至少等待 60 秒，`Retry-After` 秒数或 HTTP 日期可延长等待，单次等待上限 24 小时。
 - REST 或 WebSocket 握手返回 403/451 时，关闭公共会话，记录 `region_restricted` 及 `http_status`，成功退出并停止自动重试。部署守护应设置为仅失败重启。核对适用地区与产品可用性后，运维可通过新一次显式启动重新取证。
 
-进程使用原有 `finance-state/market-wal` 与投影目录，不占用监听端口。现有 HTTP 行情状态读取 bar collector；F4 状态目前通过日志和本地库接口提供，产品水位、缺口和封段仍通过 F3。调试时使用[合成报文](../../crates/finance-collector/fixtures/binance/README.md)。
+进程使用原有 `finance-state/market-wal` 与投影目录，不占用监听端口。HTTP `/api/v1/market/binance/status` 读取 profile 状态和许可，采集进程状态见上述日志。行情正文、水位和缺口使用 F3 已授权记录的查询。调试使用合成报文。[第三批读契约](../api.md#第三批读契约) · [合成报文](../../crates/finance-collector/fixtures/binance/README.md)

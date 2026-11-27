@@ -2,6 +2,8 @@
 
 `finance_collector::option_history` 是本地 Rust 库。调用者提供候选合约集，查询返回各合约的闭合价量 bar 或可得性状态。调用在已有进程内完成，价量结果返回调用方。节流状态使用既有历史任务目录。
 
+获准的行情所有者可将已取得的 F12 批次接入第三批 HTTP 查询。页面请求读取内存中的历史窗口及可得性状态。[第三批历史期权接口](api.md#第三批读契约)
+
 ## IBKR 未到期期权
 
 在获准读取的环境中，由调用者通过 `ConnectionManager::open_market()` 打开已验证的只读 `PaperMarket` 会话，将 `IbkrOptionHistory::new(&market, data_root)` 传给 `fetch_ibkr_chain`。读取完成后调用 `market.close().await` 关闭专用会话。该会话使用 probe client ID，须与占用该 ID 的权限探针和 F11 批任务错开。

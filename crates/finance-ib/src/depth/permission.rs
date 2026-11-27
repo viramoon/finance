@@ -5,7 +5,7 @@ pub const PRODUCT: &str = "nasdaq-totalview";
 
 /// Operator confirmations from the paper user's market data entitlement review.
 /// Depth callbacks do not identify the individual account products.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, utoipa::ToSchema)]
 pub struct DepthPermissions {
     pub equity_l1_confirmed: bool,
     pub totalview_confirmed: bool,

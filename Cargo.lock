@@ -312,6 +312,7 @@ dependencies = [
  "axum",
  "chrono",
  "finance-collector",
+ "finance-ib",
  "finance-market-protocol",
  "futures-util",
  "num-bigint-dig",
@@ -379,6 +380,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "utoipa",
 ]
 
 [[package]]

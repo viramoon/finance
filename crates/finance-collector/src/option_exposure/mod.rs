@@ -33,7 +33,7 @@ pub enum OptionRight {
     Put,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DealerScenario {
     Absolute,
@@ -53,7 +53,7 @@ impl DealerScenario {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct DecimalObservation {
     pub value: DecimalText,
     pub observed_at: DateTime<Utc>,
@@ -91,14 +91,14 @@ pub struct OptionChainSnapshot {
     pub contracts: Vec<OptionContractSnapshot>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct TimingPolicy {
     pub max_spot_age_seconds: u32,
     pub max_gamma_age_seconds: u32,
     pub max_spot_gamma_skew_seconds: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct ExposureReport {
     pub scenario: DealerScenario,
     pub model_version: &'static str,

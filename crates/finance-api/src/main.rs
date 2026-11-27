@@ -1,4 +1,7 @@
-use finance_api::{ApiDoc, AppState, config::Settings, read_stream, router};
+use finance_api::{
+    ApiDoc, AppState, config::Settings, market_options::MarketReadSources, read_stream,
+    router_with_market_reads,
+};
 use finance_market_protocol::{
     SchemaVersion,
     schema_export::{
@@ -86,6 +89,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 data_root,
                 research_root,
             },
+            MarketReadSources::default(),
             true,
         )
         .await;
@@ -112,6 +116,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("config"));
     let settings = Settings::load(&dir, &env)?;
+    let profile = env
+        .get("FERTILE_PROFILE")
+        .map_or("cloudbox", String::as_str);
+    let binance_config = std::env::var_os("FINANCE_BINANCE_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| dir.join("binance").join(format!("{profile}.yaml")));
     let listener =
         tokio::net::TcpListener::bind((settings.api.bind_host, settings.api.port)).await?;
     serve(
@@ -119,6 +129,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         AppState {
             data_root: settings.paths.data_root,
             research_root: settings.paths.research_root,
+        },
+        MarketReadSources {
+            binance_config: Some(binance_config),
+            ..Default::default()
         },
         false,
     )
@@ -128,6 +142,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 async fn serve(
     listener: tokio::net::TcpListener,
     state: AppState,
+    sources: MarketReadSources,
     isolated: bool,
 ) -> Result<(), Box<dyn Error>> {
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -137,7 +152,7 @@ async fn serve(
     } else {
         eprintln!("finance-api listening on {}", listener.local_addr()?);
     }
-    axum::serve(listener, router(state))
+    axum::serve(listener, router_with_market_reads(state, sources))
         .with_graceful_shutdown(async move {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {},

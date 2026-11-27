@@ -74,6 +74,11 @@ impl Config {
         }
     }
 
+    /// Read configured products and permissions without opening a transport or WAL.
+    pub fn configured_products(&self) -> Result<Option<Vec<ProductPolicy>>> {
+        self.enabled.then(|| self.policies()).transpose()
+    }
+
     fn policies(&self) -> Result<Vec<ProductPolicy>> {
         ensure!(
             self.spot.is_some() || self.perpetual.is_some(),

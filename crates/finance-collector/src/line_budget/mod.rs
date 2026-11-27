@@ -169,13 +169,28 @@ impl LineHandle {
     /// Current confirmed (unexpired) chain, ordered by conId. Check discovery_complete
     /// before treating the size as the denominator for this watchlist.
     pub fn option_contracts(&self) -> Vec<ConfirmedContract> {
-        self.0
-            .state
-            .lock()
-            .expect("line state")
-            .current_options(self.0.now())
-            .cloned()
-            .collect()
+        self.option_chain().2
+    }
+
+    /// Read the confirmed roster, its observation time and discovery status under one lock.
+    pub fn option_chain(&self) -> (DateTime<Utc>, bool, Vec<ConfirmedContract>) {
+        let state = self.0.state.lock().expect("line state");
+        let as_of = self.0.now();
+        (
+            as_of,
+            state.discovery_complete,
+            state.current_options(as_of).cloned().collect(),
+        )
+    }
+
+    /// Coverage of the scheduler's shared OPRA line including the OI request.
+    pub fn option_coverage(
+        &self,
+        con_id: i32,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Option<CoverageReport> {
+        self.coverage(session::option_key(con_id), start, end)
     }
 
     /// Resolve metadata for a single current option without cloning the chain.
