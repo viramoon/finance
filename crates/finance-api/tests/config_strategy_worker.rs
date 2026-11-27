@@ -81,6 +81,10 @@ fn python_command(data_root: &Path, research_root: &Path) -> Command {
         .env("PYTHONPATH", repo.join("python"))
         .env("FERTILE_DATA_ROOT", data_root)
         .env("FERTILE_RESEARCH_ROOT", research_root)
+        .env(
+            "FINANCE_STRATEGY_BIN",
+            env!("CARGO_BIN_EXE_finance-strategy"),
+        )
         .env("OPENBLAS_NUM_THREADS", "1")
         .env("OMP_NUM_THREADS", "1");
     command
@@ -132,23 +136,13 @@ impl Drop for Worker {
 }
 
 async fn await_job(app: &Router, job: &Value, worker: &mut Worker, log: &Path) -> Value {
-    await_job_status(app, job, worker, log, "succeeded").await
-}
-
-async fn await_job_status(
-    app: &Router,
-    job: &Value,
-    worker: &mut Worker,
-    log: &Path,
-    expected_status: &str,
-) -> Value {
     let id = job["id"].as_i64().unwrap();
     let path = format!("{JOBS}/{id}");
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let result = request(app, "GET", &path, "", None, StatusCode::OK).await;
         match result["status"].as_str().unwrap() {
-            status if status == expected_status => return result,
+            "succeeded" => return result,
             "queued" | "running"
                 if worker.0.try_wait().unwrap().is_none() && Instant::now() < deadline =>
             {
@@ -164,7 +158,7 @@ async fn await_job_status(
 
 #[tokio::test]
 #[ignore = "requires the source-built Nautilus Python environment; exercised by Nautilus CI"]
-async fn unsupported_registered_indicator_reports_strategy_runtime_invalid() {
+async fn registered_bollinger_outputs_change_fills_in_the_real_worker() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     let research_root = temp.path().join("research");
@@ -178,20 +172,59 @@ async fn unsupported_registered_indicator_reports_strategy_runtime_invalid() {
         data_root: data_root.clone(),
         research_root: research_root.clone(),
     });
+    // The 40-close linear windows at the March 1 decision have means 121.5,
+    // 141.5, 161.5 and two population standard deviations of about 23.09.
+    // With a threshold of 150, each band produces a different buy set.
     let bundle = ENTRY_EXIT
         .replace("factor.close_return@1.0.0", "indicator.bollinger@1.0.0")
-        .replace(
-            "params: {lookback_sessions: 20}",
-            "params: {period: 20}\n      output: upper",
-        );
-    let job = submit(&app, "unsupported-indicator", inline(&bundle)).await;
+        .replace("warmup_sessions: 30", "warmup_sessions: 40")
+        .replace(r#"threshold: "0.02""#, r#"threshold: "150""#);
+    let mut jobs = Vec::new();
+    for (output, expected) in [
+        ("upper", &["BBB.XNYS", "CCC.XNYS"][..]),
+        ("middle", &["CCC.XNYS"][..]),
+        ("lower", &[][..]),
+    ] {
+        let content = bundle
+            .replace(
+                "example.equity-momentum",
+                &format!("example.bollinger-{output}"),
+            )
+            .replace(
+                "params: {lookback_sessions: 20}",
+                &format!("params: {{period: 40}}\n      output: {output}"),
+            );
+        let mut submission = inline(&content);
+        submission["end"] = json!("2024-03-05T00:00:00Z");
+        jobs.push((output, expected, submit(&app, output, submission).await));
+    }
 
     let log = temp.path().join("worker.log");
     let mut worker = Worker::start(&mut python_command(&data_root, &research_root), &log);
-    let failed = await_job_status(&app, &job, &mut worker, &log, "failed").await;
-    assert_eq!(failed["attempt"], 1);
-    assert_eq!(failed["error"], "strategy_runtime_invalid");
-    assert!(failed["summary"].is_null());
+    for (output, expected, job) in jobs {
+        let completed = await_job(&app, &job, &mut worker, &log).await;
+        assert_eq!(completed["attempt"], 1);
+        assert!(completed["error"].is_null());
+        let summary = &completed["summary"];
+        let manifest = &summary["run_manifest"];
+        assert_eq!(
+            manifest["bundle"]["spec"]["factors"]["mom20"]["output"],
+            output
+        );
+        let mut bought: Vec<_> = summary["strategy_report"]["fills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|fill| {
+                assert_eq!(fill["side"], "buy");
+                assert_eq!(fill["signal_date"], "2024-03-01");
+                assert_eq!(fill["fill_date"], "2024-03-04");
+                fill["instrument_id"].as_str().unwrap()
+            })
+            .collect();
+        bought.sort_unstable();
+        assert_eq!(bought.as_slice(), expected, "Bollinger {output}");
+    }
 }
 
 #[tokio::test]

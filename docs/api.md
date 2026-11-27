@@ -43,7 +43,9 @@ IBKR 行情线预算、共享事件、已确认期权链和覆盖区间由 `fina
 
 Nasdaq TotalView 的页面焦点与场所深度由进程内 Rust 接口提供。接入共享行情所有者后，由 web 提供会话内展示入口。当前 HTTP 行情状态仍来自持久化采集状态。场所深度接口和接入边界见 [IBKR 接入](integrations/ib.md#nasdaq-totalview-场所深度)。
 
-POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /api/v1/backtests/{id} 查看执行进度与摘要，GET /api/v1/backtests 按 cursor 和 limit 翻页。提交使用同库事务完成幂等检查和容量检查，worker 独立执行。完整输入范围、超时和恢复见 [作业运维](backtest-jobs.md)。公网入口由 web 鉴权并限流。
+POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /api/v1/backtests/{id} 查看执行进度与摘要，GET /api/v1/backtests 按 cursor 和 limit 翻页。提交使用同库事务完成幂等检查和容量检查。多个 worker 可独立领取并续租，租约是服务端状态。完整输入范围、超时和恢复见 [作业运维](backtest-jobs.md)。公网入口由 web 鉴权并限流。
+
+`finance-decision` 的信号与检查点保存在本地决策库，读写边界见 [实时决策接口](decision-process.md)。
 
 ## 配置策略提交与结果
 

@@ -16,8 +16,17 @@ finance-backtest-worker 使用已锁定源码环境，通过独立 Python 子进
 build_root=${FINANCE_BUILD_ROOT:-/home/box/fertile/cache/finance}
 UV_CACHE_DIR="$build_root/uv-cache" UV_PROJECT_ENVIRONMENT="$build_root/venv" \
   uv sync --locked --only-group research --inexact --python "$(cat .python-version)"
-FERTILE_DATA_ROOT="$(mktemp -d)" PYTHONPATH=python \
-  "$build_root/venv/bin/python" -m unittest discover -s tests -v
+```
+
+准备好上述 Python 环境和本地 Cargo 依赖缓存后，在仓库根目录构建共享指标求值器并运行测试。显式传入 `FINANCE_STRATEGY_BIN` 的绝对路径，供测试及其以精简 `PATH` 启动的子进程使用。
+
+```bash
+build_root=${FINANCE_BUILD_ROOT:-/home/box/fertile/cache/finance}
+target_dir=$(realpath -m -- "${CARGO_TARGET_DIR:-target}")
+cargo build --locked --offline -p finance-api --bin finance-strategy --target-dir "$target_dir"
+FINANCE_STRATEGY_BIN="$target_dir/debug/finance-strategy" \
+  FERTILE_DATA_ROOT="$(mktemp -d)" PYTHONPATH=python \
+  "$build_root/venv/bin/python" -B -m unittest discover -s tests -v
 ```
 
 ## 研究作业

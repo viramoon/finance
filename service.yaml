@@ -97,11 +97,32 @@ processes:
     working_directory: finance
     dependencies: [data_root, nautilus_source_wheel]
     queue: finance-state/backtests/jobs.sqlite3
+    lease_seconds_env: FINANCE_WORKER_LEASE_SECONDS # 默认 15 秒
+    replicas: 同一宿主的本地 SQLite 作业队列可供多个 worker 共享
     strategy_bundle:
       replay_inputs: finance-state/backtests/strategy-inputs
       pinned_inputs: strategy_backtest_snapshots
+      indicator_command: finance-strategy evaluate-indicators
+      indicator_bin_env: FINANCE_STRATEGY_BIN
       mode: offline_backtest
     health: 监测 worker 进程和最近作业的终态
+    restart_policy: fertile deploy/
+  - name: finance-decision
+    command: scripts/finance-decision
+    working_directory: finance
+    required_args: [--plan, --replay]
+    follow_arg: --follow
+    data_root_env: FERTILE_DATA_ROOT
+    interpreter_env: FINANCE_PYTHON # 默认 python3
+    dependencies: [data_root, approved_decision_replay]
+    replay_formats:
+      sma_crossover: f1_event_ndjson
+      strategy_bundle: decision_session_ndjson # 使用源码构建的 Python 环境
+    strategy_bundle:
+      indicator_command: finance-strategy evaluate-indicators
+      indicator_bin_env: FINANCE_STRATEGY_BIN
+    state: finance-state/decisions/decisions.sqlite3
+    health: 监测进程状态与持久消费进度
     restart_policy: fertile deploy/
   - name: api
     command: cargo run --release --locked -p finance-api # 开发启动；部署产物命令由 fertile 定义

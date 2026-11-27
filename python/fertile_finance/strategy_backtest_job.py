@@ -12,18 +12,14 @@ from uuid import uuid4
 from .research_catalog import EPOCH, LATEST, ResearchError
 from .research_decimal import EXACT_RESEARCH_CONTEXT
 from .strategy_indicators import BUILTIN_EVALUATOR_ID
-from .strategy_replay import MAX_REPLAY_BYTES, SHA256, canonical_sha256, load_strategy_replay
+from .strategy_plan import SHA256, checked_bundle_plan
+from .strategy_replay import MAX_REPLAY_BYTES, load_strategy_replay
 
 
 def _checked_plan(request):
     try:
-        plan = request["plan"]
-        if (plan["plan_version"] != "fertile.finance/strategy-plan/v1"
-                or not SHA256.fullmatch(plan["source_sha256"])
-                or plan["content_sha256"] != canonical_sha256(plan["bundle"])):
-            raise ValueError("Invalid compiled plan")
-        return plan
-    except (ValueError, TypeError, KeyError, RecursionError):
+        return checked_bundle_plan(request["plan"])
+    except (ValueError, TypeError, KeyError):
         raise ResearchError("strategy_plan_invalid", "Could not verify the stored compiled plan") from None
 
 
@@ -139,7 +135,7 @@ def _manifest(plan, replay, request):
     }
 
 
-def run_strategy_backtest_job(request, *, snapshot=None, queue=None):
+def run_strategy_backtest_job(request, *, snapshot=None, queue=None, signal_observer=None):
     plan = _checked_plan(request)
     start, end = _request_interval(request)
     digest = request.get("snapshot_sha256")
@@ -149,7 +145,7 @@ def run_strategy_backtest_job(request, *, snapshot=None, queue=None):
 
     result = run_config_strategy_backtest(
         plan=plan, assets=replay.assets, universe=replay.membership, start=replay.start, end=replay.end,
-        history_start=replay.history_start,
+        history_start=replay.history_start, signal_observer=signal_observer,
     )
     equity = {day: value for day, value in result.equity.items() if replay.start <= day <= replay.end}
     last_mark = max((day for day, value in equity.items() if value is not None), default=None)

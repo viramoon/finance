@@ -2,7 +2,7 @@
 
 fertile 的主项目与 submodule，基于 NautilusTrader 的交易与数据系统。负责策略、做市商数据 adapter、配置、trader / collector / projector / backtest / api 入口、运维和研究；以源码 submodule 引入上游，不自研交易核心。
 
-本仓库按 [issue #1 方案 v2](https://github.com/viramoon/finance/issues/1#issuecomment-6834604073) 初始化。当前提供 [Nautilus 源码构建](docs/build.md)、上游离线回测批任务、[配置策略回测](docs/backtest-jobs.md#配置策略作业) 及 [行情与回测 HTTP API](docs/api.md)。TBD 项由后续 issue 明确。开发从 [AGENTS.md](AGENTS.md) 开始。
+本仓库按 [issue #1 方案 v2](https://github.com/viramoon/finance/issues/1#issuecomment-6834604073) 初始化。当前提供 [Nautilus 源码构建](docs/build.md)、上游离线回测批任务、[配置策略回测](docs/backtest-jobs.md#配置策略作业)、[行情与回测 HTTP API](docs/api.md) 及 [只读实时决策](docs/decision-process.md)。交易服务仍属后续规划。开发从 [AGENTS.md](AGENTS.md) 开始。
 
 `finance-ib` 提供 paper 只读的美股及 OPRA 顶档订阅接口，以及需显式启用的私有权限探针。真实账户各产品权限仍待验收。操作见 [IBKR 接入](docs/integrations/ib.md#美股-l1-和-opra-权限验收)。
 
@@ -36,7 +36,7 @@ finance/
 ├── .agents/skills/          本仓库专属 skill 约定
 ├── strategies/             策略配置、示例和研究
 ├── adapters/mm_api/        做市商数据 adapter 边界
-├── nodes/                  trader / collector / backtest / api
+├── nodes/                  trader / collector / decision / backtest / api
 ├── config/                 base / cloudbox / stable 字段设计
 ├── python/                 Python API、notebook 与研究约定
 ├── catalog/                Parquet 数据约定，真实数据不进 git
@@ -62,6 +62,7 @@ finance/
 - [统一指标与回放口径](docs/indicators.md)
 - [期权 GEX、gamma wall、flip 与 0DTE 计算接口](docs/option-exposure.md)
 - [StrategyBundle v1 配置与编译](docs/strategy-bundle.md)
+- [实时决策进程与共享求值](docs/decision-process.md)
 - [离线因子评价与研究登记](docs/factor-research.md)
 - [技术栈决策](docs/adr/ADR-0001-tech-stack.md)
 - [依赖、许可与替换](docs/adr/ADR-0002-nautilus-dependency.md)
@@ -97,7 +98,7 @@ curl http://127.0.0.1:8081/healthz/ready
 curl http://127.0.0.1:8081/api/v1/backtests/sample
 ```
 
-端口默认 8081，配置优先级、错误状态、精确金额与 OpenAPI 导出见 [API 文档](docs/api.md)。示例接口读取 latest.json。提交的作业由 worker 独立执行，collector 的行情状态可在 /api/v1/market/status 查询。
+端口默认 8081，配置优先级、错误状态、精确金额与 OpenAPI 导出见 [API 文档](docs/api.md)。示例接口读取 latest.json。多个回测 worker 可在同一宿主上通过 SQLite 租约并行领取作业。collector 的行情状态可在 /api/v1/market/status 查询。`scripts/finance-decision` 独立消费闭合行情与策略所需的本地只读快照，与 `SmaCrossover` 和 `StrategyBundle` 回测共用对应的目标求值器。配置策略通过本地 `finance-strategy` 使用主图的 Rust 指标内核。启动与恢复见 [运行手册](RUNBOOK.md#实时决策与并行回测)。
 
 主图通过 `GET /api/v1/market/bars` 查询已发布的 bar 和派生指标。版本、参数、数值域和预览规则见 [统一指标](docs/indicators.md)，数据源接入见 [主图 API](docs/api.md#主图行情与指标)。
 

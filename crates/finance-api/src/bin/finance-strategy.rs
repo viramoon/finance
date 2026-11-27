@@ -1,6 +1,6 @@
 use finance_api::strategy_bundle::{
     InputFormat, MAX_BYTES, MemoryBindings, SqliteBindings, VersionBindings, bundle_schema,
-    compile, component_registry, example_catalog,
+    compile, compile_legacy_sma, component_registry, example_catalog,
 };
 use serde::Serialize;
 use std::ffi::OsString;
@@ -9,7 +9,10 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: finance-strategy schema | registry | compile [--format yaml|json] [--bindings SQLITE] <FILE|->";
+#[path = "finance-strategy/indicator_stream.rs"]
+mod indicator_stream;
+
+const USAGE: &str = "usage: finance-strategy schema | registry | compile [--format yaml|json] [--bindings SQLITE] <FILE|->\n       finance-strategy compile-legacy-sma <INSTRUMENT> <FAST_PERIOD> <SLOW_PERIOD> <SHARES>\n       finance-strategy evaluate-indicators";
 
 fn main() -> ExitCode {
     match run(std::env::args_os().skip(1).collect()) {
@@ -27,8 +30,28 @@ fn run(args: Vec<OsString>) -> Result<ExitCode, &'static str> {
         [command] if command == "registry" => {
             json_line(io::stdout().lock(), &component_registry())?
         }
+        [command] if command == "evaluate-indicators" => {
+            #[cfg(target_os = "linux")]
+            indicator_stream::bind_parent_lifetime()?;
+            indicator_stream::run(io::stdin().lock(), io::stdout().lock())?
+        }
         [command] if command == "--help" || command == "-h" => println!("{USAGE}"),
         [command, args @ ..] if command == "compile" => return compile_file(args),
+        [command, instrument, fast, slow, shares] if command == "compile-legacy-sma" => {
+            let parse = |value: &OsString| {
+                value
+                    .to_str()
+                    .and_then(|text| text.parse().ok())
+                    .ok_or("SMA periods and shares must be integers.")
+            };
+            let plan = compile_legacy_sma(
+                instrument.to_str().ok_or("Choose an XNYS instrument ID.")?,
+                parse(fast)?,
+                parse(slow)?,
+                parse(shares)?,
+            )?;
+            json_line(io::stdout().lock(), &plan)?;
+        }
         _ => return Err(USAGE),
     }
     Ok(ExitCode::SUCCESS)

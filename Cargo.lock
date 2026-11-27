@@ -320,6 +320,7 @@ dependencies = [
  "regex",
  "rusqlite",
  "rust_decimal",
+ "rustix",
  "serde",
  "serde_json",
  "serde_yaml",
