@@ -6,7 +6,7 @@ use axum::{
 use chrono::{DateTime, TimeDelta, Utc};
 use finance_api::{ApiDoc, AppState, router};
 use serde_json::{Value, json};
-use std::{fmt::Write, fs, path::Path};
+use std::{collections::BTreeMap, env, fmt::Write, fs, path::Path, process::Command};
 use tower::ServiceExt;
 use utoipa::OpenApi;
 
@@ -594,4 +594,132 @@ fn chart_and_research_openapi_use_distinct_coverage_schemas() {
     );
     assert_eq!(schemas["Coverage"]["type"], "string");
     assert_eq!(schemas["Coverage"]["enum"], json!(["full", "insufficient"]));
+}
+
+#[tokio::test]
+#[ignore = "requires the source-built Nautilus Python environment; exercised by Nautilus CI"]
+async fn bollinger_chart_worker_and_restarted_decision_agree() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let python = env::var_os("FINANCE_STRATEGY_TEST_PYTHON").expect("source-built Python path");
+    let python_path = env::join_paths([repo.join("python"), repo.join("tests")]).unwrap();
+    let python_command = || {
+        let mut command = Command::new(&python);
+        command
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("PYTHONPATH", &python_path)
+            .current_dir(&repo)
+            .arg("-B");
+        command
+    };
+    let generated = python_command()
+        .arg("tests/config_strategy_replay_fixture.py")
+        .arg(dir.path())
+        .arg("--target-weights")
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    // Project the very same deterministic bars that the Python worker will consume.
+    let replay_path = dir
+        .path()
+        .join("finance-state/backtests/strategy-inputs")
+        .join("example.reviewed-us-daily@1.0.0/example.us-cash-equities@1.0.0.json");
+    let replay: Value = serde_json::from_slice(&fs::read(&replay_path).unwrap()).unwrap();
+    let opening = replay["membership"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| (row["date"].as_str().unwrap(), replay_timestamp(row)))
+        .collect::<BTreeMap<_, _>>();
+    let start = format!("{}T00:00:00Z", replay["first_session"].as_str().unwrap());
+    let end = format!("{}T23:59:59Z", replay["last_session"].as_str().unwrap());
+    let indicators = encoded(r#"[{"use":"indicator.bollinger@1.0.0","params":{"period":2}}]"#);
+    let app = app(dir.path());
+    let mut chart = serde_json::Map::new();
+    for instrument in replay["instruments"].as_array().unwrap() {
+        let instrument = instrument.as_str().unwrap();
+        let rows: Vec<_> = replay["bars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|bar| bar["instrument_id"] == instrument)
+            .map(|bar| {
+                let day = bar["date"].as_str().unwrap();
+                let close = replay_timestamp(bar);
+                json!({
+                    "trading_day": day, "open_ts": opening[day], "end_ts": close, "first_available_ts": close,
+                    "open": bar["open"], "high": bar["high"], "low": bar["low"],
+                    "close": bar["close"], "volume": bar["volume"],
+                })
+            })
+            .collect();
+        let mut snapshot = projection();
+        snapshot["series"]["instrument_id"] = json!(instrument);
+        snapshot["series"]["timeframe"] = json!("1d");
+        snapshot["closed"] = json!(rows);
+        snapshot["provisional"] = Value::Null;
+        snapshot["as_of"] = json!(end);
+        let path = dir.path().join(format!(
+            "finance-state/bars/v1/synthetic/test-bars/{instrument}/raw/1d.json"
+        ));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+
+        let scope = format!(
+            "instrument_id={instrument}&source=synthetic&product=test-bars&timeframe=1d&adjustment=raw"
+        );
+        let uri = format!("{CHART}?{scope}&start={start}&end={end}&indicators={indicators}");
+        let (status, response) = call(&app, &uri).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let returned = response["rows"].as_array().unwrap();
+        assert_eq!(returned.len(), rows.len());
+        assert_eq!(returned[0]["indicator_values"][0]["status"], "warmup");
+        chart.insert(instrument.into(), response["rows"].clone());
+    }
+    let first_bbb = chart["BBB.XNYS"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["bar"]["trading_day"] == "2024-03-01")
+        .unwrap();
+    assert_eq!(
+        first_bbb["indicator_values"][0],
+        json!({"status": "ready", "values": {"lower": "70", "middle": "90", "upper": "110"}})
+    );
+    let chart_path = dir.path().join("chart.json");
+    fs::write(&chart_path, serde_json::to_vec(&chart).unwrap()).unwrap();
+    let result = python_command()
+        .args([
+            "-m",
+            "unittest",
+            "test_bundle_decision.BundleDecisionTests.test_f6_bollinger_chart_worker_and_restarted_decision_agree",
+        ])
+        .env("FINANCE_F6_CHART_JSON", chart_path)
+        .env("FINANCE_F6_REPLAY_JSON", replay_path)
+        .env("FINANCE_STRATEGY_BIN", env!("CARGO_BIN_EXE_finance-strategy"))
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let diagnostic = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        diagnostic
+            .lines()
+            .any(|line| line.starts_with("Ran 1 test in "))
+            && diagnostic.lines().any(|line| line == "OK"),
+        "Python integration test did not run"
+    );
+}
+
+fn replay_timestamp(row: &Value) -> DateTime<Utc> {
+    DateTime::from_timestamp_nanos(row["first_available_ts"].as_str().unwrap().parse().unwrap())
 }

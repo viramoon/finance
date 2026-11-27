@@ -8,8 +8,9 @@ from nautilus_trader.model.objects import Quantity
 
 from .epoch import unix_nanos
 from .market_protocol import DecimalText, U64Text
-from .research_catalog import ID, bar_type, iso_date, nyse, price
+from .research_catalog import ID, ResearchError, bar_type, iso_date, nyse, price
 from .strategy_evaluation import _unique_object
+from .strategy_indicators import BUILTIN_EVALUATOR_ID
 from .strategy_plan import canonical_sha256
 from .strategy_signals import BundleSession, BundleSignalEvaluator, SleeveState
 
@@ -89,6 +90,9 @@ class BundleDecisionReplay:
     def __init__(self, plan):
         try:
             self.plan_sha256 = canonical_sha256(plan)
+            self.checkpoint_identity = canonical_sha256({
+                "plan_sha256": self.plan_sha256, "indicator_evaluator": BUILTIN_EVALUATOR_ID,
+            })
             spec = plan["bundle"]["spec"]
             clock = spec["clock"]
             self.warmup_sessions = clock["warmup_sessions"]
@@ -102,6 +106,9 @@ class BundleDecisionReplay:
         self.previous_index = None
         self.warmed = 0
         self.active = False
+
+    def close(self):
+        self.evaluator.close()
 
     def initialize(self, connection):
         connection.execute("""
@@ -136,7 +143,8 @@ class BundleDecisionReplay:
                 raise ValueError("Expected nonnegative cash and a bar mapping")
             sleeves = {key: _sleeve(value) for key, value in _object(row["sleeves"], self.recipes).items()}
             frame = BundleSession(
-                day=day, ts_event=close_ts, members=_instruments(row["members"]), cash=cash,
+                day=day, open_ts=unix_nanos(self.schedule.at[str(day), "open"].value),
+                ts_event=close_ts, members=_instruments(row["members"]), cash=cash,
                 bars={_instrument(key): _session_bar(key, value, close_ts) for key, value in row["bars"].items()},
                 sleeves=sleeves, pending_reductions=_pending_reductions(row["pending_reductions"], sleeves),
                 emit=not warmup,
@@ -151,7 +159,9 @@ class BundleDecisionReplay:
     def evaluate(self, frame, offset):
         try:
             return self.evaluator.evaluate(frame)
-        except _INVALID_INPUT:
+        except _INVALID_INPUT as error:
+            if isinstance(error, ResearchError) and error.code == "indicator_backend_unavailable":
+                raise ValueError(f"Rust indicator evaluator unavailable at byte {offset}") from None
             raise ValueError(f"could not evaluate StrategyBundle replay frame at byte {offset}") from None
 
     def record(self, connection, offset, frame, signal):

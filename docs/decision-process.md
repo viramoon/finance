@@ -1,6 +1,6 @@
 # 实时决策进程与共享策略求值
 
-`scripts/finance-decision` 按编译计划读本地闭合行情，生成单标的或组合策略目标。该进程独立于采集、API 和回测 worker。启动器默认调用 `python3`，可用 `FINANCE_PYTHON` 指定解释器。SMA 模式使用 Python 标准库。`StrategyBundle` 模式使用现有源码构建 Python 环境的 Nautilus 行情类型和 XNYS 日历。准备计划和回放文件的读权限，以及决策目录的写权限。进程入口、停止与恢复方式见 [运行手册](../RUNBOOK.md#实时决策与并行回测)。
+`scripts/finance-decision` 按编译计划读本地闭合行情，生成单标的或组合策略目标。该进程独立于采集、API 和回测 worker。启动器默认调用 `python3`，可用 `FINANCE_PYTHON` 指定解释器。SMA 模式使用 Python 标准库。`StrategyBundle` 模式使用现有源码构建 Python 环境的 Nautilus 行情类型和 XNYS 日历，以及同一构建的 `finance-strategy`。准备计划和回放文件的读权限，以及决策目录的写权限。进程入口、停止与恢复方式见 [运行手册](../RUNBOOK.md#实时决策与并行回测)。
 
 ## 共享求值接口
 
@@ -11,6 +11,8 @@
 SMA CPU 求值器用两个有限窗口比较收盘均线，窗口和以 27 位小数的定点整数保存，比较时使用交叉相乘。收到第 `slow_period` 根闭合 bar 时开始输出，快线严格高于慢线时目标为配置股数，其余为零。回测适配器依原有规则在下一会话使用目标做模拟成交。上游 `DemoStrategy` 仍用于源码构建示例。
 
 `finance-strategy compile` 生成 `fertile.finance/strategy-plan/v1` 配置计划。`StrategyBundle` 的两条生产路径都调用 `BundleSignalEvaluator`。它用同一份收盘序列计算指标，按会话点时成分和组合快照应用入场、退出、排名和组合约束，输出各配方对各标的的整股目标及可选原因。回测用 Nautilus 模拟成交，更新下一会话求值所需的现金、持仓和在途减仓。实时入口使用提供方给出的这些只读快照，输出成交前目标。两条路径在计划、行情、时钟和组合快照一致时逐点产出相同目标。回测报告和提交方式见 [配置策略作业](backtest-jobs.md#配置策略作业)。
+
+配置策略以本地标准输入和标准输出管道调用 `finance-strategy evaluate-indicators`。可执行文件默认从 `PATH` 查找，也可用 `FINANCE_STRATEGY_BIN` 设绝对路径。主图和该子进程使用同一 Rust `IndicatorEngine`。会话开盘、收盘、交易日和 OHLCV 按精确文本传入。每个因子选择已编译的 `output`，使用与主图相同的声明精度。每个标的及因子保留增量状态，首次求值和重启时回放所需闭合历史。缺失 bar 或退出点时成分后清除该标的的策略序列，再进入时重新预热。[指标定义与精度](indicators.md)
 
 实时与回测在使用计划前校验 `bundle` 摘要和运行字段。预算、金额、权重、阈值和费率使用编译器输出的十进制字符串。顶层 `sleeves` 必须与 `bundle` 中的声明一致，并按优先级和配方 ID 排序。两条路径也核对执行模型、输入引用和同会话再入场规则。校验拒绝包含 JSON 浮点值或运行字段不一致的计划，实时进程在打开决策库前退出，回测作业返回 `strategy_plan_invalid`。
 
@@ -51,11 +53,10 @@ SMA CPU 求值器用两个有限窗口比较收盘均线，窗口和以 27 位�
 
 `bundle_decisions` 保存配置策略的 `replay_offset`、`plan_sha256`、`session`、`signal_ts`、`recipe`、`instrument_id`、`target_shares` 和 `reason`。计划哈希覆盖完整编译计划的规范 JSON。目标股数与纳秒时钟为十进制字符串，`reason` 可为空。按 `replay_offset`、`recipe`、`instrument_id` 查询可得到稳定顺序。
 
-`decision_checkpoint` 保存计划哈希和已消费字节前缀的终点与哈希。每帧检查点与其全部目标在同一事务内提交，重启重建前缀时跳过已持久化的行。每个数据根配置一个计划和一个来源。
+`decision_checkpoint` 保存求值身份哈希和已消费字节前缀的终点与哈希。配置策略的求值身份绑定计划哈希和指标求值器版本。每帧检查点与其全部目标在同一事务内提交，重启重建前缀时跳过已持久化的行。升级至 F6 求值器时，保留旧配置策略的决策库，在新的数据根重新消费获准的原始回放。每个数据根配置一个计划和一个来源。
 
 进程没有监听端口、IBKR 或下单入口。决策库是本地进程接口。行情流 schema、HTTP OpenAPI 与历史回测请求格式不变。
 
 ## 后续集成
 
 - F3 已提供 `projected_partitions`，可按 WAL 顺序枚举已提交的 Parquet 分区。准备回放时，按一个 F1 流分区导出 `event_json`，保留原始可用时间与控制帧，核对计算许可 `derive_non_display` 和覆盖质量报告。`read_latest_event` 返回最新修订，适用于点查。直接跟随投影需将断点绑定到投影源和已提交位置，并明确缺口、更正和保留边界。当前决策入口使用追加式 NDJSON 的字节断点。见 [F3 投影接口](market-wal.md#parquet-与投影游标)。
-- F6 将 `IndicatorEngine::push_closed` 及其批量入口接入求值后端。适配时核对预热、点时可用性和均线比较精度，策略求值使用未为展示舍入的值。

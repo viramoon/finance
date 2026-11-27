@@ -29,6 +29,8 @@ curl 'http://127.0.0.1:8081/api/v1/backtests?limit=20'
 
 配置作业与实时决策共用收盘指标、配方和目标生成。在回测中，模拟成交更新的组合状态作为下一次收盘求值的输入。实时决策使用显式的只读组合快照，并持久化配方目标。会话输入格式见 [实时决策接口](decision-process.md#配置策略会话输入)。
 
+配置作业需要同一 finance 构建的 `finance-strategy`。worker 通过本地管道调用 `evaluate-indicators`，运维可用 `FINANCE_STRATEGY_BIN` 指定可执行文件的绝对路径，默认从 `PATH` 查找。历史已完成的作业保留原报告与求值器版本。新运行按 F6 的声明精度求值，核对 `run_manifest.indicator_evaluator` 后再比较历史结果。
+
 ### 本地回放数据
 
 在既有数据根的 `finance-state/backtests/strategy-inputs/<bars_ref>/<universe_ref>.json` 发布受信任的回放文件。单文件上限 32 MiB，路径中的两个引用来自已编译的版本化数据和股票池 ID。文件由运维或研究侧从已审查的本地数据生成，使用原子替换发布。测试数据可用 [合成生成器](../tests/config_strategy_replay_fixture.py) 写入独立临时根。默认使用三个每会话上涨一美元的标的，并分别在入场和退出的执行会话设置一条晚到 bar。`--target-weights` 生成另一组固定价格序列，让前三名的次序在回测中变化，用于核对 Top-N 截断、等权名义金额和调仓。

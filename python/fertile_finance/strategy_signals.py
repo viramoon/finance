@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from .portfolio_inputs import DataGap, ResearchError
 from .research_decimal import EXACT_RESEARCH_CONTEXT
 from .strategy_allocation import Claim, Limit, allocate
-from .strategy_indicators import IndicatorEvaluator, evaluate_indicator
+from .strategy_indicators import IndicatorEvaluator, RustIndicatorEvaluator
 from .strategy_plan import BUNDLE_PLAN_VERSION, plan_decimal
 
 if TYPE_CHECKING:
@@ -33,6 +33,7 @@ class BundleSession:
     """The bars, membership and portfolio snapshot visible at a session close."""
 
     day: date
+    open_ts: int
     ts_event: int
     bars: Mapping[str, "Bar"]
     members: frozenset[str]
@@ -82,11 +83,13 @@ class BundleSignalEvaluator:
         self.reentry = spec["policy"]["same_session_reentry"]
         self.factors = spec["factors"]
         self.modules = spec["modules"]
-        self.indicator_evaluator = evaluate_indicator if indicator_evaluator is None else indicator_evaluator
+        self.indicator_evaluator = indicator_evaluator
+        self.indicator_backend = RustIndicatorEvaluator() if indicator_evaluator is None else None
         # External observations also load compiler plans from a local file.
         # Reject malformed cyclic graphs before an observation traverses them.
         TopologicalSorter({name: component.get("depends_on", ()) for name, component in self.factors.items()}).prepare()
         self.history = {}
+        self.session_times = {}
         self.factor_values = {}
         self.gross_cap = Fraction(plan_decimal(spec["portfolio"]["max_gross_weight"]))
         self.asset_cap = Fraction(plan_decimal(spec["portfolio"]["max_weight_per_asset"]))
@@ -120,6 +123,10 @@ class BundleSignalEvaluator:
         self.priorities = {key: sleeve.priority for key, sleeve in self.sleeves.items()}
         self.budgets = {key: sleeve.budget for key, sleeve in self.sleeves.items()}
 
+    def close(self):
+        if self.indicator_backend is not None:
+            self.indicator_backend.close()
+
     def _update_history(self, session):
         bars = session.bars
         previous = self.history
@@ -128,6 +135,10 @@ class BundleSignalEvaluator:
         }
         for key, history in self.history.items():
             history.append(bars[key])
+        if self.indicator_backend is not None:
+            for key in previous.keys() - self.history.keys():
+                self.indicator_backend.discard(key)
+            self.session_times[session.ts_event] = (session.day, session.open_ts)
         self.factor_values.clear()
 
     def _value(self, factor, key):
@@ -149,7 +160,13 @@ class BundleSignalEvaluator:
                 continue
             value = None
             if history and all(self.factor_values[dep, key] is not None for dep in dependencies):
-                value = self.indicator_evaluator(history, component["use"], component["params"])
+                if self.indicator_backend is None:
+                    value = self.indicator_evaluator(history, component["use"], component["params"])
+                else:
+                    value = self.indicator_backend.value(
+                        key, current, history, component["use"], component["params"],
+                        component.get("output", "value"), self.session_times,
+                    )
                 if value is not None and (not isinstance(value, Decimal) or not value.is_finite()):
                     raise ResearchError("invalid_factor", "Configured indicator must return a finite Decimal or None")
             self.factor_values[cache_key] = value

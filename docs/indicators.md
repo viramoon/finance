@@ -1,6 +1,6 @@
 # v1 行情指标
 
-主图查询和策略组件登记共用 `finance_api::indicators`。内核是 Rust 库模块，可在本进程增量消费闭合 bar，也可从同一批 bar 重建状态。现有 finance-api 和 F2 编译器都在 Rust 中运行，直接调用可复用 `rust_decimal`，无需另一套 Python 算法或额外进程。当前锁定的 Nautilus 指标使用 `f64`，其回测引擎、行情模型和 catalog 仍由现有路径提供。
+主图查询、策略组件登记、配置回测和实时决策共用 `finance_api::indicators`。内核是 Rust 库模块，可增量消费闭合 bar，也可从同一批 bar 重建状态。finance-api 和 F2 编译器直接调用该模块，Python 策略运行器通过同一版本的本地 `finance-strategy` 子进程调用。Nautilus 继续提供回测引擎、行情模型和 catalog。
 
 ## 版本与计算口径
 
@@ -44,6 +44,6 @@
 
 增量调用 `IndicatorEngine::push_closed`，批量调用同一模块的 `batch`，二者走相同状态更新。按时间递增提交闭合 bar。`preview` 用上一根闭合后的状态计算一根未闭合 bar，结果带 `provisional`，每次预览都从同一闭合状态开始。`warmup` 描述是否已取得首值所需的输入，与 bar 的闭合状态独立。策略只接收已经闭合且在决策时刻已可用的输入。
 
-重启时用相同的组件版本与参数，从相同序列起点回放闭合 bar。`advance_closed` 执行与 `push_closed` 相同的计算、检查和提交，省略输出构造。EMA、RSI 和 MACD 等递推指标依赖种子，有限滚动窗口不能保证重建旧状态。处理 F1 更正时，输入方先按目标位置和修订顺序解析闭合历史，再按更新后的序列重放。策略回放按 `first_available_ts` 筛选当时可见的版本。F7 和 F13 可从 [StrategyBundle](strategy-bundle.md) 的已解析版本和参数构建引擎，并在其各自的回放时钟中调用该模块。HTTP 最新快照用于绘图，策略接入须提供自己的闭合历史和点时可用时钟。
+重启时用相同的组件版本与参数，从相同序列起点回放闭合 bar。`advance_closed` 执行与 `push_closed` 相同的计算、检查和提交，省略输出构造。EMA、RSI 和 MACD 等递推指标依赖种子，有限滚动窗口不能保证重建旧状态。处理 F1 更正时，输入方先按目标位置和修订顺序解析闭合历史，再按更新后的序列重放。策略回放按 `first_available_ts` 筛选当时可见的版本。配置回测和实时决策从 [StrategyBundle](strategy-bundle.md) 取得组件版本、参数和所选输出列，以各自的回放时钟和点时闭合历史推进同一内核。主图使用已发布的展示序列。
 
 算法、输入或舍入口径变化须注册新组件版本。用合成事件检查批量、增量和重启路径见 [指标测试](../crates/finance-api/tests/indicators.rs)。主图选择数据范围、版本和预览选项见 [HTTP API](api.md#主图行情与指标)。

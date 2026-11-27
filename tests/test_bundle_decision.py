@@ -1,10 +1,12 @@
 """Compare F7 job targets with the decision process on fixed synthetic sessions."""
 
 from contextlib import closing
+from decimal import Decimal
 from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -22,6 +24,7 @@ from fertile_finance.strategy_replay import canonical_sha256
 REPO = Path(__file__).resolve().parents[1]
 SESSION_SCHEMA = "fertile.finance/decision-session/v1"
 EXECUTION = "execution.next_close_cash_equity@1.0.0"
+BOLLINGER = "indicator.bollinger@1.0.0"
 
 
 def _plan(*, ranking):
@@ -88,6 +91,23 @@ def _encode(frame):
     return (json.dumps(frame, sort_keys=True) + "\n").encode("utf-8")
 
 
+def _bollinger_bundle():
+    bundle = _plan(ranking=False)["bundle"]
+    spec = bundle["spec"]
+    spec["factors"] = {
+        name: {"use": BOLLINGER, "params": {"period": 2}, "output": name}
+        for name in ("upper", "lower")
+    }
+    entry = spec["modules"]["A1"]
+    entry["params"] = {"factor": "upper", "threshold": "100"}
+    spec["modules"]["lowerEntry"] = {**entry, "params": {"factor": "lower", "threshold": "100"}}
+    spec["recipes"]["Lower"] = {**spec["recipes"]["A1_B2"], "entry": "lowerEntry"}
+    sleeves = spec["portfolio"]["sleeves"]
+    sleeves[0]["budget_weight"] = "0.5"
+    sleeves.append({"recipe": "Lower", "priority": 20, "budget_weight": "0.5"})
+    return bundle
+
+
 def _session_frame(session):
     def number(value):
         return format(value.as_decimal(), "f")
@@ -124,18 +144,22 @@ class BundleDecisionTests(unittest.TestCase):
         self.replay_path = self.root / "sessions.ndjson"
         self.database = self.root / "finance-state/decisions/decisions.sqlite3"
         self.env = {"PATH": os.defpath, "FINANCE_PYTHON": sys.executable, "FERTILE_DATA_ROOT": str(self.root)}
+        if "FINANCE_STRATEGY_BIN" in os.environ:
+            self.env["FINANCE_STRATEGY_BIN"] = os.environ["FINANCE_STRATEGY_BIN"]
         self.arguments = ["--plan", str(self.plan_path), "--replay", str(self.replay_path)]
         self.command = [str(REPO / "scripts/finance-decision"), *self.arguments]
 
-    def record_backtest(self, *, ranking):
-        plan = _plan(ranking=ranking)
+    def record_backtest(self, *, ranking, plan=None, raw=None):
+        if plan is None:
+            plan = _plan(ranking=ranking)
         plan_digest = canonical_sha256(plan)
         self.plan_path.write_text(json.dumps(plan), encoding="utf-8")
-        # The synthetic replay lives outside the decision state directory.
-        fixture = self.root / "fixture"
-        build(fixture, target_weights=ranking)
-        replay = fixture / "finance-state/backtests/strategy-inputs" / BARS_REF / f"{UNIVERSE_REF}.json"
-        raw = replay.read_bytes()
+        if raw is None:
+            # The synthetic replay lives outside the decision state directory.
+            fixture = self.root / "fixture"
+            build(fixture, target_weights=ranking)
+            replay = fixture / "finance-state/backtests/strategy-inputs" / BARS_REF / f"{UNIVERSE_REF}.json"
+            raw = replay.read_bytes()
         frames, rows = [], []
         offset = 0
 
@@ -239,14 +263,21 @@ class BundleDecisionTests(unittest.TestCase):
         guard = """
 import os
 from pathlib import Path
+import stat
 import sys
 
 root = Path(os.environ['FERTILE_DATA_ROOT'])
 database = root / 'finance-state/decisions/decisions.sqlite3'
+indicator = os.environ.get('FINANCE_STRATEGY_BIN', 'finance-strategy')
+indicator_launches = []
 def local_decision(event, args):
     assert not event.startswith('socket.'), event
-    if event == 'open':
-        assert not args[2] & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC), args
+    if event == 'open' and args[2] & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC):
+        # Popen wraps the existing stdin pipe descriptor in a writable stream.
+        assert type(args[0]) is int and stat.S_ISFIFO(os.fstat(args[0]).st_mode), args
+    if event == 'subprocess.Popen':
+        assert args[0] == indicator and args[1] == [indicator, 'evaluate-indicators'], args
+        indicator_launches.append(args[0])
     if event == 'sqlite3.connect':
         assert Path(args[0]) == database, args
     if event == 'os.mkdir':
@@ -255,6 +286,7 @@ def local_decision(event, args):
 sys.addaudithook(local_decision)
 from fertile_finance.decision import main
 result = main()
+assert indicator_launches == [indicator]
 assert 'fertile_finance.strategy_backtest' not in sys.modules
 assert 'nautilus_trader.backtest.engine' not in sys.modules
 assert 'nautilus_trader.trading.strategy' not in sys.modules
@@ -276,6 +308,106 @@ raise SystemExit(result)
                       ("2024-03-05", "BBB.XNYS", "0", "target_weight"),
                       ("2024-03-05", "AAA.XNYS", "20", "target_weight")):
             self.assertIn(point, points)
+
+    def test_f6_bollinger_chart_worker_and_restarted_decision_agree(self):
+        compiler = os.environ.get("FINANCE_STRATEGY_BIN") or shutil.which("finance-strategy")
+        self.assertIsNotNone(compiler, "Set FINANCE_STRATEGY_BIN to the built finance-strategy executable")
+        self.env["FINANCE_STRATEGY_BIN"] = compiler
+        compiled = subprocess.run(
+            [compiler, "compile", "--format", "json", "-"], input=json.dumps(_bollinger_bundle()),
+            capture_output=True, text=True, timeout=20,
+        )
+        self.assertEqual(compiled.returncode, 0, compiled.stderr)
+        plan = json.loads(compiled.stdout)
+        self.assertEqual({row.get("output") for row in plan["factors"]}, {"upper", "lower"})
+        replay_path = os.environ.get("FINANCE_F6_REPLAY_JSON")
+        chart_path = os.environ.get("FINANCE_F6_CHART_JSON")
+        self.assertEqual(bool(replay_path), bool(chart_path), "Chart integration requires both fixture paths")
+        replay = Path(replay_path).read_bytes() if replay_path else None
+        frames, expected = self.record_backtest(ranking=True, plan=plan, raw=replay)
+        if chart_path:
+            chart = json.loads(Path(chart_path).read_text(encoding="utf-8"))
+            self._assert_bollinger_matches_chart(compiler, chart, frames)
+
+        # BBB rises from 80 to 100 at the first decision close. Only its upper
+        # band exceeds 100. AAA's lower band crosses 100 after two closes at 250.
+        points = {(row[2], *row[4:]) for row in expected}
+        self.assertEqual([row[4:] for row in expected if row[2] == "2024-03-01"],
+                         [("A1_B2", "BBB.XNYS", "250", "recipe_entry")])
+        self.assertTrue(any(day == "2024-03-06" and recipe == "Lower" and instrument == "AAA.XNYS"
+                            and int(target) > 0 and reason == "recipe_entry"
+                            for day, recipe, instrument, target, reason in points))
+
+        lines = list(map(_encode, frames))
+        first_active = next(i for i, frame in enumerate(frames) if not frame["warmup"])
+        prefix = b"".join(lines[:first_active + 1])
+        self.replay_path.write_bytes(prefix)
+        first = self._follow()
+        self._wait_for_checkpoint(first, len(prefix))
+        self.assertEqual(self._rows(), [row for row in expected if row[0] <= len(prefix)])
+        first.kill()
+        _, stderr = first.communicate(timeout=10)
+        self.assertEqual(first.returncode, -9, stderr)
+
+        with self.replay_path.open("ab") as stream:
+            stream.writelines(lines[first_active + 1:])
+        restarted = self._follow()
+        self._wait_for_checkpoint(restarted, sum(map(len, lines)))
+        restarted.terminate()
+        _, stderr = restarted.communicate(timeout=10)
+        self.assertEqual(restarted.returncode, 0, stderr)
+        self.assertEqual(self._rows(), expected)
+        once = self._launch()
+        self.assertEqual(once.returncode, 0, once.stderr)
+        self.assertEqual(self._rows(), expected)
+
+        # Before the F6 bridge, checkpoints used the compiled plan hash alone.
+        # The same plan must not append to an existing pre-F6 decision history.
+        old_checkpoint = canonical_sha256(plan)
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            self.assertNotEqual(connection.execute("SELECT plan_sha256 FROM decision_checkpoint").fetchone(),
+                                (old_checkpoint,))
+            connection.execute("UPDATE decision_checkpoint SET plan_sha256=?", (old_checkpoint,))
+        previous_backend = self._launch()
+        self.assertEqual(previous_backend.returncode, 1, previous_backend.stderr)
+        self.assertIn("decision store belongs to a different strategy plan", previous_backend.stderr)
+        self.assertEqual(self._rows(), expected)
+
+    def _assert_bollinger_matches_chart(self, compiler, chart, frames):
+        schedule = nyse().schedule
+        self.assertEqual(set(chart), set(frames[0]["bars"]))
+        for instrument, rows in sorted(chart.items()):
+            by_day = {row["bar"]["trading_day"]: row for row in rows}
+            for selected in ("upper", "lower"):
+                commands = [{"action": "start", "series": 1, "id": BOLLINGER,
+                             "params": {"period": 2}, "output": selected}]
+                values = [{"value": None}]
+                for frame in frames:
+                    day = frame["session"]
+                    row = by_day[day]
+                    bar = frame["bars"][instrument]
+                    fields = {name: bar[name] for name in ("open", "high", "low", "close", "volume")}
+                    self.assertEqual({name: Decimal(value) for name, value in fields.items()},
+                                     {name: Decimal(row["bar"][name]) for name in fields})
+                    opening, closing = schedule.at[day, "open"], schedule.at[day, "close"]
+                    self.assertEqual(row["bar"]["open_ts"], opening.isoformat().replace("+00:00", "Z"))
+                    self.assertEqual(row["bar"]["end_ts"], closing.isoformat().replace("+00:00", "Z"))
+                    self.assertEqual(str(closing.value), bar["first_available_ts"])
+                    self.assertFalse(row["provisional"])
+                    commands.append({"action": "push", "series": 1, "bars": [{
+                        "trading_day": day, "open_ts": str(opening.value),
+                        "end_ts": bar["first_available_ts"], **fields,
+                    }]})
+                    values.append({"value": row["indicator_values"][0]["values"].get(selected)})
+                points = subprocess.run(
+                    [compiler, "evaluate-indicators"], input=b"".join(map(_encode, commands)),
+                    capture_output=True, timeout=20,
+                )
+                self.assertEqual(points.returncode, 0, points.stderr.decode(errors="replace"))
+                actual = [json.loads(line) for line in points.stdout.splitlines()]
+                self.assertEqual(actual, values, (instrument, selected))
+                self.assertIsNone(actual[1]["value"])
+                self.assertIsNotNone(actual[-1]["value"])
 
     def test_bundle_invalid_session_does_not_advance_checkpoint(self):
         frames, _ = self.record_backtest(ranking=True)

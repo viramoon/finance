@@ -9,7 +9,10 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: finance-strategy schema | registry | compile [--format yaml|json] [--bindings SQLITE] <FILE|->\n       finance-strategy compile-legacy-sma <INSTRUMENT> <FAST_PERIOD> <SLOW_PERIOD> <SHARES>";
+#[path = "finance-strategy/indicator_stream.rs"]
+mod indicator_stream;
+
+const USAGE: &str = "usage: finance-strategy schema | registry | compile [--format yaml|json] [--bindings SQLITE] <FILE|->\n       finance-strategy compile-legacy-sma <INSTRUMENT> <FAST_PERIOD> <SLOW_PERIOD> <SHARES>\n       finance-strategy evaluate-indicators";
 
 fn main() -> ExitCode {
     match run(std::env::args_os().skip(1).collect()) {
@@ -26,6 +29,9 @@ fn run(args: Vec<OsString>) -> Result<ExitCode, &'static str> {
         [command] if command == "schema" => json_line(io::stdout().lock(), &bundle_schema())?,
         [command] if command == "registry" => {
             json_line(io::stdout().lock(), &component_registry())?
+        }
+        [command] if command == "evaluate-indicators" => {
+            indicator_stream::run(io::stdin().lock(), io::stdout().lock())?
         }
         [command] if command == "--help" || command == "-h" => println!("{USAGE}"),
         [command, args @ ..] if command == "compile" => return compile_file(args),

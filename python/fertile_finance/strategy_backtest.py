@@ -2,6 +2,7 @@
 
 from collections import defaultdict
 from collections.abc import Callable, Sequence
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP, localcontext
@@ -144,7 +145,7 @@ class _ConfiguredStrategy(_PortfolioStrategy):
     def mark_and_signal(self, event):
         day = event.date
         session = BundleSession(
-            day, event.ts_event, self.inputs.bars[day], self.inputs.members[day], self.cash,
+            day, self.inputs.opens[day], event.ts_event, self.inputs.bars[day], self.inputs.members[day], self.cash,
             {
                 name: SleeveState(
                     dict(sleeve.shares),
@@ -639,9 +640,10 @@ def run_config_strategy_backtest(
         strategy = _ConfiguredStrategy(
             inputs, config, plan, start, indicator_evaluator, costs, signal_observer=signal_observer,
         )
-        strategy, positions, orders, total_positions = _simulate(
-            inputs, config, strategy=strategy, execution_prices=costs.prices, fee_model=costs, quote_nonmembers=True,
-        )
+        with closing(strategy.signals):
+            strategy, positions, orders, total_positions = _simulate(
+                inputs, config, strategy=strategy, execution_prices=costs.prices, fee_model=costs, quote_nonmembers=True,
+            )
         signals = {
             str(order_id): FillSignal(row.signal_date, row.signal_ts, row.fill_date)
             for order_id, row in strategy.orders.items()

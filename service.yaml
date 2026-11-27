@@ -91,6 +91,8 @@ processes:
     strategy_bundle:
       replay_inputs: finance-state/backtests/strategy-inputs
       pinned_inputs: strategy_backtest_snapshots
+      indicator_command: finance-strategy evaluate-indicators
+      indicator_bin_env: FINANCE_STRATEGY_BIN
       mode: offline_backtest
     health: 监测 worker 进程和最近作业的终态
     restart_policy: fertile deploy/
@@ -105,6 +107,9 @@ processes:
     replay_formats:
       sma_crossover: f1_event_ndjson
       strategy_bundle: decision_session_ndjson # 使用源码构建的 Python 环境
+    strategy_bundle:
+      indicator_command: finance-strategy evaluate-indicators
+      indicator_bin_env: FINANCE_STRATEGY_BIN
     state: finance-state/decisions/decisions.sqlite3
     health: 监测进程状态与持久消费进度
     restart_policy: fertile deploy/

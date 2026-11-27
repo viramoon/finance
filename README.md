@@ -94,7 +94,7 @@ curl http://127.0.0.1:8081/healthz/ready
 curl http://127.0.0.1:8081/api/v1/backtests/sample
 ```
 
-端口默认 8081，配置优先级、错误状态、精确金额与 OpenAPI 导出见 [API 文档](docs/api.md)。示例接口读取 latest.json。多个回测 worker 可在同一宿主上通过 SQLite 租约并行领取作业。collector 的行情状态可在 /api/v1/market/status 查询。`scripts/finance-decision` 独立消费闭合行情与策略所需的本地只读快照，与 `SmaCrossover` 和 `StrategyBundle` 回测共用对应的目标求值器。启动与恢复见 [运行手册](RUNBOOK.md#实时决策与并行回测)。
+端口默认 8081，配置优先级、错误状态、精确金额与 OpenAPI 导出见 [API 文档](docs/api.md)。示例接口读取 latest.json。多个回测 worker 可在同一宿主上通过 SQLite 租约并行领取作业。collector 的行情状态可在 /api/v1/market/status 查询。`scripts/finance-decision` 独立消费闭合行情与策略所需的本地只读快照，与 `SmaCrossover` 和 `StrategyBundle` 回测共用对应的目标求值器。配置策略通过本地 `finance-strategy` 使用主图的 Rust 指标内核。启动与恢复见 [运行手册](RUNBOOK.md#实时决策与并行回测)。
 
 主图通过 `GET /api/v1/market/bars` 查询已发布的 bar 和派生指标。版本、参数、数值域和预览规则见 [统一指标](docs/indicators.md)，数据源接入见 [主图 API](docs/api.md#主图行情与指标)。
 

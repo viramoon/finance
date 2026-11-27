@@ -48,13 +48,13 @@ def _open_store(connection: sqlite3.Connection, replay) -> _Checkpoint:
     with connection:
         connection.execute(
             "INSERT OR IGNORE INTO decision_checkpoint VALUES (1, ?, 0, ?)",
-            (replay.plan_sha256, sha256().hexdigest()),
+            (replay.checkpoint_identity, sha256().hexdigest()),
         )
         plan_hash, offset, digest = connection.execute(
             "SELECT plan_sha256, replay_offset, replay_sha256 FROM decision_checkpoint WHERE id = 1"
         ).fetchone()
-    if plan_hash != replay.plan_sha256:
-        raise DecisionError("decision store belongs to a different strategy plan")
+    if plan_hash != replay.checkpoint_identity:
+        raise DecisionError("decision store belongs to a different strategy plan or indicator evaluator")
     replay.initialize(connection)
     return _Checkpoint(offset, digest)
 
@@ -118,9 +118,13 @@ class _SmaReplay:
     def __init__(self, plan):
         self.plan = plan
         self.plan_sha256 = plan.content_sha256
+        self.checkpoint_identity = self.plan_sha256
         self.evaluator = open_evaluator(plan)
         self.previous = None
         self.decision_ts = 0
+
+    def close(self):
+        """The in-process evaluator holds no external resources."""
 
     def initialize(self, connection):
         connection.execute("""
@@ -200,9 +204,11 @@ def _consume(
     follow: bool,
     stopped: Callable[[], bool],
 ) -> None:
-    adapter = _replay_adapter(plan)
     # Read-only, nonblocking open also lets us reject non-regular inputs such as FIFOs.
-    with os.fdopen(os.open(replay_path, os.O_RDONLY | os.O_NONBLOCK), "rb") as replay:
+    with (
+        closing(_replay_adapter(plan)) as adapter,
+        os.fdopen(os.open(replay_path, os.O_RDONLY | os.O_NONBLOCK), "rb") as replay,
+    ):
         opened = os.fstat(replay.fileno())
         if not stat.S_ISREG(opened.st_mode):
             raise DecisionError("replay must be a regular file")

@@ -151,6 +151,8 @@ class StrategyBacktestTests(unittest.TestCase):
             "Upper": {"use": reference, "params": dict(parameters), "output": "upper"},
             "Lower": {"use": reference, "params": dict(parameters), "output": "lower"},
         }
+        for sleeve in ("Upper", "Lower"):
+            plan["bundle"]["spec"]["modules"][sleeve]["params"]["threshold"] = "12"
         calls = []
 
         def indicator(bars, component, params):
@@ -167,11 +169,13 @@ class StrategyBacktestTests(unittest.TestCase):
             (first_close, reference, parameters),
         ])
 
-        with self.assertRaises(ResearchError) as error:
-            run_config_strategy_backtest(
-                plan=plan, assets=assets, universe=universe, start=dates[1], end=dates[-1],
-            )
-        self.assertEqual(error.exception.code, "unsupported_strategy_component")
+        observed = {}
+        result = run_config_strategy_backtest(
+            plan=plan, assets=assets, universe=universe, start=dates[1], end=dates[-1],
+            signal_observer=lambda session, signal: observed.update({session.day: signal.targets}),
+        )
+        self.assertEqual(observed[dates[1]], {(SYMBOL, "Upper"): 41})
+        self.assertEqual(result.total_orders, 1)
 
     def test_transitive_factor_dependency_blocks_entry_until_available(self):
         dates, assets, universe = _input(["10.00"] * 3 + ["11.00"] * 3, [10] * 6)
