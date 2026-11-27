@@ -155,6 +155,8 @@ processes:
         versions: 'GET /api/v1/strategies'
         version: 'GET /api/v1/strategies/{id}/versions/{version}'
       backtest_routes:
+        list: 'GET /api/v1/backtests'
+        public_list: 'GET /api/v1/backtests?visibility=legacy'
         detail: 'GET /api/v1/backtests/{id}'
         cancel: 'POST /api/v1/backtests/{id}/cancel'
         worker_status: 'GET /api/v1/backtests/worker-status'

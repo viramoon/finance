@@ -78,6 +78,16 @@ PYTHONPATH=python "$FINANCE_PYTHON" -m unittest discover -s tests -p test_worker
 
 用 `GET /api/v1/backtests/worker-status` 核对队列和租约。出现缺失或过期的租约时，检查 worker 进程和本地锁，再按[回测作业恢复](docs/backtest-jobs.md#worker-运行与恢复)处置。发布决策信号前核对输入许可和计划哈希，在现有决策目录原子发布 `read-v1.json`。需要下线读取时撤下发布文件。出现 `decision_not_published` 时检查发布文件和数据库是否在同一数据根。升级旧 SMA 库时先用原回放启动新版决策进程，重验整个已提交前缀。出现许可变化时停止发布，在独立数据根用已审核的同许可回放重建。因子、决策和回测队列绑定数据根以下的实体路径。因子报告按因子版本和评价 ID 从 F8 快照定位。[查询参数、许可和发布格式](docs/api.md#第二批策略回测与研究契约)
 
+### 公开回测列表验收
+
+在隔离数据根运行以下测试，核对旧库升级、旧写入格式、索引范围查询以及跨私有历史的分页。
+
+```sh
+cargo test --locked --offline -p finance-api legacy
+```
+
+新版 API 首次打开队列或新版 worker 启动时，SQLite 自动为已有队列建立 `jobs_legacy_id` 部分索引。索引已存在时会直接复用。若队列较大，可在切换 web 匿名列表之前以新版 API 访问一次 `GET /api/v1/backtests?visibility=legacy&limit=1` 并确认返回 200。旧版 API 和 worker 仍可使用升级后的队列。web 匿名请求固定使用 `visibility=legacy`，并在续页时保留该参数。回滚到旧版 finance 时需同时回滚依赖此参数的 web 版本。[回测列表分页](docs/api.md#回测列表分页)
+
 ## 第三批读契约验收
 
 用进程内路由和合成输入核对 bars、指标、Binance profile 与期权响应。测试使用临时数据根。

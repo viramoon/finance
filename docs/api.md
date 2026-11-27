@@ -46,6 +46,18 @@ POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /a
 
 `finance-decision` 的信号与检查点保存在本地决策库。信号发布和分页见[第二批契约](#第二批策略回测与研究契约)，进程边界见[实时决策接口](decision-process.md)。
 
+### 回测列表分页
+
+`GET /api/v1/backtests` 按作业 ID 升序返回 `Page { items, next_cursor }`。
+
+| 参数 | 语义 |
+| --- | --- |
+| `limit` | 每页 1～100 条，默认 20。 |
+| `cursor` | 排他的 ID 下界，接受非负 int64，默认 0。 |
+| `visibility` | 可选，唯一有效值为 `legacy`，仅列出 `DemoStrategy` 和 `SmaCrossover` 作业。省略时返回完整队列，包含 `StrategyBundle`。 |
+
+`next_cursor` 为 JSON int64 或 `null`。同一筛选下还有作业时，它等于当前页最后一条作业的 ID。续页时原样传回该值并使用相同的可见性筛选。`null` 表示该筛选已到末页。客户端须无损解码 int64，以保留大于 JavaScript 安全整数上限的 ID 和游标。无效或重复的 `visibility` 返回 `422 / invalid_request`。web 负责调用方授权并对匿名列表固定发送 `visibility=legacy`。该筛选只适用于列表。
+
 ## 配置策略提交与结果
 
 `POST /api/v1/strategies` 接受 `{"format":"yaml","content":"<配置文件内容>"}`，也接受带 `format: "json"` 的 JSON 配置文档。通过校验时返回 200 和 `{id, version, content_sha256}`。同一版本的等价文档可重复登记。登记或内联入队遇到已绑定不同内容的版本时返回 409 `VERSION_CONFLICT`，`error.path` 为 `/metadata/version`，`error.location` 指向本次提交的 YAML 或 JSON 配置中的版本值，行列从 1 起算。配置校验错误返回 422，`error` 包含编译器错误码、消息、字段 `path` 和行列 `location`。原始配置上限为 256 KiB。
