@@ -6,6 +6,7 @@ use crate::market::{
     OptionMinuteSource,
 };
 use finance_market_protocol::U64Text;
+use ibapi::contracts::{Contract, ContractDetails, OptionRight, SecurityType};
 use ibapi::replay::{MarketReplay, MarketWrite, ReplayHistoricalBar};
 use std::{collections::VecDeque, sync::Mutex};
 use time::macros::datetime;
@@ -60,7 +61,23 @@ async fn verified_paper_option_history_requests_and_decodes_synthetic_bars() {
     let con_id = 91002;
     let query = ContractQuery::Option { con_id };
     let expiry = Utc::now() + chrono::Duration::days(2);
-    let expiry_date = expiry.format("%Y%m%d").to_string();
+    let details = ContractDetails {
+        contract: Contract {
+            contract_id: con_id,
+            symbol: "SYNTH".into(),
+            security_type: SecurityType::Option,
+            strike: 10.125,
+            right: Some(OptionRight::Call),
+            multiplier: "100".into(),
+            exchange: "SMART".into(),
+            currency: "USD".into(),
+            ..Contract::default()
+        },
+        real_expiration_date: expiry.format("%Y%m%d").to_string(),
+        under_contract_id: 91001,
+        under_security_type: "STK".into(),
+        ..ContractDetails::default()
+    };
     let cutoff = u64::try_from(expiry.timestamp_nanos_opt().unwrap())
         .unwrap()
         .into();
@@ -70,10 +87,8 @@ async fn verified_paper_option_history_requests_and_decodes_synthetic_bars() {
             let MarketWrite::Confirm(Some(id)) = replay.writes()[2] else {
                 panic!("expected an option confirmation request");
             };
-            replay
-                .option_contract(id, con_id, &expiry_date)
-                .await
-                .unwrap();
+            replay.option_contract(id, &details).await.unwrap();
+            replay.contract_data_end(id).await.unwrap();
         })
     })
     .await

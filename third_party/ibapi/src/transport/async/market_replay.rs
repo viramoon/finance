@@ -243,36 +243,6 @@ impl MarketReplay {
             .await
     }
 
-    /// Answer an option confirmation with synthetic SMART equity option metadata.
-    pub async fn option_contract(&self, request_id: i32, con_id: i32, expiry: &str) -> Result<(), Error> {
-        self.inject(
-            IncomingMessages::ContractData,
-            proto::ContractData {
-                req_id: Some(request_id),
-                contract: Some(proto::Contract {
-                    con_id: Some(con_id),
-                    symbol: Some("SYNTH".into()),
-                    sec_type: Some("OPT".into()),
-                    strike: Some(10.125),
-                    right: Some("C".into()),
-                    multiplier: Some(100.0),
-                    exchange: Some("SMART".into()),
-                    currency: Some("USD".into()),
-                    ..Default::default()
-                }),
-                contract_details: Some(proto::ContractDetails {
-                    real_expiration_date: Some(expiry.into()),
-                    under_con_id: Some(91001),
-                    under_sec_type: Some("STK".into()),
-                    ..Default::default()
-                }),
-            },
-        )
-        .await?;
-        self.inject(IncomingMessages::ContractDataEnd, proto::ContractDataEnd { req_id: Some(request_id) })
-            .await
-    }
-
     /// Answer a one-shot history request with a synthetic page and its end marker.
     pub async fn historical_bars(&self, request_id: i32, bars: Vec<ReplayHistoricalBar>, start: &str, end: &str) -> Result<(), Error> {
         self.inject(
