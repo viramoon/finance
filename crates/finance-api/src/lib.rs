@@ -1,6 +1,8 @@
+pub mod bars;
 mod bundle_jobs;
 pub mod config;
 mod factor_read;
+pub mod indicators;
 pub mod jobs;
 pub mod market;
 mod market_read;
@@ -18,7 +20,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, str::FromStr};
+use std::{path::PathBuf, str::FromStr, sync::Arc};
 use utoipa::{OpenApi, ToSchema};
 
 #[derive(Clone)]
@@ -181,6 +183,11 @@ async fn private_read(request: Request, next: Next) -> Response {
 }
 
 pub fn router(state: AppState) -> Router {
+    let source = Arc::new(bars::LocalBarsSource::new(state.data_root.clone()));
+    router_with_bars_source(state, source)
+}
+
+pub fn router_with_bars_source(state: AppState, source: Arc<dyn bars::BarsSource>) -> Router {
     let restricted_reads = market_read::routes()
         .merge(factor_read::routes())
         .layer(middleware::from_fn(private_read));
@@ -190,6 +197,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/backtests/sample", get(sample))
         .route("/api/v1/market/status", get(market::status))
         .route("/api/v1/backtests/datasets", get(research::datasets))
+        .merge(bars::routes(source))
         .merge(jobs::routes())
         .merge(restricted_reads)
         .with_state(state)
@@ -201,6 +209,9 @@ pub fn router(state: AppState) -> Router {
         ready,
         sample,
         market::status,
+        bars::chart,
+        bars::catalog,
+        bars::values,
         jobs::submit,
         jobs::detail,
         jobs::list,

@@ -13,6 +13,24 @@
       "seed": "fixed",
       "source": "Rust 测试复用已登记的 F1 合成事件并补充固定的十进制、序号和更正常量，在临时目录构造 WAL、质量报告和投影索引。 跨语言投影联测另复用 F5 已登记的 v2 合成永续上下文。"
     },
+    "crates/finance-collector/tests/nasdaq_totalview.rs": {
+      "sha256": "48a6ca8545714d4623d430f6ebbb1a9a87094f048f7e47c25c0432716f360ab3",
+      "generator": "scripts/export-totalview-review-sources.sh",
+      "seed": "fixed",
+      "source": "固定合成深度行用于隔离子进程展示。既有 v1/examples.json 的合成盘口快照用于同数据根 WAL 写入对照。用 sh scripts/export-totalview-review-sources.sh 从当前提交导出测试源码。"
+    },
+    "crates/finance-ib/src/depth/focus/tests.rs": {
+      "sha256": "9f2474868520829c569a1a2450c218ce1ccb6725e807dba870d99d8cd4d0ca94",
+      "generator": "scripts/export-totalview-review-sources.sh",
+      "seed": "fixed",
+      "source": "独立列出八个 Nasdaq 代码，配合固定合成深度行、回调和焦点切换，验证并发上限、位置语义、清簿和故障。用 sh scripts/export-totalview-review-sources.sh 从当前提交导出测试源码。"
+    },
+    "crates/finance-ib/src/depth/transport_tests.rs": {
+      "sha256": "b0e3eafbeb835eddb2cf2250ba546eae103ab1d3659491d386b0af2a4b04e818",
+      "generator": "scripts/export-totalview-review-sources.sh",
+      "seed": "fixed",
+      "source": "MarketReplay 从固定合约、模拟账户标识、价量及通知码生成内存 Protobuf，验证 paper 保护、精确解码和请求生命周期。用 sh scripts/export-totalview-review-sources.sh 从当前提交导出测试源码。"
+    },
     "crates/finance-ib/src/market/replay_tests.rs": {
       "sha256": "247dea98dc62e76c1a1513dbd71c74aafee52a0f0e9113337aa1857161045e74",
       "generator": "scripts/export-ib-review-sources.sh",

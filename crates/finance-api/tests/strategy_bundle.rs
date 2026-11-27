@@ -1,9 +1,10 @@
+use finance_api::indicators::{IndicatorSpec, registry as indicator_registry};
 use finance_api::strategy_bundle::{
     Availability, Binding, BindingError, Catalog, CompiledPlan, Diagnostic, InputFormat, Location,
     MAX_BYTES, MemoryBindings, VersionBindings, bundle_schema, compile, component_registry,
     example_catalog,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{ffi::OsStr, fs, path::Path, process::Command};
 
 macro_rules! fixture {
@@ -119,6 +120,113 @@ fn compiles_a_b_and_a1_b2_from_the_complete_example() {
         assert_eq!(plan.inputs.bars.available_at, Availability::SessionClose);
         assert_eq!(plan.execution, "execution.next_close_cash_equity@1.0.0");
     }
+}
+
+fn with_indicator(id: &str, params: &Value, output: Option<&str>) -> String {
+    let selection = output.map_or_else(String::new, |name| format!("\n      output: {name}"));
+    ENTRY_EXIT.replace(
+        "use: \"indicator.rsi_wilder@1.0.0\"\n      params: {period: 14, field: close}",
+        &format!("use: {id:?}\n      params: {params}{selection}"),
+    )
+}
+
+#[test]
+fn compiles_every_registered_indicator_with_shared_warmup_and_output_selection() {
+    let registry = component_registry();
+    let components = registry["components"].as_array().unwrap();
+    let cases = [
+        ("sma", json!({"period": 4}), None, 3),
+        ("ema", json!({"period": 4}), None, 3),
+        (
+            "rsi_wilder",
+            json!({"period": 4, "field": "close"}),
+            None,
+            4,
+        ),
+        ("bollinger", json!({"period": 4}), Some("lower"), 3),
+        (
+            "macd",
+            json!({"fast_period": 8, "slow_period": 20, "signal_period": 7}),
+            Some("histogram"),
+            25,
+        ),
+        ("atr", json!({"period": 4}), None, 3),
+        ("vwap", json!({}), None, 0),
+        ("close_return", json!({"period": 4}), None, 4),
+        ("realized_volatility", json!({"period": 4}), None, 4),
+        ("volume_sma", json!({"period": 4}), Some("value"), 3),
+    ];
+    assert_eq!(cases.len(), indicator_registry().len());
+    for (name, params, output, warmup) in cases {
+        let id = format!("indicator.{name}@1.0.0");
+        let core = IndicatorSpec::new(&id, &params).unwrap();
+        assert_eq!(core.prior_bars(), warmup, "{id}");
+        let declaration = components.iter().find(|value| value["id"] == id).unwrap();
+        assert_eq!(declaration["outputs"], json!(core.definition().outputs));
+
+        let plan = compile_yaml(&with_indicator(&id, &params, output)).unwrap();
+        let factor = plan
+            .factors
+            .iter()
+            .find(|factor| factor.local_id == "rsi14")
+            .unwrap();
+        assert_eq!(factor.component, id);
+        assert_eq!(factor.kind, "indicator");
+        assert_eq!(factor.available_at, Availability::SessionClose);
+        assert_eq!(factor.warmup_sessions, warmup);
+        assert_eq!(factor.output.as_deref(), output);
+        let entry = plan
+            .modules
+            .iter()
+            .find(|module| module.local_id == "B1")
+            .unwrap();
+        assert_eq!(entry.warmup_sessions, warmup);
+        let factor = serde_json::to_value(factor).unwrap();
+        if let Some(output) = output {
+            assert_eq!(factor["output"], output);
+        } else {
+            assert!(factor.get("output").is_none());
+        }
+    }
+}
+
+#[test]
+fn macd_requires_a_registered_output_valid_period_order_and_enough_prior_sessions() {
+    const ID: &str = "indicator.macd@1.0.0";
+    let valid = json!({"fast_period": 8, "slow_period": 20, "signal_period": 7});
+    let missing = compile_yaml(&with_indicator(ID, &valid, None)).unwrap_err();
+    assert_eq!(missing.code, "REQUIRED_FIELD");
+    assert_eq!(missing.path, "/spec/factors/<key>/output");
+    let invalid = with_indicator(ID, &valid, Some("private_column"));
+    let error = assert_diagnostic(
+        compile_yaml(&invalid),
+        &invalid,
+        "INVALID_VALUE",
+        "/spec/factors/<key>/output",
+        "private_column",
+    );
+    assert_redacted_diagnostic(&error, &["private_column"]);
+    let equal_periods = with_indicator(
+        ID,
+        &json!({"fast_period": 20, "slow_period": 20, "signal_period": 7}),
+        Some("signal"),
+    );
+    assert_diagnostic(
+        compile_yaml(&equal_periods),
+        &equal_periods,
+        "INVALID_VALUE",
+        "/spec/factors/<key>/params/fast_period",
+        "20,\"signal_period\"",
+    );
+    let insufficient = with_indicator(ID, &valid, Some("macd"))
+        .replace("warmup_sessions: 30", "warmup_sessions: 24");
+    assert_diagnostic(
+        compile_yaml(&insufficient),
+        &insufficient,
+        "INSUFFICIENT_WARMUP",
+        "/spec/clock/warmup_sessions",
+        "24\n    missing_input",
+    );
 }
 
 #[test]

@@ -8,7 +8,7 @@ use crate::subscriptions::Subscription;
 use crate::{server_versions, Client, Error};
 
 use super::common::{decoders, encoders};
-use super::{Bar, DepthMarketDataDescription, MarketDepthBuilder, MarketDepths, RealtimeBarsBuilder, TickByTickBuilder, TickTypes, WhatToShow};
+use super::{Bar, DepthMarketDataDescription, MarketDepthBuilder, RealtimeBarsBuilder, TickByTickBuilder, TickTypes, WhatToShow};
 use crate::market_data::{SmartDepth, TradingHours};
 use crate::subscriptions::StreamDecoder;
 
@@ -229,12 +229,12 @@ pub(super) fn validate_tick_by_tick_request(client: &Client, _contract: &Contrac
     Ok(())
 }
 
-pub(crate) async fn market_depth(
+pub(crate) async fn market_depth<T: StreamDecoder<T> + Send + 'static>(
     client: &Client,
     contract: &Contract,
     number_of_rows: i32,
     smart_depth: SmartDepth,
-) -> Result<Subscription<MarketDepths>, Error> {
+) -> Result<Subscription<T>, Error> {
     let is_smart_depth = matches!(smart_depth, SmartDepth::Yes);
     if is_smart_depth {
         check_version(client.server_version(), Features::SMART_DEPTH)?;
@@ -246,7 +246,7 @@ pub(crate) async fn market_depth(
     let builder = client.request();
     let request = encoders::encode_request_market_depth(builder.request_id(), contract, number_of_rows, is_smart_depth)?;
     builder
-        .send_with_context::<MarketDepths>(request, client.decoder_context().with_smart_depth(is_smart_depth))
+        .send_with_context::<T>(request, client.decoder_context().with_smart_depth(is_smart_depth))
         .await
 }
 

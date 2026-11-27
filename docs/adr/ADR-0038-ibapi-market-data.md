@@ -30,6 +30,14 @@ sh scripts/export-ib-review-sources.sh > "$out/ib-review-sources.tar"
 python3 -B -m unittest discover -s tests -p test_data_guard.py -k test_ib_review_export -v
 ```
 
+## F9c 的 Nasdaq 场所深度扩展
+
+F9c 复用同一 Cargo patch。IBKR 的深度行按买卖侧和位置更新，漏掉更新后无法确认后续位置对应的盘口行。异步 `MarketDepthBuilder::subscribe_exact()` 使用现有 Protobuf 类型解析回调，原样保留数量字符串，并以可选字段表达缺失的价格或数量。源端价格仍以 binary64 传输，finance 在适配边界转换为可往返的 `DecimalText`。深度发送和取消复用既有 SDK 报文路径，取消沿用 `try_cancel()` 检查本地写入结果。[issue #40](https://github.com/viramoon/finance/issues/40)
+
+精确订阅将队列溢出报告为 `SubscriptionLagged` 并结束旧读取流，finance 收到该错误后清簿、取消并重新建立订阅。既有同步和异步 `subscribe()` 继续返回 `MarketDepths`，沿用各自的解码与队列处理。使用深度位置重建盘口的调用方应选择精确订阅。内存回放验证直接场所请求、原始数量、过载后的重置和已校验取消。部署沿用原工作区依赖和 paper 会话配置。相关接口见 [Nasdaq TotalView 场所深度](../integrations/ib.md#nasdaq-totalview-场所深度)。
+
+深度测试由固定 Rust 输入生成合约、深度行和状态通知。用 `sh scripts/export-totalview-review-sources.sh` 从当前提交导出三份合成测试的原始源码，校对登记的 SHA-256。运行手册列出执行回放的命令。[来源清单](../../.data-guard/sources.json) · [离线验收](../../RUNBOOK.md#离线验收-nasdaq-totalview-场所深度)
+
 ## 后续工作
 
-升级 SDK 时优先使用包含这些修复的上游版本。运行同一套内存回归，确认实际回调、数量、取消语义、重连期间关闭和 paper 会话边界后，移除本地补丁。
+升级 SDK 时优先使用包含这些修复的上游版本。移除本地补丁前，运行同一套内存回归，核对顶档实际回调、顶档和深度数量、深度队列溢出后的清簿语义、取消写入结果、重连期间关闭和 paper 会话边界。
