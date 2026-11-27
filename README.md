@@ -16,7 +16,7 @@ Nasdaq TotalView 提供八只自选标的的场所深度，最多同时钉住两
 
 本地行情链路支持 F1 事件追加、恢复和独立 Parquet 投影。已接入 [Hyperliquid 公共永续行情](docs/integrations/hyperliquid.md) 和 [Binance 现货与 USDT 永续](docs/integrations/binance.md)，Binance 内置 profile 默认关闭。[本地行情 WAL、投影与封段接口](docs/market-wal.md)
 
-F3 的投影重放校验和 Python 最新事件查询同步读取单个 Parquet 分区，读取在进程退出前完成。[投影读写约定](docs/market-wal.md#parquet-与投影游标)
+F3 的投影重放校验和 Python 最新事件查询同步读取单个 Parquet 分区，关闭预读与并行列解码。[投影读写约定](docs/market-wal.md#parquet-与投影游标)
 
 finance-api 提供 v1 行情 WAL、投影、水位、缺口及因子研究只读查询，并从代码导出 REST OpenAPI 和版本化 WS/SSE 消息契约。第三批覆盖主图 K 线、指标、Binance profile 状态以及期权链、订阅预算、Nasdaq 场所簿、期权敞口和历史窗口。IBKR 查询由获准的共享行情所有者接入，独立 API 未接入时返回 503。[第三批读契约](docs/api.md#第三批读契约)
 
