@@ -69,7 +69,7 @@ cargo run --locked --offline -q -p finance-api -- export-read-stream /tmp/financ
 
 ## 第二批策略回测与研究契约验收
 
-使用独立临时数据根运行以下测试。回测详情和取消都使用提交时返回的作业 ID。提交响应丢失时，以原 `Idempotency-Key` 调用 `GET /api/v1/backtests/by-key`。`job_cancelled` 是取消终态。重复取消返回同一终态，已完成作业返回 `409 / job_already_finished`。运行中取消时，worker 结束执行进程并清理临时文件，之后释放租约。异常中断后，恢复流程在租约缺失或到期且执行锁释放后清理临时文件和锁，旧版无租约作业也适用。
+使用独立临时数据根运行以下测试。回测详情和取消都使用提交时返回的作业 ID。提交响应丢失时，以原 `Idempotency-Key` 调用 `GET /api/v1/backtests/by-key`。`job_cancelled` 是取消终态。重复取消返回同一终态，已完成作业返回 `409 / job_already_finished`。运行中取消时，worker 结束执行进程并清理临时文件，之后释放租约。异常中断后，恢复流程在租约缺失或到期且执行锁释放后清理临时文件和锁，旧版无租约作业通过遗留执行锁或当次运行目录识别。没有待恢复作业时，检查不获取队列写锁。
 
 ```sh
 cargo test --locked --offline -p finance-api --test bundle_jobs --test jobs --test decision_read --test factor_read --test read_contract --test read_stream

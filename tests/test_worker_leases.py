@@ -382,6 +382,68 @@ class WorkerLeaseTests(unittest.TestCase):
                              [("failed", None, worker.CANCELLED_ERROR)] * 2)
             self.assertEqual(other.execute("SELECT count(*) FROM job_leases").fetchone(), (0,))
 
+    def test_large_cancelled_history_needs_no_write_lock_or_history_scan(self):
+        with self.db:
+            self.db.execute(
+                """WITH RECURSIVE fixture(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM fixture WHERE n<80000)
+                   INSERT INTO jobs(idem,request,status,attempt,error)
+                   SELECT 'synthetic-' || n, '{}', 'failed', n % 3, ? FROM fixture""",
+                (worker.CANCELLED_ERROR,),
+            )
+
+        vm_intervals = 0
+
+        def count_vm_steps():
+            nonlocal vm_intervals
+            vm_intervals += 1
+            return 0
+
+        with closing(worker.open_queue(self.directory)) as writer, patch.object(worker, "open_guard") as guard:
+            self.db.execute("PRAGMA busy_timeout=0")
+            writer.execute("BEGIN IMMEDIATE")
+            self.db.set_progress_handler(count_vm_steps, 1_000)
+            try:
+                worker.recover(self.db, self.directory)
+                worker.recover(self.db, self.directory)
+            finally:
+                self.db.set_progress_handler(None, 0)
+            guard.assert_not_called()
+            self.assertEqual(vm_intervals, 0, "recovery scanned terminal history")
+
+    def test_cancelled_recovery_only_revisits_jobs_with_remaining_execution_state(self):
+        self.insert_jobs(5)
+        with self.db:
+            self.db.execute("UPDATE jobs SET status='failed',attempt=(id<5),error=?", (worker.CANCELLED_ERROR,))
+            self.db.execute("INSERT INTO job_leases VALUES (3,0), (4,1000)")
+        legacy_scratch = self.directory / "run-1-1-synthetic"
+        legacy_scratch.mkdir()
+        legacy_guard = worker.guard_path(self.directory, 2)
+        legacy_guard.touch()
+        future_scratch = self.directory / "run-4-1-synthetic"
+        future_scratch.mkdir()
+        unrelated_scratch = self.directory / "run-5-1-synthetic"
+        unrelated_scratch.mkdir()
+
+        with patch.object(worker, "clock_ms", return_value=0), patch.object(
+            worker, "open_guard", wraps=worker.open_guard
+        ) as opened:
+            worker.recover(self.db, self.directory)
+            self.assertEqual(
+                [call.args[0] for call in opened.call_args_list],
+                [worker.guard_path(self.directory, job_id) for job_id in (1, 2, 3)],
+            )
+            self.assertFalse(legacy_scratch.exists())
+            self.assertFalse(legacy_guard.exists())
+            self.assertTrue(future_scratch.is_dir())
+            self.assertEqual(self.db.execute("SELECT job_id FROM job_leases").fetchall(), [(4,)])
+
+            opened.reset_mock()
+            worker.recover(self.db, self.directory)
+            opened.assert_not_called()
+
+        self.assertEqual(self.db.execute("SELECT status,error FROM jobs").fetchall(),
+                         [("failed", worker.CANCELLED_ERROR)] * 5)
+
 
 if __name__ == "__main__":
     unittest.main()
