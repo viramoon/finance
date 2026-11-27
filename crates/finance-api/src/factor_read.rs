@@ -1,6 +1,6 @@
 //! The read API serves an explicitly published F8 snapshot without running research code.
 
-use crate::{ApiError, AppState, ErrorBody, error};
+use crate::{ApiError, AppState, ErrorBody, error, read_store};
 use axum::{
     Json, Router,
     extract::{
@@ -15,7 +15,6 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File},
     io::{self, Read},
     path::{Component, Path as FsPath},
     sync::LazyLock,
@@ -386,16 +385,20 @@ fn snapshot_unreadable() -> ApiError {
 }
 
 fn load_snapshot(data_root: &FsPath) -> Result<Option<Snapshot>, ApiError> {
-    let path = data_root.join(SNAPSHOT_PATH);
-    match fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.file_type().is_file() => {}
-        Ok(_) => return Err(snapshot_invalid()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(snapshot_unreadable()),
-    }
+    let Some(file) =
+        read_store::open_file(data_root, FsPath::new(SNAPSHOT_PATH)).map_err(|err| {
+            if err.kind() == io::ErrorKind::InvalidData {
+                snapshot_invalid()
+            } else {
+                snapshot_unreadable()
+            }
+        })?
+    else {
+        return Ok(None);
+    };
     let mut bytes = Vec::new();
-    File::open(path)
-        .and_then(|file| file.take(MAX_BYTES + 1).read_to_end(&mut bytes))
+    file.take(MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
         .map_err(|_| snapshot_unreadable())?;
     if bytes.len() as u64 > MAX_BYTES {
         return Err(snapshot_invalid());
@@ -593,8 +596,70 @@ pub(crate) async fn evaluations(
     }))
 }
 
+#[derive(Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+#[into_params(parameter_in = Query)]
+pub(crate) struct ExactEvaluationQuery {
+    /// Registered factor version.
+    version: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub(crate) struct FactorEvaluationDetail {
+    #[schema(minimum = 1, maximum = 1)]
+    schema_version: u8,
+    as_of: DateTime<Utc>,
+    item: FactorEvaluationItem,
+}
+
+#[utoipa::path(get, path = "/api/v1/factors/{id}/evaluations/{evaluation_id}", operation_id = "factor_evaluation",
+    params(("id" = String, Path), ("evaluation_id" = String, Path), ExactEvaluationQuery),
+    responses((status = 200, body = FactorEvaluationDetail), (status = 400, body = ErrorBody),
+              (status = 404, body = ErrorBody), (status = 500, body = ErrorBody)))]
+pub(crate) async fn evaluation(
+    State(app): State<AppState>,
+    path: Result<Path<(String, String)>, PathRejection>,
+    query: Result<Query<ExactEvaluationQuery>, QueryRejection>,
+) -> Result<Json<FactorEvaluationDetail>, ApiError> {
+    let Path((id, evaluation_id)) = path.map_err(|_| invalid_query())?;
+    let Query(query) = query.map_err(|_| invalid_query())?;
+    if !valid_key(&id, &query.version) || !FACTOR_ID.is_match(&evaluation_id) {
+        return Err(invalid_query());
+    }
+    read_snapshot(app)
+        .await?
+        .and_then(|snapshot| {
+            snapshot
+                .evaluations
+                .into_iter()
+                .find(|item| {
+                    item.factor_id == id
+                        && item.version == query.version
+                        && item.evaluation_id == evaluation_id
+                })
+                .map(|item| {
+                    Json(FactorEvaluationDetail {
+                        schema_version: 1,
+                        as_of: snapshot.as_of,
+                        item,
+                    })
+                })
+        })
+        .ok_or_else(|| {
+            error(
+                StatusCode::NOT_FOUND,
+                "factor_evaluation_not_found",
+                "No published evaluation for this version",
+            )
+        })
+}
+
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/factors", get(list))
         .route("/api/v1/factors/{id}/evaluations", get(evaluations))
+        .route(
+            "/api/v1/factors/{id}/evaluations/{evaluation_id}",
+            get(evaluation),
+        )
 }

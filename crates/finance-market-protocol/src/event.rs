@@ -185,6 +185,54 @@ wire_object! {
     }
 }
 
+wire_object! {
+    /// The request and the occurrence within a complete source second.
+    pub struct OptionHistoryBatch {
+        pub requested_start_ts: U64Text,
+        pub page: U64Text,
+        pub occurrence: U64Text,
+        #[serde(deserialize_with = "required_nullable")]
+        #[schema(required = true, inline)]
+        pub request_id: Option<U64Text>,
+    }
+}
+
+wire_object! {
+    /// Raw option trade callback evidence, including unmapped or empty condition codes.
+    pub struct OptionHistoryTrade {
+        pub batch: OptionHistoryBatch,
+        pub price: DecimalText,
+        pub quantity: DecimalText,
+        pub contract_multiplier: DecimalText,
+        pub exchange: String,
+        pub special_conditions: String,
+        pub condition_mapping_version: NonEmptyText,
+        pub past_limit: bool,
+        pub unreported: bool,
+    }
+}
+
+wire_object! {
+    /// Raw historical top-of-book evidence. Unavailable fields remain null.
+    pub struct OptionHistoryQuote {
+        pub batch: OptionHistoryBatch,
+        #[serde(deserialize_with = "required_nullable")]
+        #[schema(required = true, inline)]
+        pub bid: Option<DecimalText>,
+        #[serde(deserialize_with = "required_nullable")]
+        #[schema(required = true, inline)]
+        pub ask: Option<DecimalText>,
+        #[serde(deserialize_with = "required_nullable")]
+        #[schema(required = true, inline)]
+        pub bid_quantity: Option<DecimalText>,
+        #[serde(deserialize_with = "required_nullable")]
+        #[schema(required = true, inline)]
+        pub ask_quantity: Option<DecimalText>,
+        pub bid_past_low: bool,
+        pub ask_past_high: bool,
+    }
+}
+
 /// The event kind tag and its corresponding payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(
@@ -206,6 +254,8 @@ pub enum Message {
     Heartbeat(Heartbeat),
     Status(Status),
     PerpetualContext(PerpetualContext),
+    OptionHistoryTrade(OptionHistoryTrade),
+    OptionHistoryQuote(OptionHistoryQuote),
 }
 
 // Generate the wire fields once for the normal Serde type and for the decoder
@@ -318,6 +368,13 @@ impl Event {
     }
 
     pub fn validate(&self) -> Result<(), ValidationError> {
+        require_schema_version(
+            matches!(
+                self.message,
+                Message::OptionHistoryTrade(_) | Message::OptionHistoryQuote(_)
+            ) == (self.schema_version == SchemaVersion::V3),
+            "schema version 3.0 supports only option history evidence",
+        )?;
         let v2 = self.schema_version == SchemaVersion::V2;
         let context = self.message.context_kind();
         if !v2 {
@@ -407,6 +464,15 @@ impl Event {
                     "must be greater than zero",
                 )?;
             }
+            Message::OptionHistoryTrade(trade) => {
+                self.validate_option_batch(&trade.batch)?;
+                require(
+                    trade.contract_multiplier.value() > Decimal::ZERO,
+                    "payload.contract_multiplier",
+                    "must be greater than zero",
+                )?;
+            }
+            Message::OptionHistoryQuote(quote) => self.validate_option_batch(&quote.batch)?,
             _ => {}
         }
 
@@ -417,6 +483,37 @@ impl Event {
             market.validate(exchange_ts, self.message.market_path())?;
         }
         Ok(())
+    }
+
+    fn validate_option_batch(&self, batch: &OptionHistoryBatch) -> Result<(), ValidationError> {
+        require(
+            self.asset_kind == AssetKind::Option,
+            "asset_kind",
+            "historical evidence requires an option instrument",
+        )?;
+        let exchange_ts = self.exchange_ts.ok_or_else(|| {
+            ValidationError::new("exchange_ts", "required for historical option evidence")
+        })?;
+        require(
+            exchange_ts.get() % 1_000_000_000 == 0 && exchange_ts <= self.receive_ts,
+            "exchange_ts",
+            "historical evidence requires source seconds at or before receipt",
+        )?;
+        require(
+            batch.requested_start_ts <= exchange_ts,
+            "payload.batch.requested_start_ts",
+            "must be at or before the source tick",
+        )?;
+        require(
+            batch.page.get() > 0,
+            "payload.batch.page",
+            "must be greater than zero",
+        )?;
+        require(
+            batch.occurrence.get() > 0,
+            "payload.batch.occurrence",
+            "must be greater than zero",
+        )
     }
 
     /// Validate an event against the instrument and source/product definitions.
@@ -460,6 +557,25 @@ impl Event {
                 capability.message_kinds.contains(&kind),
                 "kind",
                 "context kind is unsupported by the source/product",
+            )?;
+        }
+        let history_kind = match self.message {
+            Message::OptionHistoryTrade(_) => Some(MarketKind::OptionHistoryTrade),
+            Message::OptionHistoryQuote(_) => Some(MarketKind::OptionHistoryQuote),
+            _ => None,
+        };
+        if let Message::OptionHistoryTrade(trade) = &self.message {
+            require(
+                trade.contract_multiplier.value() == instrument.contract_multiplier.value(),
+                "payload.contract_multiplier",
+                "does not match the supplied instrument",
+            )?;
+        }
+        if let Some(kind) = history_kind {
+            require(
+                capability.message_kinds.contains(&kind),
+                "kind",
+                "historical option evidence kind is unsupported by the source/product",
             )?;
         }
         if let Some(market) = self.message.market_payload() {
@@ -593,6 +709,8 @@ impl Message {
             "heartbeat" => decode_at(payload, "/payload").map(Self::Heartbeat),
             "status" => decode_at(payload, "/payload").map(Self::Status),
             "perpetual_context" => decode_at(payload, "/payload").map(Self::PerpetualContext),
+            "option_history_trade" => decode_at(payload, "/payload").map(Self::OptionHistoryTrade),
+            "option_history_quote" => decode_at(payload, "/payload").map(Self::OptionHistoryQuote),
             _ => MarketMessage::decode_payload(kind, payload, "").map(Self::from),
         }
     }
@@ -615,7 +733,9 @@ impl Message {
             | Self::Reset(_)
             | Self::Heartbeat(_)
             | Self::Status(_)
-            | Self::PerpetualContext(_) => None,
+            | Self::PerpetualContext(_)
+            | Self::OptionHistoryTrade(_)
+            | Self::OptionHistoryQuote(_) => None,
         }
     }
 

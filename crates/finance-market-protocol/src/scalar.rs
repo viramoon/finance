@@ -16,6 +16,7 @@ wire_enum! {
     pub enum SchemaVersion {
         V1 = "1.0",
         V2 = "2.0",
+        V3 = "3.0",
     }
 }
 

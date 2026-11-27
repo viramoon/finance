@@ -111,6 +111,32 @@ class FixtureGenerationTest(unittest.TestCase):
                     digest = hashlib.sha256(archive.extractfile(member).read()).hexdigest()
                     self.assertEqual(digest, digests[member.name])
 
+    def test_option_flow_review_export_from_an_isolated_commit(self):
+        script = "scripts/export-option-flow-review-sources.sh"
+        fixture = "crates/finance-collector/src/option_flow/observation/tests.rs"
+        _, tree = data_guard.staged_trees(cwd=REPO)
+        sources = data_guard.load_sources(tree, required=True, cwd=REPO)
+        self.assertEqual([path for path, row in sources.items() if row["generator"] == script], [fixture])
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "checkout"
+            data_guard.git("init", "-q", "--template=", repo)
+            for path in (script, fixture):
+                target = repo / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data_guard.blob(tree[path], cwd=REPO))
+            data_guard.git("add", "--", script, fixture, cwd=repo)
+            data_guard.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                           "commit", "-qm", "Isolated option flow source", cwd=repo)
+            (repo / fixture).write_bytes(b"uncommitted edit\n")
+
+            output = subprocess.check_output(["sh", repo / script], cwd=directory, env=data_guard.GIT_ENV)
+            with tarfile.open(fileobj=io.BytesIO(output), mode="r:") as archive:
+                member, = (entry for entry in archive if not entry.isdir())
+                self.assertEqual(member.name, fixture)
+                self.assertTrue(member.isfile())
+                digest = hashlib.sha256(archive.extractfile(member).read()).hexdigest()
+                self.assertEqual(digest, sources[fixture]["sha256"])
+
     def fixture_file(self, root, name):
         candidate = root / name
         self.assertTrue(candidate.is_relative_to(root), "fixture path escapes its root")

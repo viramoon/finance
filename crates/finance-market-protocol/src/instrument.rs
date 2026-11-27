@@ -109,6 +109,8 @@ wire_enum! {
         FundingRate = "funding_rate",
         OpenInterest = "open_interest",
         PerpetualContext = "perpetual_context",
+        OptionHistoryTrade = "option_history_trade",
+        OptionHistoryQuote = "option_history_quote",
     }
 }
 
@@ -151,10 +153,24 @@ impl Capability {
 
     pub fn validate(&self) -> Result<(), ValidationError> {
         let separate = self.has_separate_context();
+        let context = separate || self.message_kinds.contains(&MarketKind::PerpetualContext);
+        let history = self
+            .message_kinds
+            .iter()
+            .any(|kind| kind.is_option_history());
         require_schema_version(
-            (self.schema_version == SchemaVersion::V2)
-                == (separate || self.message_kinds.contains(&MarketKind::PerpetualContext)),
-            "capability uses version 2.0 exactly when it supports perpetual context",
+            match self.schema_version {
+                SchemaVersion::V1 => !context && !history,
+                SchemaVersion::V2 => context && !history,
+                SchemaVersion::V3 => {
+                    history
+                        && self
+                            .message_kinds
+                            .iter()
+                            .all(|kind| kind.is_option_history())
+                }
+            },
+            "capability uses version 2.0 for perpetual context or version 3.0 for option history",
         )?;
         require(
             !self.message_kinds.is_empty(),
@@ -180,5 +196,11 @@ impl Capability {
             "max_depth",
             "must be positive for snapshot/delta products and zero for other products",
         )
+    }
+}
+
+impl MarketKind {
+    pub(crate) fn is_option_history(self) -> bool {
+        matches!(self, Self::OptionHistoryTrade | Self::OptionHistoryQuote)
     }
 }

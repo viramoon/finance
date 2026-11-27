@@ -147,6 +147,23 @@ processes:
       documentation: docs/api.md
       market_state: [finance-state/market-wal, finance-state/market-projection]
       factor_snapshot: finance-state/factor-research/read-v1.json
+      strategy_routes:
+        validate: 'POST /api/v1/strategies/validate'
+        register: 'POST /api/v1/strategies'
+        versions: 'GET /api/v1/strategies'
+        version: 'GET /api/v1/strategies/{id}/versions/{version}'
+      backtest_routes:
+        detail: 'GET /api/v1/backtests/{id}'
+        cancel: 'POST /api/v1/backtests/{id}/cancel'
+        worker_status: 'GET /api/v1/backtests/worker-status'
+      factor_report: 'GET /api/v1/factors/{id}/evaluations/{evaluation_id}'
+      decision_signals:
+        route: 'GET /api/v1/decisions/signals'
+        database: finance-state/decisions/decisions.sqlite3
+        publication: finance-state/decisions/read-v1.json
+        access: published_plan_with_local_recording_and_non_display_derivation
+        sma_license_proof: sma_replay_license
+      local_state_paths: 数据根以下的目录和文件禁止使用符号链接
       binance_profile_env: FINANCE_BINANCE_CONFIG # 默认 config/binance/<profile>.yaml
       ibkr_read_source: 内存中的获准 paper 行情所有者，通过 router_with_market_reads 接入
       ibkr_without_source: 503 market_read_source_unavailable
@@ -193,6 +210,16 @@ option_exposure:
   input: option_chain_snapshot
   persistence: disabled
   documentation: docs/option-exposure.md
+option_flow:
+  invocation: in_process_rust_library
+  account: paper_read_only
+  live: finance_collector::option_flow::LiveOptionFlow
+  historical: finance_collector::option_flow::OptionHistoryIngress
+  activation: 共享行情接入方显式提供产品许可与历史查询时窗
+  observation: memory_only
+  history_product: ibkr/opra-history
+  historical_wal: finance-state/market-wal/ibkr/opra-history # 仅经许可记录
+  documentation: docs/option-flow.md
 ib_line_budget:
   invocation: in_process_rust_library
   runner: finance_collector::line_budget::LineScheduler::run_paper

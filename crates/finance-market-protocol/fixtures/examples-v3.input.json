@@ -1,0 +1,106 @@
+{
+  "instruments": [
+    {
+      "schema_version": "1.0",
+      "instrument_id": "SYNTH-OPTION.SMART",
+      "asset_kind": "option",
+      "venue": "SMART",
+      "quote_currency": "USD",
+      "tick_size": "0.005",
+      "lot_size": "1",
+      "contract_multiplier": "25",
+      "settlement_kind": "physical",
+      "settlement_currency": "USD",
+      "calendar_id": "US_OPTIONS",
+      "supplier_symbols": [
+        {
+          "source": "ibkr",
+          "product": "opra-history",
+          "symbol": "42"
+        }
+      ]
+    }
+  ],
+  "capabilities": [
+    {
+      "schema_version": "3.0",
+      "source": "ibkr",
+      "product": "opra-history",
+      "message_kinds": [
+        "option_history_trade",
+        "option_history_quote"
+      ],
+      "max_depth": 0,
+      "can_backfill": true,
+      "delay_tier": "replay"
+    }
+  ],
+  "events": [
+    {
+      "schema_version": "3.0",
+      "channel": "option-history",
+      "source": "ibkr",
+      "product": "opra-history",
+      "instrument_id": "SYNTH-OPTION.SMART",
+      "asset_kind": "option",
+      "venue": "SMART",
+      "epoch": "1",
+      "revision": "0",
+      "license": "synthetic",
+      "receive_ts": "1760000200000000000",
+      "first_available_ts": "1760000200000000000",
+      "kind": "option_history_quote",
+      "exchange_ts": "1760000001000000000",
+      "seq": "1",
+      "cursor": "1:1",
+      "payload": {
+        "batch": {
+          "requested_start_ts": "1760000000000000000",
+          "page": "1",
+          "occurrence": "1",
+          "request_id": "2"
+        },
+        "bid": "1.125",
+        "ask": "1.250",
+        "bid_quantity": "20",
+        "ask_quantity": null,
+        "bid_past_low": false,
+        "ask_past_high": false
+      }
+    },
+    {
+      "schema_version": "3.0",
+      "channel": "option-history",
+      "source": "ibkr",
+      "product": "opra-history",
+      "instrument_id": "SYNTH-OPTION.SMART",
+      "asset_kind": "option",
+      "venue": "SMART",
+      "epoch": "1",
+      "revision": "0",
+      "license": "synthetic",
+      "receive_ts": "1760000200000000000",
+      "first_available_ts": "1760000200000000000",
+      "kind": "option_history_trade",
+      "exchange_ts": "1760000002000000000",
+      "seq": "2",
+      "cursor": "1:2",
+      "payload": {
+        "batch": {
+          "requested_start_ts": "1760000000000000000",
+          "page": "1",
+          "occurrence": "1",
+          "request_id": "1"
+        },
+        "price": "1.250",
+        "quantity": "25",
+        "exchange": "XTEST",
+        "special_conditions": "",
+        "condition_mapping_version": "ibkr-opaque-v1",
+        "past_limit": false,
+        "unreported": false,
+        "contract_multiplier": "25"
+      }
+    }
+  ]
+}

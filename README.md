@@ -8,11 +8,15 @@ fertile 的主项目与 submodule，基于 NautilusTrader 的交易与数据系�
 
 `finance_collector::line_budget` 为美股 L1 和 OPRA 提供进程内订阅调度、分批期权链轮询、共享读者和覆盖查询。使用方显式启动调度器，默认分配 9 个股票行、16 个热点期权行、45 个轮换行并预留 30 行。[IBKR 行情线预算](docs/integrations/ib-line-budget.md)
 
+期权流接口从共享 OPRA L1 识别待核验的放量和报价线索，并通过 IBKR paper 只读历史逐笔核验指定合约和交易时窗。获准记录的历史报价与成交证据通过 F3 发布。[期权流观察与历史核验](docs/option-flow.md)
+
 Nasdaq TotalView 提供八只自选标的的场所深度，最多同时钉住两只，另有一个名额跟随当前页面。SPY 保留综合顶档。场所簿仅供授权的会话在内存中展示。接口和权限见 [Nasdaq TotalView 场所深度](docs/integrations/ib.md#nasdaq-totalview-场所深度)。
 
 本地行情链路支持 F1 事件追加、恢复和独立 Parquet 投影。已接入 [Hyperliquid 公共永续行情](docs/integrations/hyperliquid.md) 和 [Binance 现货与 USDT 永续](docs/integrations/binance.md)，Binance 内置 profile 默认关闭。[本地行情 WAL、投影与封段接口](docs/market-wal.md)
 
 finance-api 提供 v1 行情 WAL、投影、水位、缺口及因子研究只读查询，并从代码导出 REST OpenAPI 和版本化 WS/SSE 消息契约。第三批覆盖主图 K 线、指标、Binance profile 状态以及期权链、订阅预算、Nasdaq 场所簿、期权敞口和历史窗口。IBKR 查询由获准的共享行情所有者接入，独立 API 未接入时返回 503。[第三批读契约](docs/api.md#第三批读契约)
+
+第二批生产者契约覆盖配置策略校验与版本选择、离线回测与取消、worker 租约状态、获准发布的决策信号以及因子报告直达查询。[第二批契约](docs/api.md#第二批策略回测与研究契约)
 
 历史期权库复用 F9a 的只读 paper 会话确认合约，读取未到期 IBKR 期权的闭合分钟 bar。合成回放覆盖到期、权限与数据边界。Databento OPRA 提供默认禁用的离线费用估算。[历史期权链](docs/option-history.md)
 
@@ -61,6 +65,7 @@ finance/
 - [本地行情 WAL、投影与封段接口](docs/market-wal.md)
 - [统一指标与回放口径](docs/indicators.md)
 - [期权 GEX、gamma wall、flip 与 0DTE 计算接口](docs/option-exposure.md)
+- [期权流观察与历史核验](docs/option-flow.md)
 - [StrategyBundle v1 配置与编译](docs/strategy-bundle.md)
 - [实时决策进程与共享求值](docs/decision-process.md)
 - [离线因子评价与研究登记](docs/factor-research.md)

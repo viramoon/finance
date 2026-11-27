@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import resource
 import signal
 import shutil
@@ -22,6 +23,8 @@ from .backtest_job import STRATEGY_JOB_ERRORS, die_with_parent
 REPO = Path(__file__).resolve().parents[2]
 SCHEMA = REPO / "sql/backtest-queue.sql"
 DEFAULT_LEASE_SECONDS = 15
+CANCELLED_ERROR = "job_cancelled"
+_EXECUTION_ARTIFACT = re.compile(r"(?:lease-([1-9][0-9]{0,18})\.lock|run-([1-9][0-9]{0,18})-([0-2])-.+)")
 
 
 def open_queue(directory: Path):
@@ -52,17 +55,62 @@ def open_guard(path, *, create=False):
     return open(path, "rb", opener=open_local)
 
 
+def recovery_candidates(db, directory):
+    now = clock_ms()
+    candidates = {job_id for (job_id,) in db.execute(
+        """SELECT id FROM jobs LEFT JOIN job_leases ON job_id=id
+           WHERE status='running' AND (expires_at_ms IS NULL OR expires_at_ms<=?1)
+           UNION ALL
+           SELECT job_id FROM job_leases CROSS JOIN jobs ON id=job_id
+           WHERE expires_at_ms<=?1 AND status='failed' AND error=?2""",
+        (now, CANCELLED_ERROR),
+    )}
+    # Older cancelled jobs may have left execution files without a lease.
+    # Discover them from the files so recovery never scans cancelled history.
+    artifact_jobs = {}
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            match = _EXECUTION_ARTIFACT.fullmatch(entry.name)
+            if not match:
+                continue
+            guard_id, scratch_id, attempt = match.groups()
+            job_id = int(guard_id or scratch_id)
+            if job_id >= 2**63 or job_id in candidates:
+                continue
+            if guard_id and entry.is_file(follow_symlinks=False):
+                artifact_jobs.setdefault(job_id, set()).add(None)
+            if scratch_id and entry.is_dir(follow_symlinks=False):
+                artifact_jobs.setdefault(job_id, set()).add(int(attempt))
+    for job_id, attempts in artifact_jobs.items():
+        row = db.execute(
+            """SELECT attempt FROM jobs LEFT JOIN job_leases ON job_id=id
+               WHERE id=?1 AND status='failed' AND error=?2 AND job_id IS NULL""",
+            (job_id, CANCELLED_ERROR),
+        ).fetchone()
+        if row and (None in attempts or row[0] in attempts):
+            candidates.add(job_id)
+    return candidates
+
+
 def recover(db, directory):
-    # A lease without an expiry belongs to the previous single-worker format.
-    # The shared lifetime lock excludes that version during recovery.
+    candidates = recovery_candidates(db, directory)
+    if not candidates:
+        return
+    # The shared lifetime lock excludes the old single-worker format. Recheck
+    # each candidate inside the write transaction before inspecting its lock.
     with db:
         db.execute("BEGIN IMMEDIATE")
-        expired = db.execute(
-            """SELECT id, attempt FROM jobs LEFT JOIN job_leases ON job_id=id
-               WHERE status='running' AND (expires_at_ms IS NULL OR expires_at_ms<=?)""",
-            (clock_ms(),),
-        ).fetchall()
-        for job_id, attempt in expired:
+        now = clock_ms()
+        for job_id in sorted(candidates):
+            row = db.execute(
+                """SELECT attempt, status FROM jobs LEFT JOIN job_leases ON job_id=id
+                   WHERE id=?1 AND (status='running' OR (status='failed' AND error=?2))
+                     AND (expires_at_ms IS NULL OR expires_at_ms<=?3)""",
+                (job_id, CANCELLED_ERROR, now),
+            ).fetchone()
+            if row is None:
+                continue
+            attempt, status = row
             path = guard_path(directory, job_id)
             try:
                 guard = open_guard(path)
@@ -79,12 +127,13 @@ def recover(db, directory):
                     if scratch.is_dir() and not scratch.is_symlink():
                         shutil.rmtree(scratch)
                 path.unlink(missing_ok=True)
-                db.execute(
-                    """UPDATE jobs SET status=CASE attempt WHEN 1 THEN 'queued' ELSE 'failed' END,
-                       error=CASE attempt WHEN 1 THEN NULL ELSE 'worker_lost_twice' END
-                       WHERE id=?""",
-                    (job_id,),
-                )
+                if status == "running":
+                    db.execute(
+                        """UPDATE jobs SET status=CASE attempt WHEN 1 THEN 'queued' ELSE 'failed' END,
+                           error=CASE attempt WHEN 1 THEN NULL ELSE 'worker_lost_twice' END
+                           WHERE id=?""",
+                        (job_id,),
+                    )
                 db.execute("DELETE FROM job_leases WHERE job_id=?", (job_id,))
 
 
@@ -202,6 +251,13 @@ def launch(root, claim, timeout, memory_mb):
     return Running(process, result, scratch, time.monotonic() + timeout)
 
 
+def cancelled(db, claim):
+    return db.execute(
+        "SELECT 1 FROM jobs WHERE id=? AND attempt=? AND status='failed' AND error=?",
+        (claim.job_id, claim.attempt, CANCELLED_ERROR),
+    ).fetchone() is not None
+
+
 def finish(db, claim, status, summary=None, error=None):
     if claim.guard.closed:
         return False
@@ -214,10 +270,12 @@ def finish(db, claim, status, summary=None, error=None):
                )""",
             (status, summary, error, claim.job_id, claim.attempt),
         )
-        if update.rowcount:
+        was_cancelled = not update.rowcount and cancelled(db, claim)
+        if update.rowcount or was_cancelled:
             db.execute("DELETE FROM job_leases WHERE job_id=?", (claim.job_id,))
             Path(claim.guard.name).unlink(missing_ok=True)
-    print(f"job={claim.job_id} {status if update.rowcount else 'lease_lost'}", flush=True)
+    outcome = status if update.rowcount else ("cancelled" if was_cancelled else "lease_lost")
+    print(f"job={claim.job_id} {outcome}", flush=True)
     return bool(update.rowcount)
 
 
@@ -232,12 +290,17 @@ def kill_job(process):
 
 def reap(db, jobs):
     for job_id, (row, job) in list(jobs.items()):
+        was_cancelled = cancelled(db, row)
         code = job.process.poll()
-        if code is None and time.monotonic() < job.deadline:
+        if not was_cancelled and code is None and time.monotonic() < job.deadline:
             continue
         del jobs[job_id]
         with row.guard:
-            status, summary, error = job_result(job, code)
+            if was_cancelled:
+                kill_job(job.process)
+                status, summary, error = "failed", None, CANCELLED_ERROR
+            else:
+                status, summary, error = job_result(job, code)
             job.scratch.cleanup()
             finish(db, row, status, summary, error)
 
@@ -316,7 +379,10 @@ def run_worker(
                             with row.guard:
                                 kill_job(job.process)
                                 job.scratch.cleanup()
-                            print(f"job={job_id} lease_lost", flush=True)
+                                if cancelled(db, row):
+                                    finish(db, row, "failed", error=CANCELLED_ERROR)
+                                else:
+                                    print(f"job={job_id} lease_lost", flush=True)
                     next_heartbeat = time.monotonic() + heartbeat_interval
                 reap(db, jobs)
                 if not stopping and time.monotonic() >= next_recovery:

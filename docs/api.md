@@ -24,7 +24,7 @@ FERTILE_PROFILE=cloudbox cargo run --locked -p finance-api
 | FERTILE_DATA_ROOT | 绝对数据根目录，默认 /home/box/fertile/data |
 | FINANCE_BINANCE_CONFIG | 沿用 Binance profile 覆盖，仅供 API 读取启用状态和用途许可，默认 `FINANCE_CONFIG_DIR/binance/<profile>.yaml` |
 
-未知 YAML 字段、未知 profile、非法 IP / 端口、相对数据根路径在启动时拒绝。配置不读取账户密钥。当前无认证，默认 loopback；部署方只在受控内网显式覆盖绑定地址，不能作为公网写操作入口。更丰富的查询、认证和受控交易接口由后续独立 issue 确定。
+未知 YAML 字段、未知 profile、非法 IP / 端口、相对数据根路径在启动时拒绝。配置不读取账户密钥。finance API 默认绑定 loopback。web 负责调用方授权和限流，部署方只在受控内网显式覆盖绑定地址。
 
 ## 接口与状态
 
@@ -38,9 +38,13 @@ FERTILE_PROFILE=cloudbox cargo run --locked -p finance-api
 
 GET /api/v1/market/status 从 bar collector 持久状态读取各标的水位和新鲜度。没有状态文件时返回明确的缺失状态，collector 停止后会反映过期。可用性和精度验证见 [行情目录](../catalog/README.md)。Binance 的 profile 状态和 IBKR 的私有查询见 [第三批读契约](#第三批读契约)。
 
+IBKR 顶档订阅与权限验收由 `finance-ib` 的 Rust 接口和私有 CLI 提供。共享行情所有者通过 `finance_collector::line_budget::LineHandle` 提供行情线预算、确认的期权链与覆盖，在核对许可后接入第三批查询。Nasdaq TotalView 的页面焦点由所有者在进程内控制。[IBKR 顶档权限](integrations/ib.md#美股-l1-和-opra-权限验收) · [行情线预算](integrations/ib-line-budget.md) · [场所深度](integrations/ib.md#nasdaq-totalview-场所深度)
+
+期权流观察及历史核验使用进程内 `finance_collector::option_flow` 接口。启用历史产品本地记录时，已有 WAL、投影和质量查询可读取已获准的原始证据。本期的领域报告由调用方在进程内取得，`/options/flow` 的专用 HTTP 查询交由后续读契约接入。[期权流接口](option-flow.md)
+
 POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /api/v1/backtests/{id} 查看执行进度与摘要，GET /api/v1/backtests 按 cursor 和 limit 翻页。提交使用同库事务完成幂等检查和容量检查。多个 worker 可独立领取并续租，租约是服务端状态。完整输入范围、超时和恢复见 [作业运维](backtest-jobs.md)。公网入口由 web 鉴权并限流。
 
-`finance-decision` 的信号与检查点保存在本地决策库，读写边界见 [实时决策接口](decision-process.md)。
+`finance-decision` 的信号与检查点保存在本地决策库。信号发布和分页见[第二批契约](#第二批策略回测与研究契约)，进程边界见[实时决策接口](decision-process.md)。
 
 ## 配置策略提交与结果
 
@@ -61,6 +65,46 @@ POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /a
 
 列表与详情以已登记版本和 `content_sha256` 表示配置作业请求。成功摘要保留通用作业字段，`instrument` 为 `PORTFOLIO`，并带有 `run_manifest` 与 `strategy_report`。前者锁定实际执行版本与回放数据，后者包含净值、仓位、成交、子账、冲突归因和覆盖。金额、价格、数量和权重以十进制字符串表示，回放时钟的 UTC 纳秒时间戳也以字符串传输。已有 `DemoStrategy` 和 `SmaCrossover` 请求、详情及历史摘要仍可读取。参见 [配置策略作业](backtest-jobs.md#配置策略作业)。
 
+## 第二批策略回测与研究契约
+
+路径使用 `/api/v1` 前缀。以下为新增操作，返回 `Cache-Control: private, no-store`。网关按会话授权，回测取消与策略登记需要写权限。因子快照、决策发布文件及数据库、策略输入和回测队列须位于配置数据根内的实体目录。API 遇到这些路径中的符号链接时返回存储错误。
+
+| 请求 | 参数和行为 | OpenAPI 响应 schema |
+| --- | --- | --- |
+| `POST /strategies/validate` | 接收原有 `StrategyDocument` YAML/JSON 包装，编译预览。校验不写入注册表或队列。 | `StrategyPreview`（`RegisteredStrategy`、`CompiledPlan`） |
+| `GET /strategies` | 可选 `id`、`after`、`limit`。按 `id`、`version` 的文本顺序排序，`after` 使用上一页返回的 `id@version`。 | `StrategyVersionPage`（`RegisteredStrategy`） |
+| `GET /strategies/{id}/versions/{version}` | 选择已登记的精确版本，以固定输入元数据编译。不存在返回 `404 / strategy_version_not_found`。 | `StrategyPreview` |
+| `POST /backtests/{id}/cancel` | 空请求体。取消排队或运行中的回测，重复取消返回同一作业。已完成且未取消的作业返回 `409 / job_already_finished`，未知 ID 返回 `404 / job_not_found`。 | 既有 `Job` |
+| `GET /backtests/worker-status` | 读取队列和当前租约数，有效租约按 `as_of` UTC 判断。租约缺失或过期的运行作业计入 `unleased_running`。队列未初始化时 `queue_present` 为 false，计数为 0。 | `WorkerStatus` |
+| `GET /decisions/signals` | 分页读取获准发布的已提交目标。可选 `after`、`limit`。 | `DecisionSignalPage`（`DecisionAccess`、`DecisionSignal`、`SmaSignal`、`BundleSignal`） |
+| `GET /factors/{id}/evaluations/{evaluation_id}` | 必须指定 `version`，按因子 ID、版本、评价 ID 精确匹配同一个 F8 快照。无报告返回 `404 / factor_evaluation_not_found`。 | `FactorEvaluationDetail`（原有 `FactorEvaluationItem`，含报告和同行因子的许可） |
+
+策略和决策列表的 `limit` 默认 20，取值 1～100。带上其他筛选项并原样传回 `next_cursor` 以续页，值为 `null` 时结束。尚未建立策略注册表时列表为空。策略预览和选择返回同一个编译器生成的计划。等价 YAML 和 JSON 的规范化配置与 `content_sha256` 一致，`source_sha256` 标记各自的原始字节。版本选择使用首次登记的源码及输入元数据。原始配置限 256 KiB，编译错误使用既有 `ErrorBody` 的字段位置和行列。预览中的 `plan.bundle` 遵循代码导出的 [StrategyBundle v1 JSON Schema](../strategies/schema/strategy-bundle-v1.schema.json)。登记仍调用 `POST /strategies`，版本冲突由登记和入队返回。
+
+沿用 `POST /backtests`、`GET /backtests/by-key`、`GET /backtests` 和 `GET /backtests/{id}`。详情的 `summary` 承载成功结果，配置作业的 `run_manifest` 和 `strategy_report` 保留精确十进制字符串与现有 F7 字段。取消后的详情沿用原有状态枚举，`status` 为 `failed`，`error` 为 `job_cancelled`，`summary` 为 `null`。同一请求和幂等键重交会返回原 ID，重新运行须使用新键。取消和完成按 SQLite 事务先后决定终态。worker 状态查询反映队列与租约，进程存活由运维监控。
+
+### 决策信号发布与分页
+
+API 只读打开现有 `finance-state/decisions/decisions.sqlite3`。运维或已授权的回放提供方核对允许本地留存和非展示计算后，在同一目录原子发布普通文件 `read-v1.json`。下列为固定合成配置。部署时登记 `decisions` 或 `bundle_decisions` 表的 `plan_sha256`。配置策略使用信号行的完整计划哈希，检查点哈希另绑定指标求值器版本。SMA 的发布许可还须与生产者校验整个已提交回放前缀后记录的许可一致，范围包括预热与控制帧。首次遇到不同许可的帧即停止，保留上一份已提交检查点。API 仅返回许可证明覆盖的信号。旧 SMA 库需要用原始同许可回放启动新版决策进程，完整验证旧检查点后才能发布。证明缺失、过期或许可不匹配时返回 `404 / decision_not_published`。配置策略由发布方为全部输入核对共同授权并登记适用许可。
+
+```json
+{
+  "schema_version": 1,
+  "kind": "sma_crossover",
+  "plan_sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+  "access": {
+    "license": "fixture.synthetic",
+    "record_local": true,
+    "derive_non_display": true,
+    "redistribute": false
+  }
+}
+```
+
+`kind` 可用 `sma_crossover` 或 `strategy_bundle`。许可与计划哈希一同出现在响应中。记录按 SMA 的回放字节偏移，或配置策略的回放字节偏移、配方 ID 和标的 ID 升序排列。游标绑定发布计划。`replay_offset`、事件 `epoch`、`seq` 和各纳秒时钟为精确整数的字符串，`target_shares` 为十进制字符串。每行公开目标及其输入血缘字段，配置策略另保留可空的 `reason`。缺少发布文件、数据库或获准用途时返回 `404 / decision_not_published`。查询或游标非法返回 400，发布文件或数据库损坏返回 500。仅展示产品不得提供给离线回放、回测、因子或决策发布通道。
+
+第二批新增 REST 操作。首批的 WS/SSE schema 和样本继续由原生成器校验。场所深度、GEX/0DTE 和历史期权查询见[第三批读契约](#第三批读契约)。web 的代理、浏览器授权和策略页面由下游交付。
+
 ## 首批读契约
 
 以下查询使用 `/api/v1` 前缀，返回 `Cache-Control: private, no-store`。finance-api 读取本地数据根，web 负责调用方授权、限流和客户端可见范围。新增查询只使用 GET。状态、健康与原回测路由仍按上述约定调用。
@@ -77,7 +121,7 @@ POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /a
 
 行情查询的 `as_of` 是 API 的 UTC 观察时间。事件时间与覆盖分别由 F1 时钟、持久和投影水位、质量报告说明。`position`、`generation`、`epoch`、`seq`、`revision` 与 UTC 纳秒时间在 JSON 和查询参数中均使用十进制字符串，`after` 默认 `"0"`。价格与数量沿用 F1 的精确十进制字符串。`offset` 默认 0，`limit` 默认 100、最大 500，`next_offset: null` 表示已到列表末尾。[F1 事件](market-protocol.md) · [F3 存储](market-wal.md)
 
-WAL 的 `records[].event` 和投影的 `record.event` 保留原始 `schema_version`。同一 WAL 页面可以包含 `1.0` 和 `2.0` 事件。消费端按每条事件的版本与消息种类解码。Hyperliquid 的 `2.0` 观测使用 `perpetual_context`，Binance 的独立上下文使用 `funding_rate`、`open_interest` 及该产品的 `2.0` 控制消息。首批独立导出的 WS/SSE 消息继续使用 `1.0`。[版本化行情协议](market-protocol.md)
+WAL 的 `records[].event` 和投影的 `record.event` 保留原始 `schema_version`。同一 WAL 页面可包含多个版本，消费端按每条记录的版本与消息种类解码。Hyperliquid 使用 `2.0` 的 `perpetual_context`。Binance 使用 `2.0` 的 `funding_rate`、`open_interest` 及该产品的控制消息。期权逐笔证据使用 `3.0` 的 `option_history_trade` 和 `option_history_quote`，其重置消息使用 `1.0`。OpenAPI 含上述事件类型。独立导出的 WS/SSE 消息使用 `1.0`。[版本化行情协议](market-protocol.md)
 
 市场响应的 `access` 来自 F3 的落盘策略，含 `license`、`display_live`、`record_local`、`derive_non_display`、`backup_personal_drive`。事件另携带原 `license`。仅展示产品由生产者在内存处理，不进入这些查询和生成物。项目禁止再分发。参数不合法返回 `400 / market_query_invalid`。产品未登记或目标投影位置缺失返回 `404 / market_product_not_found` 或 `market_projection_not_found`。策略、索引或 WAL 损坏返回 `500 / market_storage_error`，响应省略本地路径和数据正文。
 
@@ -149,7 +193,7 @@ IBKR 响应的 `access` 是 API 的显示用途许可，来源为 `ibkr`，产�
 - 场所深度将 `run_depth` 的显示回调交给 `DepthFrames::publish`，包括 reset、inactive 和冷启动空簿。
 - 敞口由 `ExposureSource` 查找估值快照、时序阈值和可选价格网格，计算走 F9d 的 `evaluate`。历史由 `HistorySource` 查找 F12 的 `ContractHistory` 结果。两个查找接口读取内存，由所有者提供生命周期与留存策略。
 
-数据源未接入时返回 `503 / market_read_source_unavailable`。数据源已接入但深度、估值或历史窗口不可用时返回 `404 / market_read_not_found`。查询参数无效返回 `400 / market_read_query_invalid`。覆盖键、估值快照键或历史标的和窗口与请求不匹配，链快照时钟无法转换为美东日期，或估值计算失败时，返回 `500 / market_read_failed` 和固定消息 `Could not read market data`，省略底层详情。IBKR 响应和敞口计算结果只在进程内与授权的私有请求中使用。F9e 的期权流观察与逐笔证据、页面焦点写接口和行情所有者的部署接线留待后续集成。本批复用 F1/F3 数据通道与既有 WS/SSE 导出。
+数据源未接入时返回 `503 / market_read_source_unavailable`。数据源已接入但深度、估值或历史窗口不可用时返回 `404 / market_read_not_found`。查询参数无效返回 `400 / market_read_query_invalid`。覆盖键、估值快照键或历史标的和窗口与请求不匹配，链快照时钟无法转换为美东日期，或估值计算失败时，返回 `500 / market_read_failed` 和固定消息 `Could not read market data`，省略底层详情。IBKR 响应和敞口计算结果只在进程内与授权的私有请求中使用。F9e 的原始逐笔证据沿用已授权的 F3 查询。专用 `/options/flow`、页面焦点写接口和行情所有者的部署接线留待后续集成。本批复用 F1/F3 数据通道与既有 WS/SSE 导出。[期权流观察与历史核验](option-flow.md)
 
 ## 示例批任务
 

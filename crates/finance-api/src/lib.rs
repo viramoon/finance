@@ -2,12 +2,14 @@ pub mod bars;
 mod binance_read;
 mod bundle_jobs;
 pub mod config;
+mod decision_read;
 mod factor_read;
 pub mod indicators;
 pub mod jobs;
 pub mod market;
 pub mod market_options;
 mod market_read;
+mod read_store;
 pub mod read_stream;
 pub mod research;
 pub mod strategy_bundle;
@@ -207,6 +209,9 @@ fn router_with_read_sources(
 ) -> Router {
     let restricted_reads = market_read::routes()
         .merge(factor_read::routes())
+        .merge(bundle_jobs::routes())
+        .merge(decision_read::routes())
+        .merge(jobs::contract_routes())
         .merge(market_options::routes(sources))
         .layer(middleware::from_fn(private_read));
     Router::new()
@@ -234,7 +239,12 @@ fn router_with_read_sources(
         jobs::detail,
         jobs::list,
         jobs::by_key,
+        jobs::cancel,
+        jobs::worker_status,
         bundle_jobs::register,
+        bundle_jobs::validate,
+        bundle_jobs::versions,
+        bundle_jobs::version,
         research::datasets,
         market_read::products,
         market_read::wal,
@@ -243,6 +253,8 @@ fn router_with_read_sources(
         market_read::gaps,
         factor_read::list,
         factor_read::evaluations,
+        factor_read::evaluation,
+        decision_read::signals,
         binance_read::binance_status,
         market_options::depth::book,
         market_options::lines::subscriptions,

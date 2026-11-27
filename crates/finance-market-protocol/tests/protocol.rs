@@ -880,3 +880,74 @@ fn perpetual_context_schema_exports_and_keeps_v1_kind_boundaries() {
         "expected a string",
     );
 }
+
+#[test]
+fn option_history_exports_round_trip_and_enforce_batch_and_version() {
+    let directory = tempfile::tempdir().unwrap();
+    assert!(
+        Command::new(env!("CARGO_BIN_EXE_export-market-protocol"))
+            .arg(directory.path())
+            .arg("--v3")
+            .status()
+            .unwrap()
+            .success()
+    );
+    let committed = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../protocol/v3");
+    for name in [
+        "event.schema.json",
+        "capability.schema.json",
+        "examples.json",
+    ] {
+        let exported = fs::read(directory.path().join(name)).unwrap();
+        assert_eq!(exported, fs::read(committed.join(name)).unwrap(), "{name}");
+        let document: Value = serde_json::from_slice(&exported).unwrap();
+        assert_references_resolve(&document, &document);
+    }
+    let examples: Value =
+        serde_json::from_str(include_str!("../../../protocol/v3/examples.json")).unwrap();
+    assert_roundtrip::<Event>(&examples["events"]);
+    assert_roundtrip::<Capability>(&examples["capabilities"]);
+    let mut trade = examples["events"][1].clone();
+    trade["schema_version"] = json!("1.0");
+    assert_rejected::<Event>(&trade, "/schema_version", "invalid_value", "option history");
+    trade["schema_version"] = json!("3.0");
+    trade["payload"]["batch"]["occurrence"] = json!("0");
+    assert_rejected::<Event>(
+        &trade,
+        "/payload/batch/occurrence",
+        "constraint_violation",
+        "greater than zero",
+    );
+}
+
+#[test]
+fn perpetual_and_option_history_capabilities_cannot_mix_versions_or_payloads() {
+    let option_history: Value =
+        serde_json::from_str(include_str!("../../../protocol/v3/examples.json")).unwrap();
+    let mut cap = option_history["capabilities"][0].clone();
+    cap["message_kinds"] = json!(["option_history_trade", "funding_rate"]);
+    for version in ["1.0", "2.0", "3.0"] {
+        cap["schema_version"] = json!(version);
+        assert_rejected::<Capability>(&cap, "/schema_version", "invalid_value", "option history");
+    }
+
+    let mut history_trade = option_history["events"][1].clone();
+    history_trade["schema_version"] = json!("2.0");
+    assert_rejected::<Event>(
+        &history_trade,
+        "/schema_version",
+        "invalid_value",
+        "option history",
+    );
+
+    let mut perpetual: Value =
+        serde_json::from_str(include_str!("../../../protocol/v2/examples.json")).unwrap();
+    let next_context = &mut perpetual["events"][0];
+    next_context["schema_version"] = json!("3.0");
+    assert_rejected::<Event>(
+        next_context,
+        "/schema_version",
+        "invalid_value",
+        "option history",
+    );
+}

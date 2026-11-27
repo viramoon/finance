@@ -3,6 +3,8 @@ use time::OffsetDateTime;
 use crate::contracts::Contract;
 #[cfg(feature = "async")]
 use crate::market_data::historical::r#async::TickSubscription;
+#[cfg(feature = "async")]
+use crate::market_data::historical::{ExactTickBidAsk, ExactTickLast};
 use crate::market_data::historical::{TickBidAsk, TickLast, TickMidpoint, WhatToShow};
 use crate::market_data::{IgnoreSize, TradingHours};
 use crate::Error;
@@ -14,7 +16,7 @@ use crate::Error;
 /// [`ending`](Self::ending) to anchor the query. The builder does not
 /// pre-flight this — the wire encoder accepts both unset, and IBKR
 /// surfaces its own error if neither is provided.
-#[must_use = "HistoricalTicksBuilder does nothing until you call .trade(), .mid_point(), or .bid_ask(...)"]
+#[must_use = "HistoricalTicksBuilder does nothing until you call a trade, midpoint, or bid/ask request method"]
 pub struct HistoricalTicksBuilder<'a, C> {
     client: &'a C,
     contract: &'a Contract,
@@ -167,6 +169,35 @@ impl<'a> HistoricalTicksBuilder<'a, crate::client::sync::Client> {
 
 #[cfg(feature = "async")]
 impl<'a> HistoricalTicksBuilder<'a, crate::client::r#async::Client> {
+    /// Fetch a complete trade page and its request ID; retain wire decimal sizes.
+    pub async fn trade_exact(self) -> Result<(i32, Vec<ExactTickLast>), Error> {
+        self.complete_page(WhatToShow::Trades).await
+    }
+
+    /// Fetch a complete bid/ask page and its request ID, including wire decimal sizes.
+    pub async fn bid_ask_exact(self) -> Result<(i32, Vec<ExactTickBidAsk>), Error> {
+        self.complete_page(WhatToShow::BidAsk).await
+    }
+
+    async fn complete_page<T: crate::market_data::historical::TickDecoder<T> + Send>(
+        self,
+        kind: WhatToShow,
+    ) -> Result<(i32, Vec<T>), Error> {
+        crate::market_data::historical::r#async::historical_ticks::<T>(
+            self.client,
+            self.contract,
+            self.start,
+            self.end,
+            self.number_of_ticks,
+            kind,
+            self.trading_hours,
+            false,
+        )
+        .await?
+        .collect_completed()
+        .await
+    }
+
     /// Submit the request and return trade ticks.
     ///
     /// # Examples

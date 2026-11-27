@@ -382,3 +382,64 @@ publish_factor_read_snapshot(
         json!({"count": 2, "mean": "-1.0000", "sample_std": null, "ratio": null})
     );
 }
+
+#[tokio::test]
+async fn factor_report_deep_link_selects_exact_version_and_preserves_access() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(dir.path());
+    let report = "/api/v1/factors/synthetic.factor/evaluations/first";
+    let (status, body) = get(&app, &format!("{report}?version=1.0.0")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "factor_evaluation_not_found");
+    assert_eq!(dir.path().read_dir().unwrap().count(), 0);
+    let mut data = snapshot();
+    data["evaluations"]
+        .as_array_mut()
+        .unwrap()
+        .push(evaluation("first", "2.0.0"));
+    write_snapshot(dir.path(), &data);
+    for version in ["1.0.0", "2.0.0"] {
+        let (status, body) = get(&app, &format!("{report}?version={version}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({"schema_version":1,"as_of":AS_OF,"item":evaluation("first",version)})
+        );
+    }
+    assert_eq!(get(&app, report).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        get(&app, &format!("{report}?version=3.0.0")).await.0,
+        StatusCode::NOT_FOUND
+    );
+    data["evaluations"][2]["access"]["record_local"] = json!(false);
+    write_snapshot(dir.path(), &data);
+    let (status, body) = get(&app, &format!("{report}?version=1.0.0")).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["error"]["code"], "factor_snapshot_invalid");
+    assert!(body.get("item").is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn factor_report_and_list_refuse_linked_snapshot_ancestors() {
+    use std::os::unix::fs::symlink;
+
+    let outside = tempfile::tempdir().unwrap();
+    write_snapshot(outside.path(), &snapshot());
+    for parent in ["finance-state", "finance-state/factor-research"] {
+        let root = tempfile::tempdir().unwrap();
+        let link = root.path().join(parent);
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        symlink(outside.path().join(parent), link).unwrap();
+        let app = app(root.path());
+        for path in [
+            "/api/v1/factors",
+            "/api/v1/factors/synthetic.factor/evaluations/first?version=1.0.0",
+        ] {
+            let (status, body) = get(&app, path).await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{parent} {path}");
+            assert_eq!(body["error"]["code"], "factor_snapshot_unreadable");
+            assert!(!body.to_string().contains("Synthetic fixture"));
+        }
+    }
+}

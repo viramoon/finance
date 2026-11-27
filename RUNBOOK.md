@@ -67,6 +67,17 @@ cargo run --locked --offline -q -p finance-api -- export-read-stream /tmp/financ
 
 `FINANCE_PYTHON` 指向已构建 Nautilus 的 Python，`WAL_BIN` 指向刚构建的 `finance-market-wal`。联测在临时数据根用合成样本验证 Python 投影、因子发布和 Rust API 读取。生成器无需启动 API 或连接数据源。取用同一 finance 提交生成的 OpenAPI、WS/SSE schema 和合成样本供下游核对。[导出与下游更新顺序](docs/api.md#openapi-与契约)
 
+## 第二批策略回测与研究契约验收
+
+使用独立临时数据根运行以下测试。回测详情和取消都使用提交时返回的作业 ID。提交响应丢失时，以原 `Idempotency-Key` 调用 `GET /api/v1/backtests/by-key`。`job_cancelled` 是取消终态。重复取消返回同一终态，已完成作业返回 `409 / job_already_finished`。运行中取消时，worker 结束执行进程并清理临时文件，之后释放租约。异常中断后，恢复流程在租约缺失或到期且执行锁释放后清理临时文件和锁，旧版无租约作业通过遗留执行锁或当次运行目录识别。没有待恢复作业时，检查不获取队列写锁。
+
+```sh
+cargo test --locked --offline -p finance-api --test bundle_jobs --test jobs --test decision_read --test factor_read --test read_contract --test read_stream
+PYTHONPATH=python "$FINANCE_PYTHON" -m unittest discover -s tests -p test_worker_leases.py -v
+```
+
+用 `GET /api/v1/backtests/worker-status` 核对队列和租约。出现缺失或过期的租约时，检查 worker 进程和本地锁，再按[回测作业恢复](docs/backtest-jobs.md#worker-运行与恢复)处置。发布决策信号前核对输入许可和计划哈希，在现有决策目录原子发布 `read-v1.json`。需要下线读取时撤下发布文件。出现 `decision_not_published` 时检查发布文件和数据库是否在同一数据根。升级旧 SMA 库时先用原回放启动新版决策进程，重验整个已提交前缀。出现许可变化时停止发布，在独立数据根用已审核的同许可回放重建。因子、决策和回测队列绑定数据根以下的实体路径。因子报告按因子版本和评价 ID 从 F8 快照定位。[查询参数、许可和发布格式](docs/api.md#第二批策略回测与研究契约)
+
 ## 第三批读契约验收
 
 用进程内路由和合成输入核对 bars、指标、Binance profile 与期权响应。测试使用临时数据根。
@@ -115,6 +126,17 @@ scripts/finance-backtest-worker
 ```
 
 Replay 可单独运行。paper 模式下 probe 用 client ID 91，collector 用 92，93 预留给 trader，凭据由盒子上的 Gateway 读取。连接、补数、权限与 pacing 故障定位见 [IB 接入](docs/integrations/ib.md)，水位、精度和杀进程恢复见 [catalog](catalog/README.md)，worker 的资源限制、队列恢复及幂等请求见 [作业说明](docs/backtest-jobs.md)。部署守护从 fertile 的 runbook 进入。
+
+### 离线验收期权流观察与核验
+
+```sh
+cargo test --locked --offline -p finance-ib option_ticks
+cargo test --locked --offline -p finance-collector option_flow
+cargo test --locked --offline -p finance-market-protocol option_history
+PYTHONPATH=python "$FINANCE_PYTHON" -m unittest discover -s tests -p 'test_market_projector.py' -v
+```
+
+测试用固定合成合约、逐笔和时钟，在临时目录检查观察与核验计数、同秒重复成交、方向估计、权限分流和 F3 回放。调用方在经授权的私有运行中提供 OPRA L1 与历史逐笔各自的许可策略。历史源按 paper 只读配置显式接入。记录模式用 `finance-market-wal` 的 `watermarks` 和 `quality` 对 `ibkr/opra-history` 核对持久位置及逐笔缺口。遇到 pacing 或权限问题，按原因处理并保留未核验区间。到期不可回补的区间保留覆盖状态。相关接口、字段和上下游边界见 [期权流观察与历史核验](docs/option-flow.md)。
 
 ### 私有验证美股 L1 与 OPRA
 

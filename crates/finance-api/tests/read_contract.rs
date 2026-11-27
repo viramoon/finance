@@ -206,7 +206,10 @@ fn openapi_cli_is_deterministic_and_resolves_read_contract_refs() {
     assert_eq!(schemas["U64Text"]["type"], "string");
     assert_eq!(schemas["Event"]["unevaluatedProperties"], false);
     assert_eq!(schemas["MarketMessage"]["unevaluatedProperties"], false);
-    assert_eq!(schemas["SchemaVersion"]["enum"], json!(["1.0", "2.0"]));
+    assert_eq!(
+        schemas["SchemaVersion"]["enum"],
+        json!(["1.0", "2.0", "3.0"])
+    );
     let event_version = schemas["Event"]["allOf"]
         .as_array()
         .unwrap()
@@ -216,7 +219,10 @@ fn openapi_cli_is_deterministic_and_resolves_read_contract_refs() {
         event_version["oneOf"][0]["properties"],
         json!({
             "schema_version": {"const": "1.0"},
-            "kind": {"not": {"enum": ["perpetual_context", "funding_rate", "open_interest"]}}
+            "kind": {"not": {"enum": [
+                "perpetual_context", "funding_rate", "open_interest",
+                "option_history_trade", "option_history_quote"
+            ]}}
         })
     );
     assert_eq!(
@@ -229,5 +235,68 @@ fn openapi_cli_is_deterministic_and_resolves_read_contract_refs() {
             "asset_kind": {"const": "perpetual"},
             "revision": {"const": "0"}
         })
+    );
+    assert_eq!(
+        event_version["oneOf"][2]["properties"],
+        json!({
+            "schema_version": {"const": "3.0"},
+            "kind": {"enum": ["option_history_trade", "option_history_quote"]},
+            "asset_kind": {"const": "option"},
+            "revision": {"const": "0"},
+            "exchange_ts": {"$ref": "#/components/schemas/U64Text"}
+        })
+    );
+}
+
+#[test]
+fn batch_two_openapi_exposes_new_operations_and_preserves_legacy_types() {
+    use finance_api::ApiDoc;
+    use utoipa::OpenApi;
+
+    let spec = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let paths = &spec["paths"];
+    for (path, method, schema) in [
+        ("/api/v1/strategies/validate", "post", "StrategyPreview"),
+        ("/api/v1/strategies", "get", "StrategyVersionPage"),
+        (
+            "/api/v1/strategies/{id}/versions/{version}",
+            "get",
+            "StrategyPreview",
+        ),
+        ("/api/v1/backtests/{id}/cancel", "post", "Job"),
+        ("/api/v1/backtests/worker-status", "get", "WorkerStatus"),
+        ("/api/v1/decisions/signals", "get", "DecisionSignalPage"),
+        (
+            "/api/v1/factors/{id}/evaluations/{evaluation_id}",
+            "get",
+            "FactorEvaluationDetail",
+        ),
+    ] {
+        assert_eq!(
+            paths[path][method]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            format!("#/components/schemas/{schema}"),
+        );
+    }
+    let schemas = &spec["components"]["schemas"];
+    assert_eq!(schemas["Accepted"]["properties"]["id"]["type"], "integer");
+    assert_eq!(
+        schemas["JobStatus"]["enum"],
+        json!(["queued", "running", "succeeded", "failed", "timed_out"])
+    );
+    assert_eq!(
+        schemas["BacktestSummary"]["properties"]["pnl"]["type"],
+        "string"
+    );
+    assert_eq!(
+        schemas["SmaSignal"]["properties"]["seq"]["$ref"],
+        "#/components/schemas/U64Text"
+    );
+    assert_eq!(
+        schemas["BundleSignal"]["properties"]["target_shares"]["$ref"],
+        "#/components/schemas/DecimalText"
+    );
+    assert_eq!(
+        schemas["StrategyPreview"]["properties"]["plan"]["$ref"],
+        "#/components/schemas/CompiledPlan"
     );
 }
