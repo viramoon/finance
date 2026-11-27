@@ -1,6 +1,7 @@
 use std::{collections::HashMap, path::Path};
 
 use anyhow::{Context, Result, ensure};
+use chrono::{DateTime, Utc};
 use finance_ib::{
     historical::option_ticks::{
         HistoricalBatch, HistoricalIssue, HistoricalIssueReason, HistoricalKind,
@@ -178,11 +179,12 @@ impl OptionHistoryIngress {
                 .iter()
                 .filter(|tick| (start..end).contains(&tick.row.occurred_at))
                 .count();
+            let (from_ts, to_ts) = quality_bounds(start, end)?;
             self.ingress.report_quality(QualityReport {
                 channel: channel(HistoricalKind::Trades),
                 instrument_id: instrument.instrument_id.clone(),
-                from_ts: nanos(start)?.into(),
-                to_ts: nanos(end)?.into(),
+                from_ts,
+                to_ts,
                 cause: GapCause::SourceGap,
                 outcome: Some(RecoveryOutcome::TickBackfilled),
                 count: Some((count as u64).into()),
@@ -304,6 +306,8 @@ impl OptionHistoryIngress {
 }
 
 #[cfg(test)]
+mod path_tests;
+#[cfg(test)]
 mod tests;
 
 fn channel(kind: HistoricalKind) -> Token {
@@ -341,13 +345,20 @@ fn issue_report(instrument: &Instrument, issue: &HistoricalIssue) -> Result<Qual
         HistoricalIssueReason::Disconnected => (GapCause::Disconnected, None),
         _ => (GapCause::SourceGap, None),
     };
+    let (from_ts, to_ts) = quality_bounds(issue.start, issue.end)?;
     Ok(QualityReport {
         channel: channel(issue.kind),
         instrument_id: instrument.instrument_id.clone(),
-        from_ts: nanos(issue.start)?.into(),
-        to_ts: nanos(issue.end)?.into(),
+        from_ts,
+        to_ts,
         cause,
         outcome,
         count: None,
     })
+}
+
+fn quality_bounds(start: DateTime<Utc>, end: DateTime<Utc>) -> Result<(U64Text, U64Text)> {
+    ensure!(start < end, "historical quality interval must be nonempty");
+    // F9b and historical requests are half-open. F3 reports include both endpoints.
+    Ok((nanos(start)?.into(), (nanos(end)? - 1).into()))
 }

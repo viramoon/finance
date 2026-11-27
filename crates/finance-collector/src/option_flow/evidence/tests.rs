@@ -143,6 +143,60 @@ fn same_second_same_price_two_trades_remain_verified() {
 }
 
 #[test]
+fn conflicting_trade_overlap_keeps_raw_rows_pending_within_half_open_interval() {
+    let first = trade(1, "2", "");
+    let second = trade(2, "2", "");
+    let mut before = first.clone();
+    before.row.occurred_at = at(3);
+    let mut at_end = first.clone();
+    at_end.row.occurred_at = at(6);
+    let conflict = HistoricalIssue {
+        start: at(4),
+        ..issue(
+            HistoricalKind::Trades,
+            HistoricalIssueReason::InconsistentOverlap,
+        )
+    };
+    let ticks = HistoricalOptionTicks {
+        trades: vec![before, first, second, at_end],
+        quotes: vec![quote(2, "1.8", "2"), quote(5, "1.8", "2")],
+        issues: vec![conflict],
+    };
+    let thresholds =
+        policy().with_size_thresholds(Some("2".parse().unwrap()), Some("100".parse().unwrap()));
+    let report = verify_history(&contract(), &ticks, at(23), &thresholds, &[]).unwrap();
+
+    assert_eq!(report.counts.verified, 2);
+    assert_eq!(report.counts.unknown, 0);
+    assert_eq!(report.counts.pending_trade_rows, 2);
+    assert_eq!(report.counts.pending_intervals, 1);
+    assert_eq!(report.issues, ticks.issues);
+    for index in [0, 3] {
+        let clean = &report.trades[index];
+        assert_eq!(clean.status, TradeStatus::Active);
+        assert_eq!(clean.inference.direction, EstimatedSide::EstimatedBuy);
+        assert!(clean.suspected_scale.block_contracts_threshold.is_some());
+    }
+    for index in [1, 2] {
+        let pending = &report.trades[index];
+        assert_eq!(pending.trade, ticks.trades[index]);
+        assert_eq!(pending.status, TradeStatus::PendingVerification);
+        assert_eq!(pending.inference.reason, QuoteReason::TradeOverlapConflict);
+        assert_eq!(pending.inference.direction, EstimatedSide::Unknown);
+        assert!(pending.inference.quote.is_none());
+        assert!(pending.premium.is_none());
+        assert_eq!(pending.suspected_scale, SuspectedScale::default());
+    }
+    let wire = serde_json::to_value(&report).unwrap();
+    assert_eq!(wire["counts"]["pending_trade_rows"], 2);
+    assert_eq!(wire["trades"][1]["status"], "pending_verification");
+    assert_eq!(
+        wire["trades"][1]["inference"]["reason"],
+        "trade_overlap_conflict"
+    );
+}
+
+#[test]
 fn trade_occurrence_positions_restart_at_each_second() {
     let before = trade(1, "2", "");
     let mut after = before.clone();
@@ -437,6 +491,72 @@ fn explicit_revision_and_cancellation_are_auditable() {
     assert_eq!(report.trades[2].status, TradeStatus::Cancelled);
     assert_eq!(report.trades[3].status, TradeStatus::AppliedCancellation);
     assert_eq!(report.trades[3].link.as_ref(), Some(&links[2]));
+}
+
+#[test]
+fn conflicting_trade_overlap_does_not_apply_links_to_or_from_disputed_rows() {
+    let mut clean_original = trade(1, "2", "");
+    clean_original.row.occurred_at = at(2);
+    let disputed_cancellation = trade(1, "1", "SYNTH_CANCEL");
+    let disputed_original = trade(2, "2", "");
+    let mut clean_correction = trade(1, "1", "SYNTH_CORRECTION");
+    clean_correction.row.occurred_at = at(6);
+    let clean_id: finance_market_protocol::NonEmptyText = "clean-trade".parse().unwrap();
+    let disputed_id: finance_market_protocol::NonEmptyText = "disputed-trade".parse().unwrap();
+    let links = [
+        TradeLink {
+            occurrence: TradeOccurrence::from(&clean_original),
+            action: TradeAction::Original {
+                native_id: clean_id.clone(),
+            },
+        },
+        TradeLink {
+            occurrence: TradeOccurrence::from(&disputed_cancellation),
+            action: TradeAction::Cancellation {
+                target_native_id: clean_id,
+                revision: 1.into(),
+            },
+        },
+        TradeLink {
+            occurrence: TradeOccurrence::from(&disputed_original),
+            action: TradeAction::Original {
+                native_id: disputed_id.clone(),
+            },
+        },
+        TradeLink {
+            occurrence: TradeOccurrence::from(&clean_correction),
+            action: TradeAction::Correction {
+                target_native_id: disputed_id,
+                revision: 1.into(),
+            },
+        },
+    ];
+    let report = verify(
+        HistoricalOptionTicks {
+            trades: vec![
+                clean_original,
+                disputed_cancellation,
+                disputed_original,
+                clean_correction,
+            ],
+            quotes: vec![],
+            issues: vec![issue(
+                HistoricalKind::Trades,
+                HistoricalIssueReason::InconsistentOverlap,
+            )],
+        },
+        &links,
+    );
+    assert_eq!(report.counts.verified, 1);
+    assert_eq!(report.counts.pending_trade_rows, 2);
+    assert_eq!(report.counts.unresolved_amendments, 1);
+    assert_eq!(report.trades[0].status, TradeStatus::Active);
+    assert_eq!(report.trades[1].status, TradeStatus::PendingVerification);
+    assert_eq!(report.trades[2].status, TradeStatus::PendingVerification);
+    assert_eq!(report.trades[3].status, TradeStatus::UnresolvedAmendment);
+    for (trade, link) in report.trades.iter().zip(&links) {
+        assert_eq!(trade.link.as_ref(), Some(link));
+    }
 }
 
 #[test]

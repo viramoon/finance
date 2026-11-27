@@ -20,10 +20,10 @@
       "source": "固定合成深度行用于隔离子进程展示。既有 v1/examples.json 的合成盘口快照用于同数据根 WAL 写入对照。用 sh scripts/export-totalview-review-sources.sh 从当前提交导出测试源码。"
     },
     "crates/finance-collector/src/option_flow/observation/tests.rs": {
-      "sha256": "88698ded58c1029e038b02c479a1ea9ee34303dfd65f5d0abcd0309299d53bf2",
-      "generator": "scripts/export-ib-review-sources.sh",
+      "sha256": "934dc8582dd20e439e4c8153201f01f21b5b0df8f03814fd4c0a9a2f8bd3d332",
+      "generator": "scripts/export-option-flow-review-sources.sh",
       "seed": "fixed",
-      "source": "固定虚拟会话、行情时钟、价量和轮换回调用于内存观察测试。测试调用形状触发表格检查。用 sh scripts/export-ib-review-sources.sh 从当前检出提交导出测试源码。"
+      "source": "固定虚拟会话、行情时钟、价量和轮换回调用于内存观察测试。测试调用形状触发表格检查。用 sh scripts/export-option-flow-review-sources.sh 从当前检出提交导出测试源码。"
     },
     "crates/finance-ib/src/depth/focus/tests.rs": {
       "sha256": "9f2474868520829c569a1a2450c218ce1ccb6725e807dba870d99d8cd4d0ca94",

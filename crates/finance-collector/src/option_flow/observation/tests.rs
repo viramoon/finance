@@ -238,6 +238,53 @@ fn rolling_volume_rate_compares_matching_underlying_expiry_and_session_segment()
 }
 
 #[test]
+fn even_volume_baseline_averages_the_two_central_rates_exactly() {
+    let mut engine = ObservationEngine::default();
+    let option = contract(1, 10, 21);
+    data_type(&mut engine, &option, 1, MarketDataType::Realtime);
+    for (second, count) in [(0, "0"), (1, "1"), (3, "3"), (4, "103"), (6, "303")] {
+        let _ = volume(&mut engine, &option, 1, count, second);
+    }
+
+    let clue = volume(&mut engine, &option, 1, "453", 7).unwrap();
+    let comparison = &volume_evidence(&clue).comparison;
+    let typical = comparison.typical_rate.unwrap();
+    assert_eq!(comparison.baseline_samples, 4);
+    assert_eq!(
+        typical.contracts * 2_000,
+        101 * u128::from(typical.elapsed_millis)
+    );
+    // The current 150 contracts/s crosses twice the true median of 50.5.
+    assert_eq!(comparison.elevated, Some(true));
+    let wire = serde_json::to_value(typical).unwrap();
+    assert_eq!(wire["contracts"], typical.contracts.to_string());
+}
+
+#[test]
+fn volume_median_remains_exact_above_decimal_text_coefficient_range() {
+    let contracts = 9_999_999_999_999_999_999_999_999_999;
+    let lower = VolumeRate {
+        contracts: contracts - 1,
+        elapsed_millis: 30_000,
+    };
+    let upper = VolumeRate {
+        contracts,
+        elapsed_millis: 29_999,
+    };
+    let typical = BaselineVolumeRate::median(&[lower, lower, upper, upper]).unwrap();
+    assert_eq!(typical.elapsed_millis, 1_799_940_000);
+    assert_eq!(
+        typical.contracts,
+        599_989_999_999_999_999_999_999_999_910_002
+    );
+    assert_eq!(typical.is_elevated(upper), Some(false));
+    assert_eq!(
+        serde_json::to_value(typical).unwrap()["contracts"],
+        "599989999999999999999999999910002"
+    );
+}
+
+#[test]
 fn widening_requires_fresh_unlocked_quotes_and_positive_sizes() {
     let mut engine = ObservationEngine::default();
     let option = contract(1, 10, 21);
@@ -270,4 +317,29 @@ fn widening_requires_fresh_unlocked_quotes_and_positive_sizes() {
     assert_eq!(evidence.ask_size.value.as_str(), "15");
     assert_eq!(clue.window(), (time(7), time(8)));
     assert_eq!(engine.summary(time(9)).counts.quote_widenings, 1);
+}
+
+#[test]
+fn even_quote_baseline_averages_the_two_central_spreads_exactly() {
+    let mut engine = ObservationEngine::default();
+    let option = contract(1, 10, 21);
+    data_type(&mut engine, &option, 1, MarketDataType::Realtime);
+    for (field, value) in [
+        (QuoteField::BidPrice, "1"),
+        (QuoteField::BidSize, "10"),
+        (QuoteField::AskSize, "10"),
+    ] {
+        assert!(quote(&mut engine, &option, 1, field, value, 0).is_none());
+    }
+    for (second, ask) in [(0, "1.01"), (1, "1.02"), (2, "1.09"), (3, "1.10")] {
+        let _ = quote(&mut engine, &option, 1, QuoteField::AskPrice, ask, second);
+    }
+
+    let clue = quote(&mut engine, &option, 1, QuoteField::AskPrice, "1.15", 4).unwrap();
+    let ObservationEvidence::QuoteWidening(evidence) = clue.observation else {
+        panic!("expected a spread clue");
+    };
+    assert_eq!(evidence.baseline_samples, 4);
+    assert_eq!(evidence.typical_spread.as_str(), "0.055");
+    assert_eq!(evidence.spread.as_str(), "0.15");
 }

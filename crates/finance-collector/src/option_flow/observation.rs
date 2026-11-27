@@ -8,12 +8,13 @@ use finance_ib::market::{
     Product, QuoteField, RequestKey,
 };
 use finance_market_protocol::{DecimalText, U64Text};
-use serde::Serialize;
+use rust_decimal::Decimal;
+use serde::{Serialize, Serializer};
 
-use super::decimal::{exact_difference, exact_premium};
+use super::decimal::{exact_difference, exact_mean, exact_premium};
 use crate::line_budget::{LineMessage, LineUpdate};
 
-pub const OBSERVATION_RULE_VERSION: &str = "ibkr_l1_observation_v1";
+pub const OBSERVATION_RULE_VERSION: &str = "ibkr_l1_observation_v2";
 const SEGMENT_MINUTES: i64 = 30;
 const MAX_VOLUME_WINDOW: TimeDelta = TimeDelta::seconds(30);
 const QUOTE_FRESHNESS: TimeDelta = TimeDelta::seconds(5);
@@ -42,10 +43,19 @@ pub enum ObservationStatus {
     PendingVerification,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+/// Exact contracts-per-millisecond ratio for the typical rate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct BaselineVolumeRate {
-    pub contracts: DecimalText,
+    #[serde(serialize_with = "serialize_rate_numerator")]
+    pub contracts: u128,
     pub elapsed_millis: u32,
+}
+
+fn serialize_rate_numerator<S: Serializer>(
+    contracts: &u128,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(contracts)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -216,6 +226,37 @@ fn compare_rates(lhs: VolumeRate, rhs: VolumeRate) -> std::cmp::Ordering {
     lhs_scaled.cmp(&rhs_scaled)
 }
 
+impl BaselineVolumeRate {
+    fn median(sorted: &[VolumeRate]) -> Option<Self> {
+        if sorted.len() < MIN_BASELINE_SAMPLES {
+            return None;
+        }
+        let upper = sorted[sorted.len() / 2];
+        let lower = sorted[(sorted.len() - 1) / 2];
+        if compare_rates(lower, upper).is_eq() {
+            return Some(Self {
+                contracts: upper.contracts,
+                elapsed_millis: upper.elapsed_millis,
+            });
+        }
+        // Both observations have positive durations of at most 30,000 ms.
+        // The denominator is at most 1,800,000,000 and the numerator is < 6×10³².
+        Some(Self {
+            contracts: lower.contracts * u128::from(upper.elapsed_millis)
+                + upper.contracts * u128::from(lower.elapsed_millis),
+            elapsed_millis: 2 * lower.elapsed_millis * upper.elapsed_millis,
+        })
+    }
+
+    fn is_elevated(self, current: VolumeRate) -> Option<bool> {
+        // Cross multiplication remains below 2 × 6×10³² × 30,000.
+        (self.contracts > 0).then(|| {
+            current.contracts * u128::from(self.elapsed_millis)
+                >= 2 * self.contracts * u128::from(current.elapsed_millis)
+        })
+    }
+}
+
 #[derive(Default)]
 struct Baseline {
     last_at: Option<DateTime<Utc>>,
@@ -379,9 +420,11 @@ impl ObservationEngine {
                     return None;
                 }
                 prior.sort_unstable_by_key(DecimalText::value);
-                let typical_spread = prior[prior.len() / 2].clone();
-                if exact_difference(&book.spread, &typical_spread)?.value() < typical_spread.value()
-                {
+                let upper = &prior[prior.len() / 2];
+                let lower = &prior[(prior.len() - 1) / 2];
+                let typical_spread = exact_mean(lower, upper)?;
+                // Doubling the 28-digit wire coefficient still fits a Decimal.
+                if book.spread.value() < typical_spread.value() * Decimal::TWO {
                     return None;
                 }
                 self.counts.quote_widenings += 1;
@@ -501,27 +544,8 @@ impl Samples {
             return None;
         }
         prior.sort_unstable_by(|lhs, rhs| compare_rates(*lhs, *rhs));
-        let typical = (prior.len() >= MIN_BASELINE_SAMPLES).then(|| prior[prior.len() / 2]);
-        let typical_rate = typical.map(|rate| BaselineVolumeRate {
-            contracts: rate
-                .contracts
-                .to_string()
-                .parse()
-                .expect("difference of two wire volumes"),
-            elapsed_millis: rate.elapsed_millis,
-        });
-        let elevated = typical
-            .filter(|typical| typical.contracts > 0)
-            .map(|typical| {
-                compare_rates(
-                    rate,
-                    VolumeRate {
-                        contracts: 2 * typical.contracts,
-                        ..typical
-                    },
-                )
-                .is_ge()
-            });
+        let typical_rate = BaselineVolumeRate::median(&prior);
+        let elevated = typical_rate.and_then(|typical| typical.is_elevated(rate));
         let delta_contracts = rate.contracts.to_string().parse().ok()?;
         let recent_in_window =
             |sample: &&L1Sample| sample.received_at >= earlier.received_at && fresh(sample, at);

@@ -34,6 +34,7 @@ pub enum QuoteReason {
     Midpoint,
     MissingQuote,
     QuoteCoverageUnknown,
+    TradeOverlapConflict,
     SameSecondUnordered,
     PriorQuoteOrderUnknown,
     StaleQuote,

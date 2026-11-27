@@ -55,6 +55,8 @@ pub struct TradeLink {
 #[serde(rename_all = "snake_case")]
 pub enum TradeStatus {
     Active,
+    /// The source row is retained within a conflicting TRADES interval.
+    PendingVerification,
     Superseded,
     Cancelled,
     AppliedCancellation,
@@ -62,7 +64,11 @@ pub enum TradeStatus {
     NonTradeMarker,
 }
 
-pub(super) fn reconcile(trades: &mut [VerifiedTrade], links: &[TradeLink]) -> Result<()> {
+pub(super) fn reconcile(
+    trades: &mut [VerifiedTrade],
+    links: &[TradeLink],
+    disputed: impl Fn(&VerifiedTrade) -> bool,
+) -> Result<()> {
     let mut occurrences = HashMap::new();
     for (idx, trade) in trades.iter_mut().enumerate() {
         ensure!(
@@ -138,9 +144,14 @@ pub(super) fn reconcile(trades: &mut [VerifiedTrade], links: &[TradeLink]) -> Re
         let Some(&original) = targets.get(target) else {
             continue;
         };
+        if disputed(&trades[original]) {
+            continue;
+        }
         let mut current = original;
         for &(_, idx) in revisions.iter() {
-            if trades[original].trade.row.occurred_at > trades[idx].trade.batch.obtained_at {
+            if disputed(&trades[idx])
+                || trades[original].trade.row.occurred_at > trades[idx].trade.batch.obtained_at
+            {
                 continue;
             }
             let cancelled = matches!(

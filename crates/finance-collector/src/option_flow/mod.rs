@@ -48,6 +48,8 @@ impl FlowUse {
 #[derive(Clone, Debug)]
 pub struct ObservedFlow {
     pub clue: FlowObservation,
+    /// F9b local coverage of the half-open sample window, when queryable.
+    /// Equal receipt timestamps have no interval to query.
     pub coverage: Option<CoverageReport>,
     pub budget: BudgetStatus,
 }

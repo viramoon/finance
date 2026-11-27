@@ -13,7 +13,7 @@ fn decimal_text(mut mantissa: i128, mut scale: u32) -> Option<DecimalText> {
         .ok()
 }
 
-pub(super) fn exact_difference(lhs: &DecimalText, rhs: &DecimalText) -> Option<DecimalText> {
+fn aligned_mantissas(lhs: &DecimalText, rhs: &DecimalText) -> Option<(i128, i128, u32)> {
     let lhs = lhs.value().normalize();
     let rhs = rhs.value().normalize();
     let scale = lhs.scale().max(rhs.scale());
@@ -22,7 +22,22 @@ pub(super) fn exact_difference(lhs: &DecimalText, rhs: &DecimalText) -> Option<D
             .mantissa()
             .checked_mul(10_i128.pow(scale - value.scale()))
     };
-    decimal_text(align(lhs)?.checked_sub(align(rhs)?)?, scale)
+    Some((align(lhs)?, align(rhs)?, scale))
+}
+
+pub(super) fn exact_difference(lhs: &DecimalText, rhs: &DecimalText) -> Option<DecimalText> {
+    let (lhs, rhs, scale) = aligned_mantissas(lhs, rhs)?;
+    decimal_text(lhs.checked_sub(rhs)?, scale)
+}
+
+pub(super) fn exact_mean(lhs: &DecimalText, rhs: &DecimalText) -> Option<DecimalText> {
+    let (lhs, rhs, scale) = aligned_mantissas(lhs, rhs)?;
+    let sum = lhs.checked_add(rhs)?;
+    if sum % 2 == 0 {
+        decimal_text(sum / 2, scale)
+    } else {
+        decimal_text(sum.checked_mul(5)?, scale + 1)
+    }
 }
 
 pub(super) fn exact_premium(

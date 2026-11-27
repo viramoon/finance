@@ -9,7 +9,8 @@ use anyhow::{Result, ensure};
 use chrono::{DateTime, TimeDelta, Utc};
 use finance_ib::{
     historical::option_ticks::{
-        HistoricalIssue, HistoricalIssueReason, HistoricalOptionTicks, HistoricalTick, HistoryTrade,
+        HistoricalIssue, HistoricalIssueReason, HistoricalKind, HistoricalOptionTicks,
+        HistoricalTick, HistoryTrade,
     },
     market::{ConfirmedContract, ContractKind},
 };
@@ -176,6 +177,8 @@ pub struct HistoricalCounts {
     pub verified: usize,
     /// Verified active prints with unknown direction.
     pub unknown: usize,
+    /// Raw TRADES rows in a conflicting pagination interval.
+    pub pending_trade_rows: usize,
     /// Reported unavailable intervals, counted separately for each tick kind.
     pub unavailable_intervals: usize,
     pub pending_intervals: usize,
@@ -255,10 +258,23 @@ pub fn verify_history(
             }
         })
         .collect();
-    revisions::reconcile(&mut trades, links)?;
+    let disputed = |trade: &VerifiedTrade| {
+        ticks.issues.iter().any(|issue| {
+            issue.kind == HistoricalKind::Trades
+                && issue.reason == HistoricalIssueReason::InconsistentOverlap
+                && (issue.start..issue.end).contains(&trade.trade.row.occurred_at)
+        })
+    };
+    revisions::reconcile(&mut trades, links, disputed)?;
 
     let mut counts = HistoricalCounts::default();
     for trade in &mut trades {
+        if disputed(trade) {
+            trade.status = TradeStatus::PendingVerification;
+            trade.inference = SideInference::unknown(QuoteReason::TradeOverlapConflict);
+            counts.pending_trade_rows += 1;
+            continue;
+        }
         match trade.status {
             TradeStatus::Active => {
                 counts.verified += 1;
