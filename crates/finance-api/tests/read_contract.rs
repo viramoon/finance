@@ -231,3 +231,56 @@ fn openapi_cli_is_deterministic_and_resolves_read_contract_refs() {
         })
     );
 }
+
+#[test]
+fn batch_two_openapi_exposes_new_operations_and_preserves_legacy_types() {
+    use finance_api::ApiDoc;
+    use utoipa::OpenApi;
+
+    let spec = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let paths = &spec["paths"];
+    for (path, method, schema) in [
+        ("/api/v1/strategies/validate", "post", "StrategyPreview"),
+        ("/api/v1/strategies", "get", "StrategyVersionPage"),
+        (
+            "/api/v1/strategies/{id}/versions/{version}",
+            "get",
+            "StrategyPreview",
+        ),
+        ("/api/v1/backtests/{id}/cancel", "post", "Job"),
+        ("/api/v1/backtests/worker-status", "get", "WorkerStatus"),
+        ("/api/v1/decisions/signals", "get", "DecisionSignalPage"),
+        (
+            "/api/v1/factors/{id}/evaluations/{evaluation_id}",
+            "get",
+            "FactorEvaluationDetail",
+        ),
+    ] {
+        assert_eq!(
+            paths[path][method]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            format!("#/components/schemas/{schema}"),
+        );
+    }
+    let schemas = &spec["components"]["schemas"];
+    assert_eq!(schemas["Accepted"]["properties"]["id"]["type"], "integer");
+    assert_eq!(
+        schemas["JobStatus"]["enum"],
+        json!(["queued", "running", "succeeded", "failed", "timed_out"])
+    );
+    assert_eq!(
+        schemas["BacktestSummary"]["properties"]["pnl"]["type"],
+        "string"
+    );
+    assert_eq!(
+        schemas["SmaSignal"]["properties"]["seq"]["$ref"],
+        "#/components/schemas/U64Text"
+    );
+    assert_eq!(
+        schemas["BundleSignal"]["properties"]["target_shares"]["$ref"],
+        "#/components/schemas/DecimalText"
+    );
+    assert_eq!(
+        schemas["StrategyPreview"]["properties"]["plan"]["$ref"],
+        "#/components/schemas/CompiledPlan"
+    );
+}

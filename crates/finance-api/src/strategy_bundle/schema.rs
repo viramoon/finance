@@ -73,8 +73,16 @@ static DECIMAL: LazyLock<Pattern> = LazyLock::new(|| {
     )
 });
 
+pub(crate) fn valid_strategy_id(id: &str) -> bool {
+    STRATEGY_ID.regex.is_match(id)
+}
+
+pub(crate) fn valid_recipe_id(id: &str) -> bool {
+    LOCAL_ID.regex.is_match(id)
+}
+
 pub(crate) fn valid_strategy_version(id: &str, version: &str) -> bool {
-    STRATEGY_ID.regex.is_match(id) && VERSION.regex.is_match(version)
+    valid_strategy_id(id) && VERSION.regex.is_match(version)
 }
 
 #[derive(Debug, Clone, Copy)]

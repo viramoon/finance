@@ -221,3 +221,120 @@ async fn historical_catalog_and_lookup_use_the_committed_request() {
     std::fs::remove_file(dataset.join("dataset.json")).unwrap();
     assert_eq!(request(&t, "POST", path, "daily", DAILY).await, accepted);
 }
+
+#[tokio::test]
+async fn cancellation_is_idempotent_and_preserves_legacy_job_and_key_contract() {
+    let root = tempfile::tempdir().unwrap();
+    let queue = "/api/v1/backtests";
+    for (id, key) in [(1, "queued"), (2, "running"), (3, "done")] {
+        assert_eq!(
+            request(&root, "POST", queue, key, BODY).await,
+            (202, json!({"id":id}))
+        );
+    }
+    let conn = rusqlite::Connection::open(root.path().join("finance-state/backtests/jobs.sqlite3"))
+        .unwrap();
+    conn.execute_batch(
+        "UPDATE jobs SET status='running',attempt=1 WHERE id=2;
+         INSERT INTO job_leases VALUES(2,9223372036854775807);
+         UPDATE jobs SET status='succeeded',attempt=1 WHERE id=3;",
+    )
+    .unwrap();
+    let cancel_first = format!("{queue}/1/cancel");
+    let (a, b) = tokio::join!(
+        request(&root, "POST", &cancel_first, "", ""),
+        request(&root, "POST", &cancel_first, "", ""),
+    );
+    assert_eq!(a, b);
+    assert_eq!(a.0, 200);
+    assert_eq!(a.1["attempt"], 0);
+    for (id, key) in [(1, "queued"), (2, "running")] {
+        let (status, job) = request(&root, "POST", &format!("{queue}/{id}/cancel"), "", "").await;
+        assert_eq!(status, 200);
+        assert_eq!(job["status"], "failed");
+        assert_eq!(job["error"], "job_cancelled");
+        assert_eq!(job["summary"], Value::Null);
+        assert_eq!(
+            request(&root, "GET", &format!("{queue}/{id}"), "", "").await,
+            (200, job)
+        );
+        assert_eq!(
+            request(&root, "GET", &format!("{queue}/by-key"), key, "").await,
+            (200, json!({"id":id}))
+        );
+        assert_eq!(
+            request(&root, "POST", queue, key, BODY).await,
+            (202, json!({"id":id}))
+        );
+    }
+    assert_eq!(
+        conn.query_row("SELECT job_id FROM job_leases", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    for (id, code, error) in [
+        (3, 409, "job_already_finished"),
+        (4, 404, "job_not_found"),
+        (0, 422, "invalid_request"),
+    ] {
+        let (status, body) = request(&root, "POST", &format!("{queue}/{id}/cancel"), "", "").await;
+        assert_eq!(status, code);
+        assert_eq!(body["error"]["code"], error);
+    }
+    assert_eq!(
+        request(&root, "GET", &format!("{queue}/3"), "", "").await.1["status"],
+        "succeeded"
+    );
+}
+
+#[tokio::test]
+async fn worker_status_is_read_only_and_counts_legacy_and_current_leases() {
+    let root = tempfile::tempdir().unwrap();
+    let path = "/api/v1/backtests/worker-status";
+    let (status, empty) = request(&root, "GET", path, "", "").await;
+    assert_eq!(status, 200);
+    assert_eq!(empty["queue_present"], false);
+    assert_eq!(empty["running"], 0);
+    assert_eq!(root.path().read_dir().unwrap().count(), 0);
+
+    let queue = "/api/v1/backtests";
+    for key in ["queued", "active", "expired", "legacy"] {
+        assert_eq!(request(&root, "POST", queue, key, BODY).await.0, 202);
+    }
+    let conn = rusqlite::Connection::open(root.path().join("finance-state/backtests/jobs.sqlite3"))
+        .unwrap();
+    conn.execute_batch(
+        "UPDATE jobs SET status='running',attempt=1 WHERE id>1;
+         INSERT INTO job_leases VALUES(2,9223372036854775807),(3,0);",
+    )
+    .unwrap();
+    let (status, body) = request(&root, "GET", path, "", "").await;
+    assert_eq!(status, 200);
+    assert_eq!(body["queue_present"], true);
+    assert_eq!(body["queued"], 1);
+    assert_eq!(body["running"], 3);
+    assert_eq!(body["leased_running"], 1);
+    assert_eq!(body["unleased_running"], 2);
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM job_leases", [], |row| row
+            .get::<_, u32>(0))
+            .unwrap(),
+        2
+    );
+    conn.execute_batch("DROP TABLE job_leases;").unwrap();
+    let (status, body) = request(&root, "GET", path, "", "").await;
+    assert_eq!(status, 200);
+    assert_eq!(body["running"], 3);
+    assert_eq!(body["leased_running"], 0);
+    assert_eq!(body["unleased_running"], 3);
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name='job_leases'",
+            [],
+            |row| row.get::<_, u32>(0)
+        )
+        .unwrap(),
+        0
+    );
+}

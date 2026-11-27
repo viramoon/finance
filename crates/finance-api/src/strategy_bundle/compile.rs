@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use utoipa::ToSchema;
 
 use crate::indicators::IndicatorError;
 
@@ -13,11 +14,17 @@ use super::{
     VersionBindings, child_path, component, diagnostic, schema,
 };
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, ToSchema)]
 pub struct CompiledPlan<'a> {
     pub plan_version: &'static str,
+    /// SHA-256 of the canonical bundle.
+    #[schema(pattern = r"^[0-9a-f]{64}$")]
     pub content_sha256: String,
+    /// SHA-256 of the submitted source bytes.
+    #[schema(pattern = r"^[0-9a-f]{64}$")]
     pub source_sha256: String,
+    /// Canonical document conforming to the separate StrategyBundle v1 schema.
+    #[schema(value_type = Object)]
     pub bundle: Value,
     pub inputs: ResolvedInputs<'a>,
     pub factors: Vec<CompiledComponent>,
@@ -27,7 +34,7 @@ pub struct CompiledPlan<'a> {
     pub conflict_rules: ConflictRules,
 }
 
-#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
 pub struct ResolvedInputs<'a> {
     #[serde(borrow)]
     pub universe: Universe<'a>,
@@ -35,7 +42,7 @@ pub struct ResolvedInputs<'a> {
     pub bars: Bars<'a>,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, ToSchema)]
 pub struct CompiledComponent {
     pub local_id: String,
     pub component: &'static str,
@@ -48,14 +55,15 @@ pub struct CompiledComponent {
     pub available_at: Availability,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, ToSchema)]
 pub struct CompiledSleeve {
     pub recipe: String,
     pub priority: u64,
+    #[schema(pattern = r"^-?[0-9]+(\.[0-9]+)?$")]
     pub budget_weight: String,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, ToSchema)]
 pub struct ConflictRules {
     pub decision_snapshot: &'static str,
     pub phase_order: [&'static str; 4],

@@ -527,3 +527,109 @@ fn openapi_exposes_bundle_alternatives_and_manifest_without_changing_legacy_shap
     );
     assert!(spec["paths"]["/api/v1/strategies"]["post"].is_object());
 }
+
+#[tokio::test]
+async fn strategy_preview_registration_and_pinned_selection_share_a_canonical_plan() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let registry = "/api/v1/strategies";
+    let validate = "/api/v1/strategies/validate";
+    let select = format!("{registry}/{ID}/versions/{VERSION}");
+    let threshold = "0.012345678901234567";
+    let content = ENTRY_EXIT.replace("0.02", threshold);
+    let yaml = json!({"format":"yaml","content":content});
+    let (status, preview) = request(root, "POST", validate, "", yaml.clone()).await;
+    assert_eq!(status, 200);
+    let plan = &preview["plan"];
+    assert_eq!(plan["plan_version"], "fertile.finance/strategy-plan/v1");
+    assert_eq!(
+        plan["bundle"]["spec"]["modules"]["A1"]["params"]["threshold"],
+        threshold
+    );
+    assert_eq!(
+        preview["strategy"]["content_sha256"],
+        plan["content_sha256"]
+    );
+    assert_eq!(root.read_dir().unwrap().count(), 0);
+    assert_eq!(request(root, "GET", &select, "", Value::Null).await.0, 404);
+    assert_eq!(
+        request(root, "GET", registry, "", Value::Null).await,
+        (200, json!({"items":[],"next_cursor":null}))
+    );
+    assert_eq!(root.read_dir().unwrap().count(), 0);
+
+    let json_doc = json!({"format":"json","content":plan["bundle"].to_string()});
+    let (status, alternate) = request(root, "POST", validate, "", json_doc.clone()).await;
+    assert_eq!(status, 200);
+    assert_eq!(alternate["strategy"], preview["strategy"]);
+    assert_eq!(alternate["plan"]["bundle"], plan["bundle"]);
+    assert_ne!(alternate["plan"]["source_sha256"], plan["source_sha256"]);
+
+    assert_eq!(
+        request(root, "POST", registry, "", yaml.clone()).await,
+        (200, preview["strategy"].clone())
+    );
+    assert_eq!(
+        request(root, "POST", registry, "", json_doc).await,
+        (200, preview["strategy"].clone())
+    );
+    let second = json!({"format":"yaml","content":content.replace("\"1.0.0\"", "\"2.0.0\"")});
+    assert_eq!(request(root, "POST", registry, "", second).await.0, 200);
+
+    let query = format!("{registry}?id={ID}&limit=1");
+    let (status, first) = request(root, "GET", &query, "", Value::Null).await;
+    assert_eq!(status, 200);
+    assert_eq!(first["items"], json!([preview["strategy"]]));
+    assert_eq!(first["next_cursor"], format!("{ID}@{VERSION}"));
+    let next = format!("{query}&after={}", first["next_cursor"].as_str().unwrap());
+    let (status, second) = request(root, "GET", &next, "", Value::Null).await;
+    assert_eq!(status, 200);
+    assert_eq!(second["items"][0]["version"], "2.0.0");
+    assert_eq!(second["next_cursor"], Value::Null);
+    assert_eq!(
+        request(
+            root,
+            "GET",
+            &format!("{query}&after=other@1.0.0"),
+            "",
+            Value::Null
+        )
+        .await
+        .0,
+        422
+    );
+
+    // A selection depends on stored input metadata rather than the current catalog.
+    fs::create_dir_all(inputs(root)).unwrap();
+    fs::write(
+        inputs(root).join("catalog.json"),
+        "synthetic invalid catalog",
+    )
+    .unwrap();
+    assert_eq!(
+        request(root, "GET", &select, "", Value::Null).await,
+        (200, preview)
+    );
+}
+
+#[tokio::test]
+async fn strategy_validation_returns_compiler_location_and_enforces_upload_limit() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = "/api/v1/strategies/validate";
+    let bad = json!({"format":"yaml","content":ENTRY_EXIT.replace("threshold: \"0.02\"", "threshold: 0.02")});
+    let (status, body) = request(temp.path(), "POST", path, "", bad).await;
+    assert_eq!(status, 422);
+    assert_eq!(
+        body["error"]["path"],
+        "/spec/modules/<key>/params/threshold"
+    );
+    assert!(body["error"]["location"]["line"].as_u64().unwrap() > 0);
+    assert!(body["error"]["location"]["column"].as_u64().unwrap() > 0);
+
+    let large =
+        json!({"format":"yaml","content":"x".repeat(finance_api::strategy_bundle::MAX_BYTES + 1)});
+    let (status, body) = request(temp.path(), "POST", path, "", large).await;
+    assert_eq!(status, 422);
+    assert_eq!(body["error"]["code"], "INPUT_TOO_LARGE");
+    assert_eq!(temp.path().read_dir().unwrap().count(), 0);
+}

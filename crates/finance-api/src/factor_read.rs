@@ -593,8 +593,70 @@ pub(crate) async fn evaluations(
     }))
 }
 
+#[derive(Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+#[into_params(parameter_in = Query)]
+pub(crate) struct ExactEvaluationQuery {
+    /// Registered factor version.
+    version: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub(crate) struct FactorEvaluationDetail {
+    #[schema(minimum = 1, maximum = 1)]
+    schema_version: u8,
+    as_of: DateTime<Utc>,
+    item: FactorEvaluationItem,
+}
+
+#[utoipa::path(get, path = "/api/v1/factors/{id}/evaluations/{evaluation_id}", operation_id = "factor_evaluation",
+    params(("id" = String, Path), ("evaluation_id" = String, Path), ExactEvaluationQuery),
+    responses((status = 200, body = FactorEvaluationDetail), (status = 400, body = ErrorBody),
+              (status = 404, body = ErrorBody), (status = 500, body = ErrorBody)))]
+pub(crate) async fn evaluation(
+    State(app): State<AppState>,
+    path: Result<Path<(String, String)>, PathRejection>,
+    query: Result<Query<ExactEvaluationQuery>, QueryRejection>,
+) -> Result<Json<FactorEvaluationDetail>, ApiError> {
+    let Path((id, evaluation_id)) = path.map_err(|_| invalid_query())?;
+    let Query(query) = query.map_err(|_| invalid_query())?;
+    if !valid_key(&id, &query.version) || !FACTOR_ID.is_match(&evaluation_id) {
+        return Err(invalid_query());
+    }
+    read_snapshot(app)
+        .await?
+        .and_then(|snapshot| {
+            snapshot
+                .evaluations
+                .into_iter()
+                .find(|item| {
+                    item.factor_id == id
+                        && item.version == query.version
+                        && item.evaluation_id == evaluation_id
+                })
+                .map(|item| {
+                    Json(FactorEvaluationDetail {
+                        schema_version: 1,
+                        as_of: snapshot.as_of,
+                        item,
+                    })
+                })
+        })
+        .ok_or_else(|| {
+            error(
+                StatusCode::NOT_FOUND,
+                "factor_evaluation_not_found",
+                "No published evaluation for this version",
+            )
+        })
+}
+
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/factors", get(list))
         .route("/api/v1/factors/{id}/evaluations", get(evaluations))
+        .route(
+            "/api/v1/factors/{id}/evaluations/{evaluation_id}",
+            get(evaluation),
+        )
 }

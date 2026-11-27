@@ -335,6 +335,53 @@ class WorkerLeaseTests(unittest.TestCase):
         self.assertEqual(self.db.execute("SELECT count(*) FROM job_leases").fetchone(), (0,))
         self.assertEqual(list(self.directory.glob("run-*")), [])
 
+    def test_running_cancellation_stops_engine_and_releases_lease(self):
+        self.insert_jobs(2)
+        self.prepare_engine()
+        self.start_worker()
+        self.wait_for(lambda: len(self.rows()) == 1)
+        _, _, engine = self.rows()[0]
+        with self.db:
+            self.db.execute(
+                "UPDATE jobs SET status='failed',error=? WHERE id=1",
+                (worker.CANCELLED_ERROR,),
+            )
+        self.wait_for(lambda: len(self.rows()) == 2)
+        self.assertFalse(Path(f"/proc/{engine}").exists())
+        self.assertFalse(worker.guard_path(self.directory, 1).exists())
+        self.assertEqual(list(self.directory.glob("run-1-*")), [])
+        self.gate.touch()
+        self.wait_for(lambda: self.db.execute("SELECT status FROM jobs WHERE id=2").fetchone() == ("succeeded",))
+        self.assertEqual(
+            self.db.execute("SELECT status,attempt,summary,error FROM jobs WHERE id=1").fetchone(),
+            ("failed", 1, None, worker.CANCELLED_ERROR),
+        )
+        self.assertEqual(self.db.execute("SELECT count(*) FROM job_leases").fetchone(), (0,))
+
+    def test_cancellation_fences_completion_and_recovers_abandoned_scratch(self):
+        self.insert_jobs(2)
+        with closing(worker.open_queue(self.directory)) as other, patch.object(worker, "clock_ms", return_value=0) as clock:
+            first = worker.claim(self.db, self.directory, 1)
+            second = worker.claim(self.db, self.directory, 1)
+            self.addCleanup(first.guard.close)
+            self.addCleanup(second.guard.close)
+            scratch = self.directory / "run-2-1-synthetic"
+            scratch.mkdir()
+            with other:
+                other.execute("UPDATE jobs SET status='failed',error=?", (worker.CANCELLED_ERROR,))
+
+            self.assertFalse(worker.finish(self.db, first, "succeeded", summary='{"pnl":"1"}'))
+            clock.return_value = 1000
+            worker.recover(other, self.directory)
+            self.assertTrue(scratch.is_dir())
+            second.guard.close()
+            worker.recover(other, self.directory)
+            self.assertFalse(scratch.exists())
+            self.assertIsNone(worker.claim(self.db, self.directory, 1))
+            self.assertEqual(other.execute("SELECT status,summary,error FROM jobs ORDER BY id").fetchall(),
+                             [("failed", None, worker.CANCELLED_ERROR)] * 2)
+            self.assertEqual(other.execute("SELECT count(*) FROM job_leases").fetchone(), (0,))
+
 
 if __name__ == "__main__":
     unittest.main()
