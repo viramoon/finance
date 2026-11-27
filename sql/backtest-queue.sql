@@ -10,6 +10,11 @@ CREATE TABLE IF NOT EXISTS jobs (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE INDEX IF NOT EXISTS jobs_status_id ON jobs(status,id);
+-- Keep the predicate in sync with finance-api's legacy list query. Guard
+-- json_extract so malformed historical requests cannot prevent the upgrade.
+CREATE INDEX IF NOT EXISTS jobs_legacy_id ON jobs(id)
+  WHERE CASE WHEN json_valid(request)
+    THEN json_extract(request, '$.strategy') IN ('DemoStrategy', 'SmaCrossover') END;
 
 CREATE TABLE IF NOT EXISTS strategy_backtest_versions (
   id TEXT NOT NULL,

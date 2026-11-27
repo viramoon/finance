@@ -284,6 +284,7 @@ fn router_with_read_sources(
         jobs::JobStatus,
         jobs::Job,
         jobs::Page,
+        jobs::BacktestVisibility,
         jobs::Accepted,
         jobs::StrategyParams,
         research::Dataset,

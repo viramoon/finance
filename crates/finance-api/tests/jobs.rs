@@ -6,8 +6,13 @@ use finance_api::{AppState, router};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+#[path = "support/backtest_list_fixture.rs"]
+mod fixture;
+use fixture::{BUNDLE, insert_list_fixture};
+
 const BODY: &str = r#"{"strategy":"DemoStrategy","instrument":"6EH4.XCME","start":"2024-01-01T23:02:00Z","end":"2024-01-01T23:06:00Z","params":{}}"#;
 const DAILY: &str = r#"{"strategy":"SmaCrossover","instrument":"IBM.XNYS","start":"2025-01-02T00:00:00Z","end":"2025-03-04T00:00:00Z","params":{"fast_period":5,"slow_period":20,"shares":10}}"#;
+
 async fn request(
     root: &tempfile::TempDir,
     method: &str,
@@ -31,6 +36,169 @@ async fn request(
     let data = to_bytes(res.into_body(), 1 << 20).await.unwrap();
     (status.as_u16(), serde_json::from_slice(&data).unwrap())
 }
+
+#[tokio::test]
+async fn legacy_visibility_migrates_existing_queue_and_preserves_unfiltered_pages() {
+    let root = tempfile::tempdir().unwrap();
+    let path = "/api/v1/backtests";
+    let filtered = "/api/v1/backtests?visibility=legacy&limit=1";
+    let queue = root.path().join("finance-state/backtests");
+    std::fs::create_dir_all(&queue).unwrap();
+    let db = rusqlite::Connection::open(queue.join("jobs.sqlite3")).unwrap();
+    // Queue schema before this migration. The old worker and API write these columns.
+    let old_schema = "CREATE TABLE IF NOT EXISTS jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, idem TEXT UNIQUE NOT NULL, request TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'queued'
+            CHECK(status IN ('queued','running','succeeded','failed','timed_out')),
+        attempt INTEGER NOT NULL DEFAULT 0 CHECK(attempt BETWEEN 0 AND 2),
+        summary TEXT, error TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    );
+    CREATE INDEX IF NOT EXISTS jobs_status_id ON jobs(status,id);";
+    db.execute_batch(old_schema).unwrap();
+    insert_list_fixture(&db, 1, BODY);
+    insert_list_fixture(&db, 2, BUNDLE);
+
+    let public_job = json!({
+        "id": 1, "status": "failed", "request": serde_json::from_str::<Value>(BODY).unwrap(),
+        "attempt": 0, "created_at": "2025-01-02T00:00:00Z", "summary": null, "error": null
+    });
+    let private_job = json!({
+        "id": 2, "status": "failed", "attempt": 0, "created_at": "2025-01-02T00:00:00Z",
+        "summary": null, "error": null,
+        "request": {"strategy": "StrategyBundle", "start": "2025-01-02T00:00:00Z",
+            "end": "2025-03-04T00:00:00Z",
+            "source": {"kind": "registered", "id": "synthetic.bundle", "version": "1.0.0"},
+            "content_sha256": "a".repeat(64)}
+    });
+    assert_eq!(
+        request(&root, "GET", filtered, "", "").await,
+        (200, json!({"items": [public_job], "next_cursor": null}))
+    );
+    for (suffix, expected) in [
+        (
+            "",
+            json!({"items": [public_job, private_job], "next_cursor": null}),
+        ),
+        ("?limit=1", json!({"items": [public_job], "next_cursor": 1})),
+        (
+            "?limit=1&cursor=1",
+            json!({"items": [private_job], "next_cursor": null}),
+        ),
+    ] {
+        assert_eq!(
+            request(&root, "GET", &format!("{path}{suffix}"), "", "").await,
+            (200, expected)
+        );
+    }
+
+    // Simulate an older API reopening the upgraded database and submitting a job.
+    drop(db);
+    let db = rusqlite::Connection::open(queue.join("jobs.sqlite3")).unwrap();
+    db.execute_batch(old_schema).unwrap();
+    let old_rows = db
+        .prepare("SELECT id,request FROM jobs WHERE id>?1 ORDER BY id LIMIT ?2")
+        .unwrap()
+        .query_map([0, 3], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<(i64, String)>>>()
+        .unwrap();
+    assert_eq!(old_rows, [(1, BODY.to_owned()), (2, BUNDLE.to_owned())]);
+    db.execute(
+        "INSERT INTO jobs(idem,request) VALUES ('older-api',?1)",
+        [DAILY],
+    )
+    .unwrap();
+    assert_eq!(
+        request(&root, "POST", path, "upgraded-api", BODY).await,
+        (202, json!({"id": 4}))
+    );
+    let (status, page) = request(&root, "GET", filtered, "", "").await;
+    assert_eq!((status, page["next_cursor"].as_i64()), (200, Some(1)));
+    let (status, page) = request(
+        &root,
+        "GET",
+        "/api/v1/backtests?visibility=legacy&cursor=1",
+        "",
+        "",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(page["items"][0]["request"]["strategy"], "SmaCrossover");
+    assert_eq!(page["items"][1]["request"]["strategy"], "DemoStrategy");
+    assert_eq!(page["items"].as_array().unwrap().len(), 2);
+    assert_eq!(page["next_cursor"], Value::Null);
+}
+
+#[tokio::test]
+async fn legacy_visibility_pages_across_ten_thousand_private_jobs_with_exact_i64_cursors() {
+    let root = tempfile::tempdir().unwrap();
+    let path = "/api/v1/backtests?visibility=legacy";
+    let empty = (200, json!({"items": [], "next_cursor": null}));
+    assert_eq!(request(&root, "GET", path, "", "").await, empty);
+    let mut db =
+        rusqlite::Connection::open(root.path().join("finance-state/backtests/jobs.sqlite3"))
+            .unwrap();
+    insert_list_fixture(&db, 2, BUNDLE);
+    assert_eq!(request(&root, "GET", path, "", "").await, empty);
+
+    let public_ids = [1, (1_i64 << 52) + 1, (1_i64 << 53) + 1, i64::MAX];
+    for id in public_ids {
+        insert_list_fixture(&db, id, BODY);
+    }
+    let route = |cursor| format!("{path}&limit=1&cursor={cursor}");
+    let mut expected = Vec::new();
+    for (idx, id) in public_ids.into_iter().enumerate() {
+        let cursor = if idx == 0 { 0 } else { public_ids[idx - 1] };
+        let (status, page) = request(&root, "GET", &route(cursor), "", "").await;
+        assert_eq!(status, 200);
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+        assert_eq!(page["items"][0]["id"].as_i64(), Some(id));
+        assert_eq!(
+            page["next_cursor"],
+            if idx + 1 < public_ids.len() {
+                json!(id)
+            } else {
+                Value::Null
+            }
+        );
+        expected.push((cursor, page));
+    }
+
+    let tx = db.transaction().unwrap();
+    // Deterministic synthetic history, using consecutive IDs and a fixed request.
+    for offset in 1..=10_000 {
+        insert_list_fixture(&tx, public_ids[1] + offset, BUNDLE);
+    }
+    insert_list_fixture(&tx, i64::MAX - 1, BUNDLE);
+    tx.commit().unwrap();
+    for (cursor, page) in expected {
+        assert_eq!(
+            request(&root, "GET", &route(cursor), "", "").await,
+            (200, page)
+        );
+    }
+    assert_eq!(request(&root, "GET", &route(i64::MAX), "", "").await, empty);
+}
+
+#[tokio::test]
+async fn legacy_visibility_rejects_invalid_values_and_cursors() {
+    let root = tempfile::tempdir().unwrap();
+    for query in [
+        "visibility=",
+        "visibility=all",
+        "visibility=legacy&visibility=legacy",
+        "visibility=legacy&cursor=-1",
+        "visibility=legacy&cursor=9223372036854775808",
+        "visibility=legacy&limit=101",
+    ] {
+        let (status, body) =
+            request(&root, "GET", &format!("/api/v1/backtests?{query}"), "", "").await;
+        assert_eq!(status, 422, "{query}");
+        assert_eq!(body["error"]["code"], "invalid_request", "{query}");
+    }
+}
+
 #[tokio::test]
 async fn concurrent_keys_and_pagination() {
     let temp = tempfile::tempdir().unwrap();

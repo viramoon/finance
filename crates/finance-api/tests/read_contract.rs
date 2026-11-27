@@ -10,6 +10,41 @@ use serde_json::{Value, json};
 use std::{collections::BTreeSet, fs, path::Path, process::Command};
 use tower::ServiceExt;
 
+#[test]
+fn backtest_list_openapi_adds_optional_legacy_visibility_and_keeps_int64_cursor() {
+    use finance_api::ApiDoc;
+    use utoipa::OpenApi;
+
+    let spec = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let list = &spec["paths"]["/api/v1/backtests"]["get"];
+    let parameters = list["parameters"].as_array().unwrap();
+    let parameter = |name| parameters.iter().find(|p| p["name"] == name).unwrap();
+    assert_eq!(parameter("cursor")["required"], false);
+    assert_eq!(
+        parameter("cursor")["schema"],
+        json!({"type": "integer", "format": "int64"})
+    );
+    let visibility = parameter("visibility");
+    assert_eq!(visibility["in"], "query");
+    assert_eq!(visibility["required"], false);
+    assert_eq!(
+        visibility["schema"],
+        json!({"$ref": "#/components/schemas/BacktestVisibility"})
+    );
+    assert_eq!(
+        spec["components"]["schemas"]["BacktestVisibility"],
+        json!({"type": "string", "enum": ["legacy"]})
+    );
+    assert_eq!(
+        list["responses"]["200"]["content"]["application/json"]["schema"],
+        json!({"$ref": "#/components/schemas/Page"})
+    );
+    assert_eq!(
+        spec["components"]["schemas"]["Page"]["properties"]["next_cursor"],
+        json!({"type": ["integer", "null"], "format": "int64"})
+    );
+}
+
 // Pre-F10a consumers use their own types so changes to the producer's DTOs
 // cannot silently change what this client considers a compatible response.
 #[derive(Deserialize)]

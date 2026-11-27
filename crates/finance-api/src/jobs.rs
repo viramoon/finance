@@ -166,6 +166,13 @@ pub struct Accepted {
 pub struct Pagination {
     limit: Option<u32>,
     cursor: Option<i64>,
+    visibility: Option<BacktestVisibility>,
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BacktestVisibility {
+    Legacy,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -540,7 +547,25 @@ pub(crate) async fn worker_status(
     .map_err(storage_error)?
 }
 
-#[utoipa::path(get, path = "/api/v1/backtests", params(("limit"=Option<u32>, Query, description="1..100, default 20"),("cursor"=Option<i64>,Query,description="Exclusive last id in ascending order")),responses((status=200,body=Page),(status=422,body=ErrorBody),(status=500,body=ErrorBody)))]
+fn list_sql(visibility: Option<BacktestVisibility>) -> String {
+    match visibility {
+        None => format!("SELECT {COLUMNS} FROM jobs WHERE id>?1 ORDER BY id LIMIT ?2"),
+        // SQLite must see the same predicate as in backtest-queue.sql to
+        // seek in the partial index and read only legacy rows.
+        Some(BacktestVisibility::Legacy) => format!(
+            "SELECT {COLUMNS} FROM jobs INDEXED BY jobs_legacy_id WHERE id>?1
+             AND CASE WHEN json_valid(request)
+               THEN json_extract(request, '$.strategy') IN ('DemoStrategy', 'SmaCrossover') END
+             ORDER BY id LIMIT ?2"
+        ),
+    }
+}
+
+#[utoipa::path(get, path = "/api/v1/backtests", params(
+    ("limit" = Option<u32>, Query, description = "1..100, default 20"),
+    ("cursor" = Option<i64>, Query, description = "Exclusive last id in ascending order"),
+    ("visibility" = Option<BacktestVisibility>, Query, description = "Use legacy for public DemoStrategy and SmaCrossover jobs. Omit for the full queue.")
+), responses((status=200,body=Page),(status=422,body=ErrorBody),(status=500,body=ErrorBody)))]
 pub async fn list(
     State(state): State<AppState>,
     query: Result<Query<Pagination>, axum::extract::rejection::QueryRejection>,
@@ -553,9 +578,7 @@ pub async fn list(
     }
     db(state, move |conn| {
         let mut stmt = conn
-            .prepare(&format!(
-                "SELECT {COLUMNS} FROM jobs WHERE id>?1 ORDER BY id LIMIT ?2"
-            ))
+            .prepare(&list_sql(pagination.visibility))
             .map_err(storage_error)?;
         let mut items = stmt
             .query_map(params![cursor, limit + 1], row)
@@ -571,4 +594,50 @@ pub async fn list(
         Ok(Json(Page { items, next_cursor }))
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::StatementStatus;
+
+    #[test]
+    fn legacy_list_seeks_and_bounds_sqlite_work() {
+        let db = Connection::open_in_memory().unwrap();
+        // Build the index over synthetic history to exercise the migration as well.
+        db.execute_batch(
+            "CREATE TABLE jobs(
+                id INTEGER PRIMARY KEY, status TEXT, request TEXT, attempt INTEGER,
+                created_at TEXT, summary TEXT, error TEXT
+             );
+             INSERT INTO jobs(id,request) VALUES (1, '{\"strategy\":\"DemoStrategy\"}'),
+                (10002, '{\"strategy\":\"SmaCrossover\"}'), (10003, 'malformed');
+             WITH RECURSIVE ids(id) AS (VALUES(2) UNION ALL SELECT id+1 FROM ids WHERE id<10001)
+             INSERT INTO jobs(id,request) SELECT id, '{\"strategy\":\"StrategyBundle\"}' FROM ids;",
+        )
+        .unwrap();
+        db.execute_batch(include_str!("../../../sql/backtest-queue.sql"))
+            .unwrap();
+        db.execute_batch("ANALYZE").unwrap();
+
+        let sql = list_sql(Some(BacktestVisibility::Legacy));
+        let plan: String = db
+            .query_row(&format!("EXPLAIN QUERY PLAN {sql}"), [1, 2], |row| {
+                row.get(3)
+            })
+            .unwrap();
+        assert!(
+            plan.contains("SEARCH") && plan.contains("jobs_legacy_id") && plan.contains("id>?"),
+            "{plan}"
+        );
+        let mut stmt = db.prepare(&sql).unwrap();
+        let rows = stmt
+            .query_map([1, 2], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<i64>>>()
+            .unwrap();
+        assert_eq!(rows, [10002]);
+        assert_eq!(stmt.get_status(StatementStatus::Sort), 0);
+        assert!(stmt.get_status(StatementStatus::VmStep) < 200);
+    }
 }

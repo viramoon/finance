@@ -23,6 +23,8 @@ curl 'http://127.0.0.1:8081/api/v1/backtests?limit=20'
 
 同一键和相同的规范化请求返回同一个 id。复用键提交不同参数返回 409。待执行与执行中合计最多 128 个作业，达到上限返回 429。按 id 升序分页，limit 范围 1～100。将 next_cursor 原样作为下次的 cursor，空值表示该页为末页。
 
+查询可加 `visibility=legacy`，仅分页读取公开的 `DemoStrategy` 和 `SmaCrossover` 作业。API 首次打开队列或 worker 启动时，现有建表脚本自动从旧记录的 `request.strategy` 建立 `jobs_legacy_id` 部分索引。后续查询在索引上按 ID 范围读取至多 `limit + 1` 条。升级保留作业表和请求格式，旧版 API 与 worker 可继续读写同一队列。[查询参数](api.md#回测列表分页)
+
 ## 配置策略作业
 
 `StrategyBundle` 作业使用 [F2 编译器](strategy-bundle.md) 统一处理文件和登记版本，将编译计划和回放快照关联到同一队列记录。现有 worker 用 Nautilus `BacktestEngine` 执行现金权益的离线模拟成交。提交和查询见 [HTTP 接口](api.md#配置策略提交与结果)。

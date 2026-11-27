@@ -7,6 +7,12 @@
       "seed": "fixed",
       "source": "手工设计的三根闭合 bar，覆盖十进制精度和循环回放。"
     },
+    "crates/finance-api/tests/jobs.rs": {
+      "sha256": "8652700bc1dba3ef8f34cfb13f3c9e8deb3c32cfb86d8a3c66b492fa29bb2308",
+      "generator": "crates/finance-api/tests/support/backtest_list_fixture.rs",
+      "seed": "fixed",
+      "source": "运行 cargo test --locked --offline -p finance-api --test jobs legacy_visibility，以固定请求、时间和连续整数 ID 在临时 SQLite 队列中写入合成作业。覆盖旧库升级、10,000 条私有作业、int64 边界及分页。"
+    },
     "crates/finance-api/tests/market_read.rs": {
       "sha256": "018faa3f22190dc832c01e569f856736c2b45b765afa435b244acb1e3f96d6f3",
       "generator": "crates/finance-api/tests/support/market_read_fixture.rs",

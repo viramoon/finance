@@ -20,6 +20,8 @@ finance-api 提供 v1 行情 WAL、投影、水位、缺口及因子研究只读
 
 第二批生产者契约覆盖配置策略校验与版本选择、离线回测与取消、worker 租约状态、获准发布的决策信号以及因子报告直达查询。[第二批契约](docs/api.md#第二批策略回测与研究契约)
 
+finance 提供 `GET /api/v1/backtests?visibility=legacy`，供 web 匿名回测列表按公开的 `DemoStrategy` 和 `SmaCrossover` 作业分页。省略参数时读取完整队列。[回测列表分页](docs/api.md#回测列表分页)
+
 历史期权库复用 F9a 的只读 paper 会话确认合约，读取未到期 IBKR 期权的闭合分钟 bar。合成回放覆盖到期、权限与数据边界。Databento OPRA 提供默认禁用的离线费用估算。[历史期权链](docs/option-history.md)
 
 ## 系统中的位置
