@@ -2,10 +2,13 @@
 // queue of distinct SDK connections, each using the production paper builder.
 use super::*;
 use crate::market::{
-    ContractQuery, MarketDataSource, MarketError, MarketRequest, MarketSubscription,
+    ContractKind, ContractQuery, MarketDataSource, MarketError, MarketRequest, MarketSubscription,
+    OptionMinuteSource,
 };
-use ibapi::replay::{MarketReplay, MarketWrite};
+use finance_market_protocol::U64Text;
+use ibapi::replay::{MarketReplay, MarketWrite, ReplayHistoricalBar};
 use std::{collections::VecDeque, sync::Mutex};
+use time::macros::datetime;
 
 struct ReplayTransport(Mutex<VecDeque<PaperPeer>>);
 
@@ -38,6 +41,137 @@ async fn answer_accounts(replay: &MarketReplay, accounts: &str) {
     replay.wait_for_writes(1).await;
     assert_eq!(replay.writes(), [MarketWrite::Accounts]);
     replay.managed_accounts(accounts).await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn verified_paper_option_history_requests_and_decodes_synthetic_bars() {
+    const WAIT: Duration = Duration::from_secs(3);
+    let (manager, [replay]) = manager();
+    let (market, ()) = timeout(WAIT, async {
+        tokio::join!(
+            manager.open_verified_market(),
+            answer_accounts(&replay, "DU-SYNTH-HISTORY")
+        )
+    })
+    .await
+    .expect("paper account verification did not finish");
+    let market = market.unwrap();
+
+    let con_id = 91002;
+    let query = ContractQuery::Option { con_id };
+    let expiry = Utc::now() + chrono::Duration::days(2);
+    let expiry_date = expiry.format("%Y%m%d").to_string();
+    let cutoff = u64::try_from(expiry.timestamp_nanos_opt().unwrap())
+        .unwrap()
+        .into();
+    let (confirmed, ()) = timeout(WAIT, async {
+        tokio::join!(market.confirm(&query), async {
+            replay.wait_for_writes(3).await;
+            let MarketWrite::Confirm(Some(id)) = replay.writes()[2] else {
+                panic!("expected an option confirmation request");
+            };
+            replay
+                .option_contract(id, con_id, &expiry_date)
+                .await
+                .unwrap();
+        })
+    })
+    .await
+    .expect("option confirmation did not finish");
+    let confirmed = confirmed.unwrap();
+    assert_eq!(confirmed.con_id, con_id);
+    assert!(matches!(confirmed.kind, ContractKind::Option(_)));
+
+    let start = datetime!(2025-03-07 16:00 UTC);
+    let end = datetime!(2025-03-07 16:02 UTC);
+    let ns = |instant: time::OffsetDateTime| {
+        U64Text::from(u64::try_from(instant.unix_timestamp_nanos()).unwrap())
+    };
+    let window = ns(start)..ns(end);
+    let root = tempfile::tempdir().unwrap();
+    let mut history = std::pin::pin!(market.option_trade_minutes(
+        &confirmed,
+        window.clone(),
+        cutoff,
+        root.path(),
+    ));
+    tokio::select! {
+        biased;
+        result = &mut history => panic!("history completed before sending a request: {result:?}"),
+        result = timeout(WAIT, replay.wait_for_writes(4)) => {
+            result.expect("no history request reached the replay transport");
+        }
+    }
+    let writes = replay.writes();
+    let MarketWrite::Historical {
+        request_id: Some(id),
+        ..
+    } = writes[3]
+    else {
+        panic!("expected a one-shot history request");
+    };
+    assert_eq!(
+        writes[3],
+        MarketWrite::Historical {
+            request_id: Some(id),
+            con_id: Some(con_id),
+            sec_type: Some("OPT".into()),
+            exchange: Some("SMART".into()),
+            currency: Some("USD".into()),
+            include_expired: false,
+            end: Some("20250307 16:02:00 UTC".into()),
+            duration: Some("1 D".into()),
+            bar_size: Some("1 min".into()),
+            what_to_show: Some("TRADES".into()),
+            use_rth: true,
+            format_date: Some(2),
+            keep_up_to_date: false,
+        }
+    );
+
+    // Hand-authored in-memory rows. Only the two middle bars fit the window.
+    let rows = [(-60, "99"), (0, "15.125"), (60, "17"), (120, "98")]
+        .into_iter()
+        .map(|(offset, volume)| ReplayHistoricalBar {
+            date: Some((start.unix_timestamp() + offset).to_string()),
+            open: Some(1.125),
+            high: Some(1.5),
+            low: Some(1.0),
+            close: Some(1.25),
+            volume: Some(volume.into()),
+            ..Default::default()
+        })
+        .collect();
+    replay
+        .historical_bars(id, rows, "20250307 15:59:00 UTC", "20250307 16:02:00 UTC")
+        .await
+        .unwrap();
+    let bars = timeout(WAIT, &mut history)
+        .await
+        .expect("history did not finish after the end marker")
+        .unwrap();
+    assert_eq!(bars.len(), 2);
+    assert_eq!(bars[0].data.open_ts, window.start);
+    assert_eq!(bars[0].close_ts, ns(datetime!(2025-03-07 16:01 UTC)));
+    assert_eq!(bars[1].data.open_ts, bars[0].close_ts);
+    assert_eq!(bars[1].close_ts, window.end);
+    for (bar, volume) in bars.iter().zip(["15.125", "17"]) {
+        assert_eq!(bar.data.open.as_str(), "1.125");
+        assert_eq!(bar.data.high.as_str(), "1.5");
+        assert_eq!(bar.data.low.as_str(), "1");
+        assert_eq!(bar.data.close.as_str(), "1.25");
+        assert_eq!(bar.data.volume.as_str(), volume);
+    }
+    assert_eq!(writes.len(), 4);
+    assert_eq!(
+        market
+            .option_trade_minutes(&confirmed, window.clone(), window.end, root.path())
+            .await,
+        Err(MarketError::ExpiredContract)
+    );
+    assert_eq!(replay.writes(), writes);
+    market.close().await;
+    assert!(replay.is_closed());
 }
 
 #[tokio::test(start_paused = true)]

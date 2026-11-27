@@ -33,3 +33,5 @@ v2 §D4 于 **2026-11-26** 记录 OPRA 历史按数据量计价，以及 OPRA St
 ## 合成复测
 
 从仓库根运行 `cargo test -p finance-collector --test option_history --locked --offline`。IBKR 合成数据由仓库生成器按固定时间和十进制输入生成，覆盖乱序、重复、窗边界与长小数。到期测试核对已过到期时刻及恰在到期时刻的两份合约都按输入顺序返回 `Expired`，且请求数为零。F9a 替身测试验证确认请求、历史窗口、准确到期时刻、节流数据根以及权限错误的传递。估算测试使用明示的合成费率和日期，覆盖合约数、天数、schema、来源和错误输入。[生成与登记](data-guard.md#合成-fixture-与例外登记)
+
+运行 `cargo test -p finance-ib --lib verified_paper_option_history_requests_and_decodes_synthetic_bars --locked --offline` 可复测生产历史请求路径。F9a 内存传输替身回放 paper 账户校验及期权确认。测试调用实际 `PaperMarket::option_trade_minutes`，核对出站 Protobuf 的合约、时段、周期及 `TRADES` 参数，回送固定合成 bars 和结束标记，验证闭合边界、精确价量以及到期后无新请求。替身只在 SDK 的测试功能下编译。
