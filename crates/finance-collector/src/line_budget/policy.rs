@@ -10,6 +10,8 @@ use finance_ib::market::{ConfirmedContract, ContractKind, ContractQuery};
 use finance_market_protocol::DecimalText;
 use rust_decimal::Decimal;
 
+pub(super) const DEFAULT_PACING_COOLDOWN: Duration = Duration::from_secs(15);
+
 /// Allocation for this scheduler within a shared IBKR user's L1 allowance.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BudgetConfig {
@@ -39,7 +41,7 @@ impl Default for BudgetConfig {
             rotation_dwell: Duration::from_secs(20),
             reconnect_initial: Duration::from_secs(2),
             reconnect_max: Duration::from_secs(60),
-            pacing_cooldown: Duration::from_secs(15),
+            pacing_cooldown: DEFAULT_PACING_COOLDOWN,
             coverage_retention: Duration::from_secs(3_600),
             chain_refresh: Duration::from_secs(900),
         }

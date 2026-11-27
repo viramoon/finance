@@ -170,6 +170,8 @@ pub enum MarketError {
     IncompleteResponse,
     #[error("market request pacing limit reached")]
     Pacing,
+    #[error("initial market gateway handshake failed")]
+    HandshakeFailed,
     #[error("market session disconnected")]
     Disconnected,
     #[error("market transport failed")]

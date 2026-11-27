@@ -17,7 +17,7 @@ use tokio::{
 
 use super::{
     LinePool, LineScheduler, SchedulerPhase,
-    policy::rank_options,
+    policy::{DEFAULT_PACING_COOLDOWN, rank_options},
     unexpired,
     worker::{Feed, Worker},
 };
@@ -155,7 +155,15 @@ impl LineScheduler {
                 state.phase = SchedulerPhase::Reconnecting;
                 next_request = next_request.max(state.cooldown.unwrap_or(now));
             }
-            let retry_at = (now + backoff).max(next_request);
+            // The SDK can discard global notices when it fails before returning a peer.
+            let retry_delay = if error == MarketError::HandshakeFailed {
+                backoff
+                    .max(config.pacing_cooldown)
+                    .max(DEFAULT_PACING_COOLDOWN)
+            } else {
+                backoff
+            };
+            let retry_at = (now + retry_delay).max(next_request);
             tracing::warn!(%error, wait_ms = retry_at.duration_since(now).as_millis() as u64, "IB L1 session recovering");
             tokio::select! {
                 biased;

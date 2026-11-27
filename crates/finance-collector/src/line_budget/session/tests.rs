@@ -857,3 +857,57 @@ async fn startup_disconnect_retries_only_after_global_pacing_deadline() {
     stop.send(true).unwrap();
     task.await.unwrap().unwrap();
 }
+
+#[tokio::test(start_paused = true)]
+async fn handshake_failure_waits_for_conservative_cooldown_without_notice() {
+    let handshake_time = Duration::from_secs(1);
+    for (cooldown, backoff, minimum) in [(2, 1, 15), (20, 1, 20), (2, 22, 22)] {
+        let config = BudgetConfig {
+            pacing_cooldown: Duration::from_secs(cooldown),
+            reconnect_initial: Duration::from_secs(backoff),
+            reconnect_max: Duration::from_secs(backoff),
+            ..compact_config()
+        };
+        let step = config.request_interval;
+        let gateway = Gateway::new(0, &config);
+        let scheduler = LineScheduler::new(config, vec![watchlist().remove(0)]).unwrap();
+        let handle = scheduler.handle();
+        let (stop, stopped) = watch::channel(false);
+        let opener = gateway.clone();
+        let mut first_attempt = true;
+        let task = tokio::spawn(scheduler.run(
+            move |pacing| {
+                let opener = opener.clone();
+                let fail = std::mem::take(&mut first_attempt);
+                async move {
+                    if fail {
+                        opener.state.lock().unwrap().record(1, Operation::Open);
+                        tokio::time::sleep(handshake_time).await;
+                        return Err(MarketError::HandshakeFailed);
+                    }
+                    opener.open(pacing).await
+                }
+            },
+            stopped,
+        ));
+        until(10, step, || {
+            handle.status().phase == SchedulerPhase::Reconnecting
+        })
+        .await;
+        let first_open = gateway.calls()[0].time;
+        let deadline = first_open + handshake_time + Duration::from_secs(minimum);
+        tick((deadline - step).duration_since(Instant::now())).await;
+        assert_eq!(gateway.count(1, Operation::Open), 1, "{cooldown}/{backoff}");
+
+        until(8, step, || handle.status().stock_lines == 1).await;
+        let attempts: Vec<_> = gateway
+            .calls()
+            .into_iter()
+            .filter(|call| call.operation == Operation::Open)
+            .collect();
+        assert_eq!(attempts.len(), 2);
+        assert!(attempts[1].time >= deadline, "{cooldown}/{backoff}");
+        stop.send(true).unwrap();
+        task.await.unwrap().unwrap();
+    }
+}

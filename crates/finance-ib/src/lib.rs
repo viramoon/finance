@@ -251,48 +251,67 @@ impl ConnectionManager<IbTransport> {
     pub async fn open_market(
         &self,
     ) -> std::result::Result<market::PaperMarket, market::MarketError> {
-        self.open_market_with_pacing(&watch::channel(None).0).await
+        Self::require_market_recording_disabled()?;
+        self.open_verified_market().await
     }
 
     /// Open a verified paper session and report observed global pacing notices
     /// through a channel owned by the caller. The channel remains available
     /// after failures during account verification or market type selection.
+    /// An SDK connect failure or timeout before a peer is available returns
+    /// `MarketError::HandshakeFailed`, since no notice can reach the channel.
     pub async fn open_market_with_pacing(
         &self,
         pacing: &watch::Sender<Option<Instant>>,
     ) -> std::result::Result<market::PaperMarket, market::MarketError> {
+        Self::require_market_recording_disabled()?;
+        self.open_verified_market_with_pacing(pacing).await
+    }
+
+    fn require_market_recording_disabled() -> std::result::Result<(), market::MarketError> {
         // The SDK would otherwise record raw handshake and market frames.
         if std::env::var_os("IBAPI_RECORDING_DIR").is_some_and(|path| !path.is_empty()) {
             return Err(market::MarketError::InvalidConfiguration);
         }
-        self.open_verified_market_with_pacing(pacing).await
+        Ok(())
     }
 }
 impl<T: Transport<S = PaperPeer>> ConnectionManager<T> {
-    #[cfg(test)]
     async fn open_verified_market(
         &self,
     ) -> std::result::Result<market::PaperMarket, market::MarketError> {
-        self.open_verified_market_with_pacing(&watch::channel(None).0)
-            .await
+        self.open_market_attempt(None).await
     }
 
     async fn open_verified_market_with_pacing(
         &self,
         pacing: &watch::Sender<Option<Instant>>,
     ) -> std::result::Result<market::PaperMarket, market::MarketError> {
-        let (peer, _) = self
-            .open_prepared(self.config.probe_client_id, |peer| {
-                peer.market_pacing = pacing.clone();
-            })
+        self.open_market_attempt(Some(pacing)).await
+    }
+
+    async fn open_market_attempt(
+        &self,
+        pacing: Option<&watch::Sender<Option<Instant>>>,
+    ) -> std::result::Result<market::PaperMarket, market::MarketError> {
+        let deadline = Instant::now() + Duration::from_millis(self.config.connect_timeout_ms);
+        let mut peer = self
+            .connect(self.config.probe_client_id, deadline)
             .await
-            .map_err(|e| match e {
-                Error::UnsafeAccount => market::MarketError::UnsafeAccount,
-                Error::Config(_) => market::MarketError::InvalidConfiguration,
-                Error::Timeout(_) => market::MarketError::Timeout,
-                Error::Disconnected(_) => market::MarketError::Disconnected,
-                _ => market::MarketError::Transport,
+            .map_err(|error| match error {
+                // A caller tracking cooldowns needs to know when the SDK
+                // could not hand us the startup notices.
+                Error::UnsafeAccount | Error::Config(_) => market_connection_error(error),
+                _ if pacing.is_some() => market::MarketError::HandshakeFailed,
+                _ => market_connection_error(error),
             })?;
+        if let Some(pacing) = pacing {
+            peer.market_pacing = pacing.clone();
+        }
+        let (peer, _) = self
+            .verify_accounts(peer, deadline)
+            .await
+            .map_err(market_connection_error)?;
         match market::PaperMarket::new(
             peer.clone(),
             Duration::from_millis(self.config.read_timeout_ms),
@@ -307,6 +326,17 @@ impl<T: Transport<S = PaperPeer>> ConnectionManager<T> {
         }
     }
 }
+
+fn market_connection_error(error: Error) -> market::MarketError {
+    match error {
+        Error::UnsafeAccount => market::MarketError::UnsafeAccount,
+        Error::Config(_) => market::MarketError::InvalidConfiguration,
+        Error::Timeout(_) => market::MarketError::Timeout,
+        Error::Disconnected(_) => market::MarketError::Disconnected,
+        _ => market::MarketError::Transport,
+    }
+}
+
 impl<T: Transport> ConnectionManager<T> {
     pub fn new(config: IbConfig, transport: T) -> Result<Self> {
         config.validate()?;
@@ -331,19 +361,20 @@ impl<T: Transport> ConnectionManager<T> {
         tracing::info!(?phase, "IB session transition");
     }
     async fn open(&self, id: i32) -> Result<(Arc<T::S>, Vec<String>)> {
-        self.open_prepared(id, |_| {}).await
+        let deadline = Instant::now() + Duration::from_millis(self.config.connect_timeout_ms);
+        let session = self.connect(id, deadline).await?;
+        self.verify_accounts(session, deadline).await
     }
-    async fn open_prepared(
-        &self,
-        id: i32,
-        prepare: impl FnOnce(&mut T::S),
-    ) -> Result<(Arc<T::S>, Vec<String>)> {
-        let bound = Duration::from_millis(self.config.connect_timeout_ms);
-        let deadline = Instant::now() + bound;
-        let mut session = timeout(bound, self.transport.connect(&self.config.address, id))
+    async fn connect(&self, id: i32, deadline: Instant) -> Result<T::S> {
+        tokio::time::timeout_at(deadline, self.transport.connect(&self.config.address, id))
             .await
-            .map_err(|_| Error::Timeout("connect"))??;
-        prepare(&mut session);
+            .map_err(|_| Error::Timeout("connect"))?
+    }
+    async fn verify_accounts(
+        &self,
+        session: T::S,
+        deadline: Instant,
+    ) -> Result<(Arc<T::S>, Vec<String>)> {
         let session = Arc::new(session);
         let accounts = tokio::select! {
             biased;

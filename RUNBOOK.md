@@ -114,10 +114,11 @@ Replay 可单独运行。paper 模式下 probe 用 client ID 91，collector 用 
 
 ```sh
 cargo test --locked --offline -p finance-collector --lib line_budget
+cargo test --locked --offline -p finance-ib --lib connection_replay_tests
 cargo test --locked --offline -p finance-ib --lib market::ib::chain
 ```
 
-接入时由调用方显式运行 `LineScheduler::run_paper` 并持有专用行情 client ID。默认使用配置中的 probe client ID，同一 ID 需要在调度器和私有权限探针之间互斥使用。读取 `LineHandle::status()` 核对三类占用、预留和发现状态。股票确认超时会在同一会话退避并排到队尾。建连过程中收到的全局节流同样限制下一次重连时间。发生节流、链响应丢帧或重连时，可继续查已观测窗口和缺口，等 `discovery_complete` 后再使用完整分母。额度以账户实测为准，调低 `BudgetConfig` 并保留 TWS/深度余量即可按部署调整。行情正文和覆盖状态驻于本进程内存。[IBKR 行情线预算](docs/integrations/ib-line-budget.md)
+接入时由调用方显式运行 `LineScheduler::run_paper` 并持有专用行情 client ID。默认使用配置中的 probe client ID，同一 ID 需要在调度器和私有权限探针之间互斥使用。读取 `LineHandle::status()` 核对三类占用、预留和发现状态。股票确认超时会在同一会话退避并排到队尾。初始握手失败时从失败返回起至少等 15 秒才重连，较长的配置冷却或重连退避仍生效。账户验证及行情类型选择期间收到的全局节流也限制下一次重连时间。发生节流、链响应丢帧或重连时，可继续查已观测窗口和缺口，等 `discovery_complete` 后再使用完整分母。额度以账户实测为准，调低 `BudgetConfig` 并保留 TWS/深度余量即可按部署调整。行情正文和覆盖状态驻于本进程内存。[IBKR 行情线预算](docs/integrations/ib-line-budget.md)
 
 ### F1 行情 WAL 与投影
 
