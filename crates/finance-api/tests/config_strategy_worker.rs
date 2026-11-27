@@ -132,13 +132,23 @@ impl Drop for Worker {
 }
 
 async fn await_job(app: &Router, job: &Value, worker: &mut Worker, log: &Path) -> Value {
+    await_job_status(app, job, worker, log, "succeeded").await
+}
+
+async fn await_job_status(
+    app: &Router,
+    job: &Value,
+    worker: &mut Worker,
+    log: &Path,
+    expected_status: &str,
+) -> Value {
     let id = job["id"].as_i64().unwrap();
     let path = format!("{JOBS}/{id}");
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let result = request(app, "GET", &path, "", None, StatusCode::OK).await;
         match result["status"].as_str().unwrap() {
-            "succeeded" => return result,
+            status if status == expected_status => return result,
             "queued" | "running"
                 if worker.0.try_wait().unwrap().is_none() && Instant::now() < deadline =>
             {
@@ -150,6 +160,38 @@ async fn await_job(app: &Router, job: &Value, worker: &mut Worker, log: &Path) -
             ),
         }
     }
+}
+
+#[tokio::test]
+#[ignore = "requires the source-built Nautilus Python environment; exercised by Nautilus CI"]
+async fn unsupported_registered_indicator_reports_strategy_runtime_invalid() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let research_root = temp.path().join("research");
+    fs::create_dir(&research_root).unwrap();
+    generate_replay(
+        &mut python_command(&data_root, &research_root),
+        &data_root,
+        &[],
+    );
+    let app = router(AppState {
+        data_root: data_root.clone(),
+        research_root: research_root.clone(),
+    });
+    let bundle = ENTRY_EXIT
+        .replace("factor.close_return@1.0.0", "indicator.bollinger@1.0.0")
+        .replace(
+            "params: {lookback_sessions: 20}",
+            "params: {period: 20}\n      output: upper",
+        );
+    let job = submit(&app, "unsupported-indicator", inline(&bundle)).await;
+
+    let log = temp.path().join("worker.log");
+    let mut worker = Worker::start(&mut python_command(&data_root, &research_root), &log);
+    let failed = await_job_status(&app, &job, &mut worker, &log, "failed").await;
+    assert_eq!(failed["attempt"], 1);
+    assert_eq!(failed["error"], "strategy_runtime_invalid");
+    assert!(failed["summary"].is_null());
 }
 
 #[tokio::test]

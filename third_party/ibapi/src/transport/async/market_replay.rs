@@ -15,6 +15,7 @@ use super::io::{AsyncIo, AsyncReconnect, AsyncStream};
 use super::AsyncTcpMessageBus;
 use crate::connection::{r#async::AsyncConnection, ConnectionMetadata};
 use crate::contracts::tick_types::TickType;
+use crate::market_data::realtime::ExactMarketDepth;
 use crate::messages::{encode_protobuf_message, IncomingMessages, OutgoingMessages, PROTOBUF_MSG_ID};
 use crate::{proto, server_versions, Client, ClientBuilder, Error};
 
@@ -49,6 +50,26 @@ pub enum MarketWrite {
     },
     /// Cancellation for the given request ID.
     Cancel(Option<i32>),
+    /// A depth request for a contract routed to the named exchange.
+    SubscribeDepth {
+        /// Subscription's assigned request ID.
+        request_id: Option<i32>,
+        /// Requested contract ID.
+        con_id: Option<i32>,
+        /// Requested exchange.
+        exchange: Option<String>,
+        /// Requested row limit per side.
+        rows: Option<i32>,
+        /// Whether depth is aggregated across venues.
+        smart_depth: bool,
+    },
+    /// A cancellation for a depth request.
+    CancelDepth {
+        /// The request to cancel.
+        request_id: Option<i32>,
+        /// Whether the request was for aggregated depth.
+        smart_depth: bool,
+    },
     /// A historical bars request and its transmitted selection parameters.
     Historical {
         /// Assigned request ID.
@@ -274,6 +295,38 @@ impl MarketReplay {
         .await
     }
 
+    /// Inject a synthetic depth row through the production protobuf dispatcher.
+    pub async fn depth(&self, request_id: i32, level2: bool, row: ExactMarketDepth) -> Result<(), Error> {
+        let data = proto::MarketDepthData {
+            position: Some(row.position),
+            operation: Some(row.operation),
+            side: Some(row.side),
+            price: row.price,
+            size: row.size,
+            market_maker: row.market_maker,
+            is_smart_depth: row.smart_depth.then_some(true),
+        };
+        if level2 {
+            self.inject(
+                IncomingMessages::MarketDepthL2,
+                proto::MarketDepthL2 {
+                    req_id: Some(request_id),
+                    market_depth_data: Some(data),
+                },
+            )
+            .await
+        } else {
+            self.inject(
+                IncomingMessages::MarketDepth,
+                proto::MarketDepth {
+                    req_id: Some(request_id),
+                    market_depth_data: Some(data),
+                },
+            )
+            .await
+        }
+    }
+
     /// Fail the next write while leaving the mock read side and SDK connection status intact.
     pub fn fail_next_write(&self) {
         self.fail_next_write_with(ErrorKind::BrokenPipe);
@@ -424,6 +477,8 @@ fn decode_write(frame: &[u8]) -> MarketWrite {
     const CONFIRM: i32 = OutgoingMessages::RequestContractData as i32;
     const SUBSCRIBE: i32 = OutgoingMessages::RequestMarketData as i32;
     const CANCEL: i32 = OutgoingMessages::CancelMarketData as i32;
+    const SUBSCRIBE_DEPTH: i32 = OutgoingMessages::RequestMarketDepth as i32;
+    const CANCEL_DEPTH: i32 = OutgoingMessages::CancelMarketDepth as i32;
     const HISTORICAL: i32 = OutgoingMessages::RequestHistoricalData as i32;
     match kind {
         ACCOUNTS => MarketWrite::Accounts,
@@ -442,6 +497,24 @@ fn decode_write(frame: &[u8]) -> MarketWrite {
             }
         }
         CANCEL => MarketWrite::Cancel(proto::CancelMarketData::decode(body).unwrap().req_id),
+        SUBSCRIBE_DEPTH => {
+            let request = proto::MarketDepthRequest::decode(body).unwrap();
+            let contract = request.contract.unwrap();
+            MarketWrite::SubscribeDepth {
+                request_id: request.req_id,
+                con_id: contract.con_id,
+                exchange: contract.exchange,
+                rows: request.num_rows,
+                smart_depth: request.is_smart_depth.unwrap_or_default(),
+            }
+        }
+        CANCEL_DEPTH => {
+            let request = proto::CancelMarketDepth::decode(body).unwrap();
+            MarketWrite::CancelDepth {
+                request_id: request.req_id,
+                smart_depth: request.is_smart_depth.unwrap_or_default(),
+            }
+        }
         HISTORICAL => {
             let request = proto::HistoricalDataRequest::decode(body).unwrap();
             let contract = request.contract.unwrap_or_default();

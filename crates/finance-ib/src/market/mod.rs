@@ -9,7 +9,7 @@ use finance_market_protocol::{DecimalText, U64Text};
 use serde::Serialize;
 use std::{ops::Range, path::Path};
 
-pub use ib::PaperMarket;
+pub use ib::{PaperDepthSubscription, PaperMarket};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
