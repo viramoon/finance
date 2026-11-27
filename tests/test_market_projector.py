@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -62,6 +63,82 @@ class MarketProjectionTests(unittest.TestCase):
 
     def partitions(self):
         return projected_partitions(self.root, *self.product)
+
+    def assert_readers_reject(self, message):
+        with self.assertRaisesRegex(ProjectionError, message):
+            self.partitions()
+        with self.assertRaisesRegex(ProjectionError, message):
+            self.latest(self.first)
+
+    def test_projection_writes_and_reads_a_committed_batch(self):
+        self.assertEqual(self.project(MemoryWal(self.first)), 1)
+        self.assertEqual(self.watermark(), "1")
+        partition, = self.partitions()
+        self.assertTrue(partition.path.is_file())
+        self.assertEqual(self.latest(self.first), self.first)
+
+    def test_projection_readers_reject_directory_and_file_symlinks(self):
+        self.project(MemoryWal(self.first))
+        partition, = self.partitions()
+        index = self.marker.with_name("projection.sqlite3")
+        with TemporaryDirectory() as outside:
+            outside = Path(outside)
+            for path in (index.parent.parent, index, partition.path.parent, partition.path):
+                for target_dir in (outside, outside / "worktree"):
+                    with self.subTest(path=path, target_dir=target_dir):
+                        target_dir.mkdir(exist_ok=True)
+                        if target_dir != outside:
+                            (target_dir / ".git").mkdir(exist_ok=True)
+                            (target_dir / ".git" / "HEAD").write_text("ref: refs/heads/fixture\n", encoding="utf-8")
+                        target = target_dir / path.name
+                        is_directory = path.is_dir()
+                        path.rename(target)
+                        path.symlink_to(target, target_is_directory=is_directory)
+                        self.assert_readers_reject("symbolic links are forbidden")
+                        path.unlink()
+                        target.rename(path)
+
+    def test_projection_readers_reject_dangling_index_and_sqlite_sidecar_links(self):
+        self.project(MemoryWal(self.first))
+        self.marker.with_name("projection.sqlite3-journal").symlink_to("missing-journal")
+        self.assert_readers_reject("symbolic links are forbidden")
+        self.marker.with_name("projection.sqlite3-journal").unlink()
+        index = self.marker.with_name("projection.sqlite3")
+        index.unlink()
+        index.symlink_to("missing-index")
+        self.assert_readers_reject("symbolic links are forbidden")
+
+    def test_projection_readers_reject_git_worktree_ancestors_and_nested_checkouts(self):
+        self.project(MemoryWal(self.first))
+        partition, = self.partitions()
+        marker = self.root / ".git"
+        marker.write_text("gitdir: synthetic-linked-worktree\n", encoding="utf-8")
+        self.assert_readers_reject("outside Git working trees")
+        marker.unlink()
+        marker = partition.path.parent.parent / ".git"
+        marker.mkdir()
+        (marker / "HEAD").write_text("ref: refs/heads/fixture\n", encoding="utf-8")
+        self.assert_readers_reject("outside Git working trees")
+
+    def test_projection_readers_accept_regular_atomic_replacements(self):
+        wal = MemoryWal(self.first)
+        self.project(wal)
+        partition, = self.partitions()
+        self.assertEqual(self.latest(self.first), self.first)
+
+        wal.events.extend((self.second, self.correction))
+        with TemporaryDirectory(dir=self.root) as staged:
+            staged = Path(staged)
+            with open_projection(staged, *self.product) as projection:
+                projection.project_batch(wal, 1)
+                projection.project_batch(wal, 20)
+            for part in projected_partitions(staged, *self.product):
+                os.replace(part.path, partition.path.with_name(part.path.name))
+            staged_index = staged / self.marker.relative_to(self.root).with_name("projection.sqlite3")
+            os.replace(staged_index, self.marker.with_name("projection.sqlite3"))
+
+        self.assertEqual(self.latest(self.first), self.correction)
+        self.assertEqual(len(self.partitions()), 2)
 
     def test_same_timestamp_duplicate_and_increasing_revisions(self):
         # Identical prices, quantities and timestamps still describe two

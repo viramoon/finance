@@ -6,7 +6,7 @@ use axum::{
 use finance_api::{AppState, router};
 use finance_collector::market_ingress::{MarketIngress, QualityReport, RecoveryOutcome, wal_root};
 use serde_json::{Value, json};
-use std::{fs, path::Path, process::Command};
+use std::{fs, os::unix::fs::symlink, path::Path, process::Command};
 use tower::ServiceExt;
 
 #[path = "support/market_read_fixture.rs"]
@@ -314,6 +314,142 @@ async fn projected_latest_checks_the_index_revision_position_and_version() {
         .unwrap();
     index.execute_batch("PRAGMA user_version = 2").unwrap();
     get(&app, &corrected, StatusCode::INTERNAL_SERVER_ERROR).await;
+}
+
+#[tokio::test]
+async fn projection_reads_reject_directory_and_file_symlinks() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let worktree = outside.path().join("worktree");
+    fs::create_dir_all(worktree.join(".git")).unwrap();
+    fs::write(worktree.join(".git/HEAD"), "ref: refs/heads/fixture\n").unwrap();
+    let mut ingress = MarketIngress::open(root.path(), policy(TRADES, true)).unwrap();
+    publish(&mut ingress, &[0], true);
+    ingress.flush().unwrap();
+    let index = index_fixture(root.path(), "1");
+    index_trade(&index, "9007199254740992", "0", 1);
+    drop(index);
+
+    let dir = projection_dir(root.path());
+    let index = dir.join("projection.sqlite3");
+    let watermark = dir.join("watermark.json");
+    fs::write(&watermark, br#"{"projected_through":"1"}"#).unwrap();
+    let latest = format!("{LATEST}9007199254740992");
+    let app = app(root.path());
+    for (path, routes) in [
+        (dir.parent().unwrap(), vec![latest.as_str(), MARKS]),
+        (index.as_path(), vec![latest.as_str()]),
+        (watermark.as_path(), vec![MARKS]),
+    ] {
+        for target_dir in [outside.path(), &worktree] {
+            let target = target_dir.join(path.file_name().unwrap());
+            fs::rename(path, &target).unwrap();
+            symlink(&target, path).unwrap();
+            for route in &routes {
+                let body = get(&app, route, StatusCode::INTERNAL_SERVER_ERROR).await;
+                assert_eq!(body["error"]["code"], "market_storage_error");
+                assert!(
+                    body["error"]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Symbolic links")
+                );
+                assert!(!body.to_string().contains(outside.path().to_str().unwrap()));
+            }
+            fs::remove_file(path).unwrap();
+            fs::rename(target, path).unwrap();
+        }
+    }
+
+    let sidecar = index.with_file_name("projection.sqlite3-journal");
+    symlink("absent-journal", &sidecar).unwrap();
+    get(&app, &latest, StatusCode::INTERNAL_SERVER_ERROR).await;
+    fs::remove_file(sidecar).unwrap();
+    fs::remove_file(&index).unwrap();
+    symlink("absent-index", &index).unwrap();
+    get(&app, &latest, StatusCode::INTERNAL_SERVER_ERROR).await;
+
+    let state = root.path().join("finance-state");
+    fs::rename(&state, root.path().join("saved-state")).unwrap();
+    symlink(outside.path(), &state).unwrap();
+    for route in [&latest, MARKS] {
+        let body = get(&app, route, StatusCode::INTERNAL_SERVER_ERROR).await;
+        assert_eq!(body["error"]["code"], "market_storage_error");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Symbolic links")
+        );
+    }
+}
+
+#[tokio::test]
+async fn projection_reads_reject_git_worktree_ancestors_and_nested_checkouts() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("data");
+    fs::create_dir(&root).unwrap();
+    let mut ingress = MarketIngress::open(&root, policy(TRADES, true)).unwrap();
+    publish(&mut ingress, &[0], true);
+    ingress.flush().unwrap();
+    let index = index_fixture(&root, "1");
+    index_trade(&index, "9007199254740992", "0", 1);
+    drop(index);
+
+    let app = app(&root);
+    let latest = format!("{LATEST}9007199254740992");
+    for marker in [
+        parent.path().join(".git"),
+        projection_dir(&root).join(".git"),
+    ] {
+        fs::write(&marker, "gitdir: synthetic-linked-worktree\n").unwrap();
+        let body = get(&app, &latest, StatusCode::INTERNAL_SERVER_ERROR).await;
+        assert_eq!(body["error"]["code"], "market_storage_error");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Git working trees")
+        );
+        fs::remove_file(marker).unwrap();
+    }
+    get(&app, &latest, StatusCode::OK).await;
+}
+
+#[tokio::test]
+async fn projection_reads_accept_regular_atomic_replacements() {
+    let root = tempfile::tempdir().unwrap();
+    let staged = tempfile::tempdir_in(root.path()).unwrap();
+    let mut ingress = MarketIngress::open(root.path(), policy(TRADES, true)).unwrap();
+    let events = publish(&mut ingress, &[0, 1, 2], true);
+    ingress.flush().unwrap();
+    for (dir, through, revision, pos) in [(root.path(), "1", "0", 1), (staged.path(), "3", "1", 3)]
+    {
+        let index = index_fixture(dir, through);
+        index_trade(&index, "9007199254740992", revision, pos);
+        fs::write(
+            projection_dir(dir).join("watermark.json"),
+            json!({"projected_through": through}).to_string(),
+        )
+        .unwrap();
+    }
+    let app = app(root.path());
+    let latest = format!("{LATEST}9007199254740992");
+    let original = get(&app, &latest, StatusCode::OK).await;
+    assert_eq!(original["record"]["event"], events[0]);
+
+    for file in ["projection.sqlite3", "watermark.json"] {
+        fs::rename(
+            projection_dir(staged.path()).join(file),
+            projection_dir(root.path()).join(file),
+        )
+        .unwrap();
+    }
+    let replacement = get(&app, &latest, StatusCode::OK).await;
+    assert_eq!(replacement["record"]["event"], events[2]);
+    assert_eq!(replacement["projected_through"], "3");
+    let watermarks = get(&app, MARKS, StatusCode::OK).await;
+    assert_eq!(watermarks["watermarks"]["projected"], "3");
 }
 
 #[tokio::test]

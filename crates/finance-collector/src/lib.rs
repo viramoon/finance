@@ -8,6 +8,7 @@ pub mod market_wal;
 pub mod option_exposure;
 pub mod option_flow;
 pub mod option_history;
+pub mod projection_read;
 pub mod source;
 pub mod store;
 

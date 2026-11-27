@@ -452,25 +452,76 @@ def open_projection(data_root: Path, source: str, product: str):
 
 
 @contextmanager
-def _read_index(path: Path):
-    with closing(sqlite3.connect(path.absolute().as_uri() + "?mode=ro", uri=True)) as db:
+def _read_index(root: Path, state: Path):
+    path = state / _INDEX_NAME
+    if not _read_directory(root, state) or not _checked_read_path(path, stat.S_ISREG):
+        yield None
+        return
+    for suffix in ("-journal", "-wal", "-shm"):
+        _checked_read_path(path.with_name(path.name + suffix), stat.S_ISREG)
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as db:
         if db.execute("PRAGMA user_version").fetchone()[0] != 1:
             raise ProjectionError("unsupported projection index version")
         yield db
 
 
+def _checked_read_path(path: Path, expected_type) -> bool:
+    """Distinguish absence from a symlink, including a dangling symlink."""
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(mode):
+        raise ProjectionError(f"symbolic links are forbidden in projection paths: {path}")
+    if not expected_type(mode):
+        raise ProjectionError(f"unexpected file type in projection path: {path}")
+    return True
+
+
+def _reject_checkout_path(path: Path) -> None:
+    marker = path / ".git"
+    try:
+        mode = marker.lstat().st_mode
+        if stat.S_ISDIR(mode):
+            mode = (marker / "HEAD").lstat().st_mode
+    except FileNotFoundError:
+        return
+    if stat.S_ISREG(mode) or stat.S_ISLNK(mode):
+        raise ProjectionError(f"projection paths must be outside Git working trees: {path}")
+
+
+def _read_root(data_root: Path) -> Path:
+    _checked_read_path(data_root, stat.S_ISDIR)
+    root = data_root.resolve()
+    for directory in (root, *root.parents):
+        _reject_checkout_path(directory)
+    return root
+
+
+def _read_directory(root: Path, directory: Path) -> bool:
+    path = root
+    for component in directory.relative_to(root).parts:
+        path /= component
+        if not _checked_read_path(path, stat.S_ISDIR):
+            return False
+        _reject_checkout_path(path)
+    return True
+
+
 def projected_partitions(data_root: Path, source: str, product: str) -> list[ProjectedPartition]:
     """List the committed Parquet files in ascending local WAL order."""
-    state, catalog = _product_paths(data_root, source, product)
-    if not (state / _INDEX_NAME).exists():
-        return []
-    with _read_index(state / _INDEX_NAME) as db:
+    root = _read_root(data_root)
+    state, catalog = _product_paths(root, source, product)
+    with _read_index(root, state) as db:
+        if db is None:
+            return []
         partitions = []
+        catalog_exists = _read_directory(root, catalog)
         for first, last, count in db.execute(
             "SELECT first_position, last_position, row_count FROM partitions ORDER BY first_position"
         ):
             path = _partition_path(catalog, int(first), int(last))
-            if not path.is_file():
+            if not catalog_exists or not _checked_read_path(path, stat.S_ISREG):
                 raise ProjectionError(f"committed projection file missing for WAL range {first}..{last}")
             partitions.append(ProjectedPartition(path, int(first), int(last), count))
         return partitions
@@ -480,10 +531,11 @@ def read_latest_event(
     data_root: Path, source: str, product: str, channel: str, instrument_id: str, epoch: str, seq: str,
 ) -> Event | None:
     """Read the original event or latest correction for a projected F1 position."""
-    state, catalog = _product_paths(data_root, source, product)
-    if not (state / _INDEX_NAME).exists():
-        return None
-    with _read_index(state / _INDEX_NAME) as db:
+    root = _read_root(data_root)
+    state, catalog = _product_paths(root, source, product)
+    with _read_index(root, state) as db:
+        if db is None:
+            return None
         row = db.execute(
             "SELECT position FROM latest WHERE channel=? AND instrument_id=? AND epoch=? AND seq=?",
             (channel, instrument_id, str(U64Text(epoch)), str(U64Text(seq))),
@@ -499,10 +551,17 @@ def read_latest_event(
         if bounds is None or bounds[1] < position:
             raise ProjectionError(f"projection index has no file for WAL position {position}")
         parquet = _partition_path(catalog, int(bounds[0]), int(bounds[1]))
-        table = pq.read_table(
-            parquet, columns=["event_json"],
-            filters=[("wal_position", "=", pa.scalar(int(position), pa.uint64()))],
-        )
+        if not _read_directory(root, catalog) or not _checked_read_path(parquet, stat.S_ISREG):
+            raise ProjectionError(f"committed projection file missing for WAL position {position}")
+        with open(
+            parquet, "rb", opener=lambda path, flags: os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK),
+        ) as file:
+            if not stat.S_ISREG(os.fstat(file.fileno()).st_mode):
+                raise ProjectionError(f"unexpected file type in projection path: {parquet}")
+            table = pq.read_table(
+                file, columns=["event_json"],
+                filters=[("wal_position", "=", pa.scalar(int(position), pa.uint64()))],
+            )
         if table.num_rows != 1:
             raise ProjectionError(f"projection file has no unique WAL position {position}")
         return Event.from_json(table["event_json"][0].as_py())

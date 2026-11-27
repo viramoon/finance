@@ -13,11 +13,12 @@ use finance_collector::{
         wal_root,
     },
     market_wal::{MAX_REPLAY_RECORDS, WalReader, WalRecord},
+    projection_read::{ProjectionArtifact, projection_read_path},
 };
 use finance_market_protocol::{Event, InstrumentId, MarketMessage, Message, Token, U64Text};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use std::{path::Path, time::Duration};
+use std::{io, path::Path, time::Duration};
 use utoipa::{IntoParams, ToSchema};
 
 const DEFAULT_LIST_LIMIT: usize = 100;
@@ -47,6 +48,17 @@ fn storage_error() -> ApiError {
         "market_storage_error",
         "Cannot read committed market data",
     )
+}
+
+fn projection_path_error(cause: &io::Error) -> ApiError {
+    if cause.kind() == io::ErrorKind::InvalidInput {
+        return error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "market_storage_error",
+            "Projection paths must use ordinary directories and files within the configured data root and outside Git working trees. Symbolic links are forbidden.",
+        );
+    }
+    storage_error()
 }
 
 fn parse_query<T>(query: Result<Query<T>, QueryRejection>) -> Result<T, ApiError> {
@@ -289,17 +301,12 @@ fn projection_miss() -> ApiError {
     )
 }
 
-fn projection_match(root: &Path, query: &ProjectionQuery) -> Result<ProjectionMatch, ApiError> {
-    let index = root
-        .join("finance-state/market-projection")
-        .join(query.source.as_str())
-        .join(query.product.as_str())
-        .join("projection.sqlite3");
-    if !index.try_exists().map_err(|_| storage_error())? {
-        return Err(projection_miss());
-    }
-    let conn = Connection::open_with_flags(index, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|_| storage_error())?;
+fn projection_match(index: &Path, query: &ProjectionQuery) -> Result<ProjectionMatch, ApiError> {
+    let conn = Connection::open_with_flags(
+        index,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(|_| storage_error())?;
     conn.busy_timeout(Duration::from_millis(250))
         .map_err(|_| storage_error())?;
     let tx = conn.unchecked_transaction().map_err(|_| storage_error())?;
@@ -392,8 +399,15 @@ pub(crate) async fn projected(
         return Err(bad_query("Projection epoch must be greater than zero"));
     }
     read_local(state, move |root| {
+        let index = projection_read_path(
+            root,
+            &query.source,
+            &query.product,
+            ProjectionArtifact::Index,
+        )
+        .map_err(|error| projection_path_error(&error))?;
         let access = require_recording(root, &query.source, &query.product)?;
-        let matched = projection_match(root, &query)?;
+        let matched = projection_match(index.as_deref().ok_or_else(projection_miss)?, &query)?;
         let reader = open_wal(root, &access)?;
         if matched.through.get() > reader.durable_position() {
             return Err(storage_error());
@@ -446,9 +460,12 @@ pub(crate) async fn watermarks(
 ) -> Result<Json<MarketWatermarks>, ApiError> {
     let query = parse_query(query)?;
     read_local(state, move |root| {
+        let watermarks = read_watermarks(root, &query.source, &query.product).map_err(|error| {
+            error
+                .downcast_ref::<io::Error>()
+                .map_or_else(storage_error, projection_path_error)
+        })?;
         let access = require_recording(root, &query.source, &query.product)?;
-        let watermarks =
-            read_watermarks(root, &query.source, &query.product).map_err(|_| storage_error())?;
         Ok(MarketWatermarks {
             as_of: Utc::now(),
             access,

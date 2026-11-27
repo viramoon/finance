@@ -8,10 +8,10 @@
       "source": "手工设计的三根闭合 bar，覆盖十进制精度和循环回放。"
     },
     "crates/finance-api/tests/market_read.rs": {
-      "sha256": "827b989e1cf15ef120f110a27da07b9b57e42de4605bb248b60313c9538ccf0c",
+      "sha256": "018faa3f22190dc832c01e569f856736c2b45b765afa435b244acb1e3f96d6f3",
       "generator": "crates/finance-api/tests/support/market_read_fixture.rs",
       "seed": "fixed",
-      "source": "Rust 测试复用已登记的 F1 合成事件并补充固定的十进制、序号和更正常量，在临时目录构造 WAL、质量报告和投影索引。 跨语言投影联测另复用 F5 已登记的 v2 合成永续上下文。"
+      "source": "Rust 测试复用已登记的 F1 合成事件并补充固定的十进制、序号和更正常量，在临时目录构造 WAL、质量报告和投影索引。 跨语言投影联测另复用 F5 已登记的 v2 合成永续上下文。 路径边界测试沿用相同固定种子，在临时目录移动合成索引与水位、创建符号链接并原子替换快照。"
     },
     "crates/finance-collector/tests/nasdaq_totalview.rs": {
       "sha256": "48a6ca8545714d4623d430f6ebbb1a9a87094f048f7e47c25c0432716f360ab3",

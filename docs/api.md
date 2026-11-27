@@ -128,6 +128,8 @@ WAL 的 `records[].event` 和投影的 `record.event` 保留原始 `schema_versi
 
 市场响应的 `access` 来自 F3 的落盘策略，含 `license`、`display_live`、`record_local`、`derive_non_display`、`backup_personal_drive`。事件另携带原 `license`。仅展示产品由生产者在内存处理，不进入这些查询和生成物。项目禁止再分发。参数不合法返回 `400 / market_query_invalid`。产品未登记或目标投影位置缺失返回 `404 / market_product_not_found` 或 `market_projection_not_found`。策略、索引或 WAL 损坏返回 `500 / market_storage_error`，响应省略本地路径和数据正文。
 
+`/market/projection/latest` 和 `/market/watermarks` 读取投影时要求数据根位于 Git 工作树之外。投影路径包含符号链接或文件类型不符时返回 `500 / market_storage_error`，响应说明路径限制。[投影路径与发布约定](market-wal.md#parquet-与投影游标)
+
 因子查询读取由离线研究程序显式发布到 `FERTILE_DATA_ROOT/finance-state/factor-research/read-v1.json` 的本地快照。响应包含 `schema_version: 1`、快照的 UTC `as_of`、`items` 和 `next_cursor`。`after` 排除游标本身，按完整游标文本的字典序翻页，`limit` 默认 50、最大 100。接续时保留筛选项，若 `as_of` 变化则重新分页。条目保留授权，普通因子和评价附 `data_version`。报告 Decimal 字段为字符串，未知值用 `null`。无快照时返回空列表和 `as_of: null`。请求无效为 `400 / invalid_factor_query`，已发布快照内找不到评价请求指定的因子或因子版本时为 `404 / factor_not_found`，快照无效或不可读为 500。[离线因子评价与发布](factor-research.md)
 
 ## 主图行情与指标

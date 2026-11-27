@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use utoipa::ToSchema;
 
 use crate::market_wal::{WAL_SUBDIRECTORIES, WalDirectory, WalManifest, WalReader, WalWriter};
+use crate::projection_read::{ProjectionArtifact, projection_read_path};
 
 const DISPLAY_TTL: Duration = Duration::from_secs(5);
 const DISPLAY_EVENTS: usize = 256;
@@ -246,6 +247,12 @@ impl MarketIngress {
 
     pub fn watermarks(&self) -> Result<Watermarks> {
         let mut marks = if let Some(writer) = &self.writer {
+            projection_read_path(
+                &self.data_root,
+                &self.policy.source,
+                &self.policy.product,
+                ProjectionArtifact::Watermark,
+            )?;
             directory_watermarks(
                 &self.data_root,
                 writer.directory(),
@@ -365,6 +372,7 @@ fn empty_watermarks() -> Watermarks {
 }
 
 pub fn read_watermarks(data_root: &Path, source: &Token, product: &Token) -> Result<Watermarks> {
+    projection_read_path(data_root, source, product, ProjectionArtifact::Watermark)?;
     let Some(dir) = recorded_directory(data_root, source, product)? else {
         return Ok(empty_watermarks());
     };
@@ -387,6 +395,7 @@ fn directory_watermarks(
 
     // Read the projection position first to avoid comparing a new projector cursor to
     // an older WAL checkpoint during concurrent commits.
+    // Open the configured path so a symlink in its ancestry cannot redirect the read.
     let projection = WalDirectory::open_existing(
         data_root,
         &[
@@ -771,6 +780,51 @@ mod tests {
         )
         .unwrap();
         assert!(MarketIngress::open(temp.path(), changed).is_err());
+    }
+
+    #[test]
+    fn live_watermarks_reject_a_symlinked_data_root_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("original");
+        let data_root = parent.join("data");
+        fs::create_dir_all(&data_root).unwrap();
+        let (instrument, capability, event, mut policy) = fixture();
+        policy.record_local = true;
+        let mut ingress = MarketIngress::open(&data_root, policy.clone()).unwrap();
+        ingress.publish(event, &instrument, &capability).unwrap();
+        assert_eq!(ingress.flush().unwrap(), Some(1));
+
+        let projection = Path::new("data/finance-state/market-projection")
+            .join(policy.source.as_str())
+            .join(policy.product.as_str());
+        let original_projection = parent.join(&projection);
+        fs::create_dir_all(&original_projection).unwrap();
+        fs::write(
+            original_projection.join("watermark.json"),
+            br#"{"projected_through":"1"}"#,
+        )
+        .unwrap();
+        let original = ingress.watermarks().unwrap();
+        assert_eq!(original.local_durable.get(), 1);
+        assert_eq!(original.projected.get(), 1);
+
+        let alternate = temp.path().join("alternate");
+        let alternate_projection = alternate.join(&projection);
+        fs::create_dir_all(&alternate_projection).unwrap();
+        fs::write(
+            alternate_projection.join("watermark.json"),
+            br#"{"projected_through":"0"}"#,
+        )
+        .unwrap();
+        let parked = temp.path().join("parked");
+        fs::rename(&parent, &parked).unwrap();
+        std::os::unix::fs::symlink(&alternate, &parent).unwrap();
+        let marks = ingress.watermarks();
+        assert!(marks.is_err(), "read through the linked parent: {marks:?}");
+
+        fs::remove_file(&parent).unwrap();
+        fs::rename(&parked, &parent).unwrap();
+        assert_eq!(ingress.watermarks().unwrap(), original);
     }
 
     #[test]
