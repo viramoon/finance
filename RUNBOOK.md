@@ -166,7 +166,7 @@ curl -sS http://127.0.0.1:8081/api/v1/market/status
 
 ### 离线验证历史期权链
 
-在已准备好锁定的 Rust 工具链和依赖缓存后运行 `cargo test -p finance-collector --test option_history --locked --offline`。IBKR 使用合成回放，已到期合约直接判为不可得，权限或连接错误保留为错误。接入后只允许已验证的只读 paper 会话。
+在已准备好锁定的 Rust 工具链和依赖缓存后运行 `cargo test -p finance-collector --test option_history --locked --offline`。测试通过 F9a 接口的合成替身核对合约确认、历史请求和到期行为。真实读取仅使用已验证的只读 paper 会话，并与 F11 使用同一数据根以共用历史请求节流。权限或连接错误按单合约返回。
 
 Databento 缺省禁用，即使配置估算常量也只进行离线估算。取得注明日期和来源的按量费率后才能用于预算。启用任何真实 Databento 请求之前须由 vira 确认费用、预算和数据用途授权。[历史期权链](docs/option-history.md)
 

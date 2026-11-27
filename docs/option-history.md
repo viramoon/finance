@@ -1,17 +1,21 @@
 # 历史期权链
 
-`finance_collector::option_history` 是本地 Rust 库。调用者提供已确认的合约集。查询返回各合约的闭合价量 bar 或可得性状态，供研究和后续读契约集成。运行时无独立进程、端口、环境变量、迁移、落盘或自动回补任务。
+`finance_collector::option_history` 是本地 Rust 库。调用者提供候选合约集，查询返回各合约的闭合价量 bar 或可得性状态。调用在已有进程内完成，价量结果返回调用方。节流状态使用既有历史任务目录。
 
 ## IBKR 未到期期权
 
-调用 `fetch_ibkr_chain(provider, contracts, window, now)`。每个 `ConfirmedOption` 包含 F1 `InstrumentId`、已确认的正整数 IBKR `con_id` 及权威合约元数据提供的 UTC 到期时刻 `expires_at`。调用者提供返回 UTC Unix 纳秒的请求时钟 `now`。到期按实际时刻判断。合约集来自逐合约确认。
+在获准读取的环境中，由调用者通过 `ConnectionManager::open_market()` 打开已验证的只读 `PaperMarket` 会话，将 `IbkrOptionHistory::new(&market, data_root)` 传给 `fetch_ibkr_chain`。读取完成后调用 `market.close().await` 关闭专用会话。该会话使用 probe client ID，须与占用该 ID 的权限探针和 F11 批任务错开。
+
+每个 `ConfirmedOption` 包含 F1 `InstrumentId`、正整数 IBKR `con_id` 及权威合约元数据提供的 UTC 到期时刻 `expires_at`。调用者提供返回 UTC Unix 纳秒的请求时钟 `now`。对于尚未到期的合约，适配器先在同一会话通过 F9a `ContractQuery::Option` 确认合约，再经 `PaperPeer::historical_data` 读取。F9a 提供的美东到期日期另作校验，精确截止时刻取自 `expires_at`。
 
 - `BarWindow` 用 UTC Unix 纳秒表示 `[start, end)`，要求 `start < end <= now()`。保留开始时间不早于 `start` 且收盘时间不晚于 `end` 的完整 bar。结果按收盘时间排序，合并完全相同的重复 bar。矛盾的重复值或非法价量使对应合约查询失败。
-- 每次调用 `PaperOptionHistory::fetch_trade_bars` 前重新检查到期时刻。`now() >= expires_at` 时返回 `Expired`（不可得），并跳过请求，即使查询区间完全早于到期。到期日当日仍以准确时刻为界。
+- `now() >= expires_at` 时返回 `Expired`（不可得），并跳过确认和历史请求，即使查询区间完全早于到期。每页实际请求前在节流等待结束后重查准确时刻，排队期间到期也返回 `Expired`。F9a 返回的到期错误归入同一状态。
 - `Available` 含一根或多根有效 bar。`NoBars` 表示成功查询后该区间没有闭合 bar。权限、连接和数据错误作为单合约错误返回，其余合约仍按输入顺序处理。重复合约标识、重复 `con_id` 或非法窗口在发起任何请求前拒绝。
 - bar 使用 F1 `ClosedBar`，由 `TradeBar.close_ts` 补充闭合时刻。JSON 序列化保留时间戳和 OHLCV 的十进制字符串。
 
-F9a 合并后接入 `PaperOptionHistory`。桥接层负责已验证的只读 paper 会话、合约确认、请求节流、分页与超时，并在排队后实际发请求前再次判断到期。请求口径为合约级一分钟 `TRADES`，桥接层须区分供应商确认为无数据的响应和权限等错误。本期以合成回放验证这条调用链，生产会话桥接仍待集成。真实数据留在获准的本地用途和数据根内。[IB 接入](integrations/ib.md) · [数据入仓防护](data-guard.md)
+每页通过 SMART/USD 请求常规交易时段的一分钟 `TRADES`，使用 `1 D` 历史请求并裁剪至该页完整分钟。单页超时取自 paper 会话的读超时配置。F12 与 F11 使用同一绝对路径 `data_root`，共用 `finance-state/historical/ibkr-pacing.*` 的跨进程锁和预约。供应商明确返回无数据时，该页为空。权限失败、断线和不完整的响应作为错误返回。
+
+SDK 将历史价量字段解码为 binary64。适配器立即转换为最短可往返的十进制文本，并拒绝超出 F1 `DecimalText` 表示范围的值。SDK 转换前丢失的精度无法恢复。真实数据留在获准的本地用途和数据根内。[IB 接入](integrations/ib.md) · [数据入仓防护](data-guard.md)
 
 ## Databento OPRA 适配器与估算
 
@@ -28,4 +32,4 @@ v2 §D4 于 **2026-11-26** 记录 OPRA 历史按数据量计价，以及 OPRA St
 
 ## 合成复测
 
-从仓库根运行 `cargo test -p finance-collector --test option_history --locked --offline`。IBKR 合成数据由仓库生成器按固定时间和十进制输入生成，覆盖乱序、重复、窗边界与长小数。到期测试核对已过到期时刻及恰在到期时刻的两份合约都按输入顺序返回 `Expired`，且请求数为零。估算测试使用明示的合成费率和日期，覆盖合约数、天数、schema、来源和错误输入。[生成与登记](data-guard.md#合成-fixture-与例外登记)
+从仓库根运行 `cargo test -p finance-collector --test option_history --locked --offline`。IBKR 合成数据由仓库生成器按固定时间和十进制输入生成，覆盖乱序、重复、窗边界与长小数。到期测试核对已过到期时刻及恰在到期时刻的两份合约都按输入顺序返回 `Expired`，且请求数为零。F9a 替身测试验证确认请求、历史窗口、准确到期时刻、节流数据根以及权限错误的传递。估算测试使用明示的合成费率和日期，覆盖合约数、天数、schema、来源和错误输入。[生成与登记](data-guard.md#合成-fixture-与例外登记)

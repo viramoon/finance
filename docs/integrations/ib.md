@@ -97,7 +97,7 @@ ibapi 3.2.0 的公开历史 / 流式 OHLCV 字段为 binary64。适配器按可�
 
 历史请求、实时订阅及重试共用限速，任意两个请求至少间隔 16 秒，重连时相同请求也避开 15 秒限制。100、420 和带 pacing 文本的 162 错误延长退避，单次历史请求最多四次尝试。若仍失败，保留已有水位并重新建立验证后的会话。日志中检查 IB historical recovery 的标的、起止纳秒与记录数；无数据时核对交易时段、标的映射和权限，不能通过修改 checkpoint 跳过失败区间。
 
-期权闭合 bar 使用独立的只读 `PaperOptionHistory` 接口，调用者须提供已确认的合约和准确到期时刻。已到期合约直接返回 `Expired`。paper 适配、请求节流与资格确认由 F9a 集成。[历史期权链](../option-history.md)
+期权闭合 bar 通过 `IbkrOptionHistory` 使用 F9a 已验证的只读 `PaperMarket` 会话。该会话按 `conId` 确认合约，并在同一 `PaperPeer` 上读取分钟历史。调用者提供准确到期时刻，并与 F11 共用数据根及历史请求节流。到期返回 `Expired`。[历史期权链](../option-history.md)
 
 ## 纸账户断网演练
 

@@ -1,5 +1,7 @@
 //! The read-only boundary between IB's SDK and finance market requests.
 
+mod option_minutes;
+
 use super::{
     ConfirmedContract, ContractKind, ContractQuery, GreeksSource, LiquidHours, MarketDataSource,
     MarketDataType, MarketError, MarketEvent, MarketNotice, MarketRequest, MarketSubscription,

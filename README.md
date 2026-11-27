@@ -10,7 +10,7 @@ fertile 的主项目与 submodule，基于 NautilusTrader 的交易与数据系�
 
 finance-api 提供 v1 行情 WAL、投影、水位、缺口及因子研究只读查询，并从代码导出 REST OpenAPI 和版本化 WS/SSE 消息契约。[首批读契约与导出命令](docs/api.md#首批读契约)
 
-历史期权库支持通过只读 paper 请求接口取得已确认的未到期 IBKR 合约闭合 bar，当前使用合成回放验证，真实请求由 F9a 接入。Databento OPRA 提供默认禁用的离线费用估算。[历史期权链](docs/option-history.md)
+历史期权库复用 F9a 的只读 paper 会话确认合约，读取未到期 IBKR 期权的闭合分钟 bar。合成回放覆盖到期、权限与数据边界。Databento OPRA 提供默认禁用的离线费用估算。[历史期权链](docs/option-history.md)
 
 ## 系统中的位置
 

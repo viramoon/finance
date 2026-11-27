@@ -2,10 +2,12 @@
 
 mod ib;
 
+use crate::historical::OptionMinuteBar;
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
-use finance_market_protocol::DecimalText;
+use finance_market_protocol::{DecimalText, U64Text};
 use serde::Serialize;
+use std::{ops::Range, path::Path};
 
 pub use ib::PaperMarket;
 
@@ -183,6 +185,20 @@ pub trait MarketDataSource: Send + Sync {
 
     async fn confirm(&self, query: &ContractQuery) -> Result<ConfirmedContract, MarketError>;
     async fn subscribe(&self, request: &MarketRequest) -> Result<Self::Subscription, MarketError>;
+}
+
+/// Read-only option history on the same verified session used for confirmation.
+#[async_trait]
+pub trait OptionMinuteSource: MarketDataSource {
+    /// Read closed, regular-session TRADES bars from a UTC Unix nanosecond
+    /// window. The cutoff is supplied by authoritative contract metadata.
+    async fn option_trade_minutes(
+        &self,
+        contract: &ConfirmedContract,
+        window: Range<U64Text>,
+        expires_at: U64Text,
+        data_root: &Path,
+    ) -> Result<Vec<OptionMinuteBar>, MarketError>;
 }
 
 #[async_trait]

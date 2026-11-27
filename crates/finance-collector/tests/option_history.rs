@@ -1,10 +1,17 @@
 use std::cell::Cell;
+use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use finance_collector::option_history::{
-    BarWindow, ConfirmedOption, OptionBars, PaperOptionHistory, TradeBar, fetch_ibkr_chain,
+    BarWindow, ConfirmedOption, IbkrOptionHistory, OptionBars, PaperOptionHistory, TradeBar,
+    fetch_ibkr_chain,
+};
+use finance_ib::market::{
+    ConfirmedContract, ContractKind, ContractQuery, MarketDataSource, MarketError, MarketRequest,
+    OptionContract, OptionMinuteSource, OptionRight, PaperMarket,
 };
 use finance_market_protocol::U64Text;
 
@@ -50,6 +57,129 @@ impl PaperOptionHistory for Replay {
             _ => bail!("synthetic permission failure"),
         }
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct F9aRead {
+    contract: ConfirmedContract,
+    window: Range<U64Text>,
+    expires_at: U64Text,
+    data_root: PathBuf,
+}
+
+struct F9aReplay {
+    queries: Mutex<Vec<ContractQuery>>,
+    history: Mutex<Vec<F9aRead>>,
+    rows: Vec<TradeBar>,
+}
+
+fn f9a_option(con_id: i32) -> ConfirmedContract {
+    ConfirmedContract {
+        con_id,
+        symbol: "SYNTH".into(),
+        primary_exchange: None,
+        kind: ContractKind::Option(OptionContract {
+            expiry: "2025-03-07".parse().unwrap(),
+            strike: "10.125".parse().unwrap(),
+            right: OptionRight::Call,
+            multiplier: "100".parse().unwrap(),
+            underlying_con_id: 901,
+        }),
+        liquid_hours: vec![],
+    }
+}
+
+#[async_trait]
+impl MarketDataSource for F9aReplay {
+    type Subscription = <PaperMarket as MarketDataSource>::Subscription;
+
+    async fn confirm(&self, query: &ContractQuery) -> Result<ConfirmedContract, MarketError> {
+        self.queries.lock().unwrap().push(query.clone());
+        match query {
+            ContractQuery::Option { con_id: 4 } => Err(MarketError::ExpiredContract),
+            ContractQuery::Option { con_id } => Ok(f9a_option(*con_id)),
+            ContractQuery::Equity { .. } => panic!("expected option confirmation"),
+        }
+    }
+
+    async fn subscribe(&self, _: &MarketRequest) -> Result<Self::Subscription, MarketError> {
+        panic!("history must not start an L1 subscription")
+    }
+}
+
+#[async_trait]
+impl OptionMinuteSource for F9aReplay {
+    async fn option_trade_minutes(
+        &self,
+        contract: &ConfirmedContract,
+        window: Range<U64Text>,
+        expires_at: U64Text,
+        data_root: &Path,
+    ) -> Result<Vec<TradeBar>, MarketError> {
+        self.history.lock().unwrap().push(F9aRead {
+            contract: contract.clone(),
+            window,
+            expires_at,
+            data_root: data_root.to_path_buf(),
+        });
+        match contract.con_id {
+            1 => Ok(self.rows.clone()),
+            3 => Err(MarketError::ExpiredContract),
+            5 => Err(MarketError::NotEntitled),
+            _ => panic!("unexpected historical request"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn f9a_bridge_confirms_options_and_reads_trade_bars_through_the_paper_interface() {
+    let market = F9aReplay {
+        queries: Mutex::default(),
+        history: Mutex::default(),
+        rows: serde_json::from_str(BARS).unwrap(),
+    };
+    let root = tempfile::tempdir().unwrap();
+    let history = IbkrOptionHistory::new(&market, root.path());
+    let window = window();
+    let later = (window.end.get() + MINUTE).into();
+    let contracts = [
+        option(1, later),
+        option(2, window.end),
+        option(3, later),
+        option(4, later),
+        option(5, later),
+    ];
+    let results = fetch_ibkr_chain(&history, &contracts, window, || window.end)
+        .await
+        .unwrap();
+    assert_eq!(results.len(), contracts.len());
+    for (result, contract) in results.iter().zip(&contracts) {
+        assert_eq!(result.instrument_id, contract.instrument_id);
+    }
+    let OptionBars::Available(bars) = results[0].bars.as_ref().unwrap() else {
+        panic!("expected available bars from F9a");
+    };
+    assert_eq!(bars, &[market.rows[3].clone(), market.rows[0].clone()]);
+    for result in &results[1..4] {
+        assert_eq!(result.bars.as_ref().unwrap(), &OptionBars::Expired);
+    }
+    assert_eq!(
+        results[4].bars.as_ref().unwrap_err().downcast_ref(),
+        Some(&MarketError::NotEntitled)
+    );
+    assert_eq!(
+        *market.queries.lock().unwrap(),
+        [1, 3, 4, 5].map(|con_id| ContractQuery::Option { con_id })
+    );
+    assert_eq!(
+        *market.history.lock().unwrap(),
+        [1, 3, 5].map(|con_id| F9aRead {
+            contract: f9a_option(con_id),
+            window: window.start..window.end,
+            expires_at: later,
+            data_root: root.path().to_path_buf(),
+        })
+    );
 }
 
 #[tokio::test]

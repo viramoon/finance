@@ -3,11 +3,12 @@ mod pacing;
 
 use crate::{ConnectionManager, Error, IbTransport, PaperPeer, Result, Session, Transport};
 use async_trait::async_trait;
+use finance_market_protocol::{ClosedBar, U64Text};
 use ibapi::{
     contracts::Contract,
     market_data::{TradingHours, historical},
 };
-use pacing::Pacer;
+pub(crate) use pacing::Pacer;
 use rust_decimal::{Decimal, RoundingStrategy};
 use serde::Serialize;
 use std::{collections::BTreeMap, path::Path, time::Duration};
@@ -101,6 +102,12 @@ pub struct MinuteBar {
     pub volume: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct OptionMinuteBar {
+    pub close_ts: U64Text,
+    pub data: ClosedBar,
+}
+
 impl ConnectionManager<IbTransport> {
     /// The probe client role is reserved for short, read-only paper requests.
     pub async fn historical_minute(
@@ -152,22 +159,32 @@ impl MinuteSession for PaperPeer {
         let end = OffsetDateTime::from_unix_timestamp(request.end)
             .map_err(|_| Error::Config("historical end timestamp out of range".into()))?;
         let contract = request.contract();
-        // IB supports one-minute bars with a 1 D duration. Responses for shorter
-        // caller windows are clipped by close time in closed_bars.
-        let response = self
-            .client
-            .historical_data(&contract, historical::BarSize::Min)
-            .what_to_show(historical::WhatToShow::Trades)
-            .trading_hours(TradingHours::Regular)
-            .ending(end)
-            .duration(historical::Duration::days(1))
-            .fetch()
-            .await;
-        read_bars(response)
+        read_bars(request_trade_minute_page(self, &contract, end).await)
     }
 }
 
-fn read_bars(
+pub(crate) async fn request_trade_minute_page(
+    peer: &PaperPeer,
+    contract: &Contract,
+    end: OffsetDateTime,
+) -> std::result::Result<historical::HistoricalData, ibapi::Error> {
+    // IB supports one-minute bars with a 1 D duration. Callers clip the page
+    // to their individual windows.
+    peer.historical_data(contract, historical::BarSize::Min)
+        .what_to_show(historical::WhatToShow::Trades)
+        .trading_hours(TradingHours::Regular)
+        .ending(end)
+        .duration(historical::Duration::days(1))
+        .fetch()
+        .await
+}
+
+pub(crate) fn no_history(error: &ibapi::Error) -> bool {
+    matches!(error, ibapi::Error::Notice(notice)
+        if notice.code == 162 && notice.message.to_ascii_lowercase().contains("query returned no data"))
+}
+
+pub(crate) fn read_bars(
     response: std::result::Result<historical::HistoricalData, ibapi::Error>,
 ) -> Result<Vec<historical::Bar>> {
     match response {
@@ -181,15 +198,7 @@ fn read_bars(
             ))
         }
         Ok(response) => Ok(response.bars),
-        Err(ibapi::Error::Notice(notice))
-            if notice.code == 162
-                && notice
-                    .message
-                    .to_ascii_lowercase()
-                    .contains("query returned no data") =>
-        {
-            Ok(Vec::new())
-        }
+        Err(error) if no_history(&error) => Ok(Vec::new()),
         Err(ibapi::Error::Notice(notice)) => Err(Error::Gateway(format!(
             "historical-minute notice {}",
             notice.code

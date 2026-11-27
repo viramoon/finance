@@ -1,10 +1,17 @@
 //! On-demand history for an explicitly supplied chain of confirmed options.
 
-use std::collections::{BTreeMap, HashSet, btree_map::Entry};
+use std::{
+    collections::{BTreeMap, HashSet, btree_map::Entry},
+    path::Path,
+};
 
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
-use finance_market_protocol::{ClosedBar, InstrumentId, U64Text};
+pub use finance_ib::historical::OptionMinuteBar as TradeBar;
+use finance_ib::market::{
+    ContractKind, ContractQuery, MarketError, OptionMinuteSource, PaperMarket,
+};
+use finance_market_protocol::{InstrumentId, U64Text};
 
 pub mod databento;
 
@@ -23,14 +30,7 @@ pub struct BarWindow {
     pub end: U64Text,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct TradeBar {
-    pub close_ts: U64Text,
-    pub data: ClosedBar,
-}
-
-/// Integration point for F9a. The implementation must use a verified, read-only
-/// paper session and own request pacing, pagination, and provider error mapping.
+/// Source of option history. Implementations own request pacing and pagination.
 #[async_trait]
 pub trait PaperOptionHistory: Send + Sync {
     /// Fetch one-minute TRADES bars for the qualified contract. A successful empty
@@ -40,6 +40,49 @@ pub trait PaperOptionHistory: Send + Sync {
         contract: &ConfirmedOption,
         window: BarWindow,
     ) -> Result<Vec<TradeBar>>;
+}
+
+/// Historical reads through F9a's verified paper market session. Callers pass
+/// the same local data root as F11 so both readers share historical pacing.
+pub struct IbkrOptionHistory<'a, M = PaperMarket> {
+    market: &'a M,
+    data_root: &'a Path,
+}
+
+impl<'a, M: OptionMinuteSource> IbkrOptionHistory<'a, M> {
+    pub fn new(market: &'a M, data_root: &'a Path) -> Self {
+        Self { market, data_root }
+    }
+}
+
+#[async_trait]
+impl<M: OptionMinuteSource> PaperOptionHistory for IbkrOptionHistory<'_, M> {
+    async fn fetch_trade_bars(
+        &self,
+        contract: &ConfirmedOption,
+        window: BarWindow,
+    ) -> Result<Vec<TradeBar>> {
+        let confirmed = self
+            .market
+            .confirm(&ContractQuery::Option {
+                con_id: contract.con_id,
+            })
+            .await?;
+        ensure!(
+            confirmed.con_id == contract.con_id
+                && matches!(confirmed.kind, ContractKind::Option(_)),
+            "F9a returned a different option contract"
+        );
+        Ok(self
+            .market
+            .option_trade_minutes(
+                &confirmed,
+                window.start..window.end,
+                contract.expires_at,
+                self.data_root,
+            )
+            .await?)
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -95,7 +138,12 @@ async fn fetch_contract(
     contract: &ConfirmedOption,
     window: BarWindow,
 ) -> Result<OptionBars> {
-    let bars = provider.fetch_trade_bars(contract, window).await?;
+    let bars = match provider.fetch_trade_bars(contract, window).await {
+        Err(error) if error.downcast_ref() == Some(&MarketError::ExpiredContract) => {
+            return Ok(OptionBars::Expired);
+        }
+        result => result?,
+    };
     let mut selected = BTreeMap::<U64Text, TradeBar>::new();
     for bar in bars {
         // Range-based provider requests may yield overlapping or still-open bars.

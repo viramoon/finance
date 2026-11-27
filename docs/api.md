@@ -105,7 +105,7 @@ finance 合并后，web 先固定 `openapi/finance.commit` 的完整 SHA，从�
 
 历史价量补拉通过本地命令运行。入口、JSON 运行报告和 Parquet 目录见批任务文档。[历史价量批任务](historical-pull.md)
 
-历史期权读取与 OPRA 费用估算通过 collector 的 Rust 库调用。`Expired`、`NoBars` 和请求错误由库分别返回，HTTP 与行情流的对外接口留待后续接入。[历史期权链](option-history.md)
+历史期权读取与 OPRA 费用估算通过 collector 的 Rust 库调用。IBKR 读取使用 `IbkrOptionHistory` 和 F9a 的只读 `PaperMarket` 会话，分别返回 `Expired`、`NoBars` 和请求错误。HTTP 与行情流的对外接口留待后续接入。[历史期权链](option-history.md)
 
 ## 历史回测与提交确认
 
