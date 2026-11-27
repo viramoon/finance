@@ -33,6 +33,8 @@
 
 source /home/box/fertile/env.sh 后运行 bash scripts/build.sh 和 bash scripts/smoke.sh。默认缓存、wheel、虚拟环境和独立 worktree 均位于 /home/box/fertile/cache/finance，不依赖 /tmp 或系统目录持久化。恢复时核对源码 commit、toolchain.env 和 uv.lock，检查 wheel 来源及摘要，不能从 PyPI 补装 Nautilus。首次时间和空间实测见 [docs/build.md](docs/build.md)；当前不启停任何真实交易进程或 Gateway。
 
+若 GitHub Actions 的「系统编译依赖」失败，先查 apt 日志中的源文件路径、Ubuntu 镜像和失败的软件包。缺少官方源文件时核对 runner 镜像布局。官方镜像的临时错误在恢复后可重跑作业。若日志出现 `packages.microsoft.com`，检查 `update` 和 `install` 是否仍共用官方源选项。离线复测命令见 [源码构建 CI](docs/build.md#源码构建-ci-的系统编译依赖)。
+
 ## 当前 API 与批任务操作
 
 在 finance 仓库根目录 source /home/box/fertile/env.sh，按 build.md 完成源码构建后：

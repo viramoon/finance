@@ -36,12 +36,26 @@ jobs:
           echo "llvm=$LLVM_VERSION" >> "$GITHUB_OUTPUT"
           echo "source=$(git -C vendor/nautilus_trader rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: 系统编译依赖
+        shell: bash
         run: |
+          ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources
+          if ! test -s "$ubuntu_sources"; then
+            echo "::error::Ubuntu apt sources missing or empty: $ubuntu_sources"
+            exit 1
+          fi
+
           # 托管的一次性 VM：清理本任务不用的预装 SDK，为源码编译留出磁盘。
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
           df -h "$RUNNER_TEMP"
-          sudo apt-get -o Acquire::Retries=5 update
-          sudo apt-get -o Acquire::Retries=5 install -y libssl-dev pkg-config libtinfo6 libxml2 libz3-4
+
+          # 两次调用共用 runner 的 Ubuntu 官方源，排除预置的第三方源。
+          apt_options=(
+            -o "Dir::Etc::sourcelist=$ubuntu_sources"
+            -o Dir::Etc::sourceparts=-
+            -o Acquire::Retries=5
+          )
+          sudo apt-get "${apt_options[@]}" -o APT::Update::Error-Mode=any update
+          sudo apt-get "${apt_options[@]}" install -y libssl-dev pkg-config libtinfo6 libxml2 libz3-4
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ steps.versions.outputs.rust }}

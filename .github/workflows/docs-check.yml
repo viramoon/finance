@@ -109,3 +109,5 @@ jobs:
           assert "测试结果" in body, "PR 描述缺少测试结果"
           print(f"通过：{len(required)} 个必需文件，文档非空、相对链接、YAML、初始化范围与 PR 描述")
           PY
+      - name: 离线验证 Nautilus 源码构建工作流的 apt 步骤
+        run: python -B -m unittest discover -s .github/tests -v

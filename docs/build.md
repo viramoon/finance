@@ -41,6 +41,12 @@ CI 使用 GitHub 托管 ubuntu-24.04 runner，checkout submodules，缓存 LLVM�
 
 首次 CI 源码构建与安装 1457 秒（24 分 17 秒），同一 job 的第二次安装与校验 3 秒；这两项不含前置 LLVM 安装、GitHub 缓存传输和 runner 准备时间。该次源码构建、回测及编译缓存保存成功，setup-uv 的默认缓存路径与入口不一致导致收尾失败，已统一路径；最终完整 CI 与跨运行缓存恢复证据见本 issue 的 PR。
 
+## 源码构建 CI 的系统编译依赖
+
+`nautilus-source.yml` 的「系统编译依赖」步骤仅为 apt 的 `update` 和 `install` 指定 runner 的 `/etc/apt/sources.list.d/ubuntu.sources`，沿用其中的 Ubuntu 镜像、更新套件与签名配置。两条命令均排除其它源文件，包括可能返回 HTTP 403 的 `packages.microsoft.com`，并配置 `Acquire::Retries=5`。源文件缺失或为空、官方索引更新有错误、依赖安装失败都会使该步骤失败。apt 继续校验仓库签名和软件包，runner 的全局源配置无需修改。
+
+文档 CI 使用既有的 PyYAML 解析工作流，并用合成替身离线执行 apt 步骤，核对两条命令的源选项、重试上限、软件包清单和失败传播。在已有 PyYAML 的环境中可运行 `python3 -B -m unittest discover -s .github/tests -v`。
+
 ## 故障与恢复
 
 下载失败重跑同一命令，保留 uv / Cargo 缓存；版本不符先同步派生文件，不能放宽版本检查。源码构建失败修复根因，不回退 PyPI wheel。发现 vendor 脏修改时停止，在镜像按流程提交后更新指针；缓存损坏清理该 key 后重新构建。uv.lock 通过 uv lock 生成，生成文件只经生成器更新。
