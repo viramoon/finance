@@ -1,0 +1,106 @@
+{
+  "capabilities": [
+    {
+      "can_backfill": true,
+      "delay_tier": "replay",
+      "max_depth": 0,
+      "message_kinds": [
+        "option_history_trade",
+        "option_history_quote"
+      ],
+      "product": "opra-history",
+      "schema_version": "3.0",
+      "source": "ibkr"
+    }
+  ],
+  "events": [
+    {
+      "asset_kind": "option",
+      "channel": "option-history",
+      "cursor": "1:1",
+      "epoch": "1",
+      "exchange_ts": "1760000001000000000",
+      "first_available_ts": "1760000200000000000",
+      "instrument_id": "SYNTH-OPTION.SMART",
+      "kind": "option_history_quote",
+      "license": "synthetic",
+      "payload": {
+        "ask": "1.250",
+        "ask_past_high": false,
+        "ask_quantity": null,
+        "batch": {
+          "occurrence": "1",
+          "page": "1",
+          "request_id": "2",
+          "requested_start_ts": "1760000000000000000"
+        },
+        "bid": "1.125",
+        "bid_past_low": false,
+        "bid_quantity": "20"
+      },
+      "product": "opra-history",
+      "receive_ts": "1760000200000000000",
+      "revision": "0",
+      "schema_version": "3.0",
+      "seq": "1",
+      "source": "ibkr",
+      "venue": "SMART"
+    },
+    {
+      "asset_kind": "option",
+      "channel": "option-history",
+      "cursor": "1:2",
+      "epoch": "1",
+      "exchange_ts": "1760000002000000000",
+      "first_available_ts": "1760000200000000000",
+      "instrument_id": "SYNTH-OPTION.SMART",
+      "kind": "option_history_trade",
+      "license": "synthetic",
+      "payload": {
+        "batch": {
+          "occurrence": "1",
+          "page": "1",
+          "request_id": "1",
+          "requested_start_ts": "1760000000000000000"
+        },
+        "condition_mapping_version": "ibkr-opaque-v1",
+        "contract_multiplier": "25",
+        "exchange": "XTEST",
+        "past_limit": false,
+        "price": "1.250",
+        "quantity": "25",
+        "special_conditions": "",
+        "unreported": false
+      },
+      "product": "opra-history",
+      "receive_ts": "1760000200000000000",
+      "revision": "0",
+      "schema_version": "3.0",
+      "seq": "2",
+      "source": "ibkr",
+      "venue": "SMART"
+    }
+  ],
+  "instruments": [
+    {
+      "asset_kind": "option",
+      "calendar_id": "US_OPTIONS",
+      "contract_multiplier": "25",
+      "instrument_id": "SYNTH-OPTION.SMART",
+      "lot_size": "1",
+      "quote_currency": "USD",
+      "schema_version": "1.0",
+      "settlement_currency": "USD",
+      "settlement_kind": "physical",
+      "supplier_symbols": [
+        {
+          "product": "opra-history",
+          "source": "ibkr",
+          "symbol": "42"
+        }
+      ],
+      "tick_size": "0.005",
+      "venue": "SMART"
+    }
+  ]
+}

@@ -201,6 +201,7 @@ impl Shared {
                 }
                 current
                     && valid.is_some()
+                    && *field != QuoteField::CumulativeVolume
                     && (evidence.bid_ask_valid || *field == QuoteField::LastPrice)
             }
             MarketEvent::OpenInterest { value, .. } => value.is_some(),

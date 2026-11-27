@@ -178,6 +178,19 @@ impl LineHandle {
             .collect()
     }
 
+    /// Resolve metadata for a single current option without cloning the chain.
+    pub fn option_contract(&self, con_id: i32) -> Option<ConfirmedContract> {
+        let today = option_market_date(self.0.now()).ok()?;
+        self.0
+            .state
+            .lock()
+            .expect("line state")
+            .options
+            .get(&con_id)
+            .filter(|contract| unexpired(contract, today))
+            .cloned()
+    }
+
     pub fn coverage(
         &self,
         key: RequestKey,
@@ -296,7 +309,14 @@ mod tests {
     use std::time::Duration;
 
     use chrono::TimeZone;
-    use finance_ib::market::{OptionContract, OptionRight};
+    use finance_ib::market::{
+        LiquidHours, MarketDataType, OptionContract, OptionRight, QuoteField,
+    };
+
+    use crate::{
+        market_ingress::ProductPolicy,
+        option_flow::{FlowUse, IBKR, LiveOptionFlow, OPRA, observation::ObservationEngine},
+    };
 
     use super::*;
 
@@ -373,5 +393,80 @@ mod tests {
         scheduler.shared.state.lock().unwrap().phase = SchedulerPhase::Stopped;
         assert_eq!(handle.option_contracts(), [following]);
         assert_eq!(handle.status().confirmed_options, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn live_option_flow_keeps_equal_receipt_times_without_inventing_coverage() {
+        let mut scheduler = LineScheduler::new(BudgetConfig::default(), Vec::new()).unwrap();
+        let open = Utc.with_ymd_and_hms(2040, 1, 20, 14, 30, 0).unwrap();
+        Arc::get_mut(&mut scheduler.shared).unwrap().start = open;
+        let mut contract = option(2, NaiveDate::from_ymd_opt(2040, 1, 21).unwrap());
+        contract.liquid_hours.push(LiquidHours::Open {
+            start: open,
+            end: open + TimeDelta::hours(1),
+        });
+        let key = session::option_key(contract.con_id);
+        {
+            let mut state = scheduler.shared.state.lock().unwrap();
+            state.options.insert(contract.con_id, contract);
+            state.coverage.opened(key, open);
+            state.coverage.observed(key, open);
+        }
+        let mut flow = LiveOptionFlow::watch(
+            scheduler.handle(),
+            ObservationEngine::default(),
+            &ProductPolicy {
+                source: IBKR.parse().unwrap(),
+                product: OPRA.parse().unwrap(),
+                license: "synthetic".parse().unwrap(),
+                display_live: true,
+                record_local: false,
+                derive_non_display: false,
+                backup_personal_drive: false,
+            },
+            FlowUse::PrivateDisplay,
+        )
+        .unwrap();
+
+        let send = |event| {
+            scheduler
+                .shared
+                .updates
+                .send(LineUpdate {
+                    key,
+                    generation: 1,
+                    message: LineMessage::Event(event),
+                })
+                .unwrap();
+        };
+        let volume = |value: &str, received_at| MarketEvent::Quote {
+            field: QuoteField::CumulativeVolume,
+            value: Some(value.parse().unwrap()),
+            delayed: false,
+            received_at,
+        };
+        send(MarketEvent::DataType(Some(MarketDataType::Realtime)));
+        send(volume("20", open));
+        send(volume("24", open));
+        let same_time = flow.next().await.unwrap();
+        assert_eq!(same_time.clue.window(), (open, open));
+        assert!(same_time.coverage.is_none());
+        assert_eq!(same_time.budget.confirmed_options, 1);
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let next_second = open + TimeDelta::seconds(1);
+        send(volume("25", next_second));
+        let later = flow.next().await.unwrap();
+        assert_eq!(later.clue.window(), (open, next_second));
+        let report = later.coverage.unwrap();
+        assert_eq!(
+            report.covered,
+            [CoverageInterval {
+                start: open,
+                end: next_second,
+            }]
+        );
+        assert!(report.uncovered.is_empty());
+        assert!(report.unknown.is_empty());
     }
 }

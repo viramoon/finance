@@ -115,6 +115,18 @@ cargo run --locked --offline -q -p finance-market-protocol --bin export-market-p
 
 接口与恢复规则见 [Hyperliquid](integrations/hyperliquid.md)、[Binance](integrations/binance.md) 及 [ADR-0034](adr/ADR-0034-hyperliquid-context-stream.md)。
 
+### v3.0 期权历史证据
+
+`option_history_trade` 记录原始价格、张数、合约乘数、成交场所、条件码及映射版本。`option_history_quote` 记录报价、数量和供应商标记，缺值使用 `null`。两者都保留历史请求页号、请求起点、可用的请求 ID 和完整秒内的位置。`exchange_ts` 为 UTC 源秒对应的纳秒整数，`receive_ts` 为取得回调的 UTC 纳秒。请求 ID 的使用范围限同一 Gateway 会话，秒内位置用于区分重复成交。事件内交易数值用十进制字符串，批次位置用无符号十进制字符串。
+
+版本 3.0 的能力只声明上述历史证据种类，标的和 reset 仍使用版本 1.0。既有 v1 WS 和 SSE 继续使用各自的 v1 模式。业务核验结果通过 [期权流接口](option-flow.md) 返回。
+
+生成 [事件 schema](../protocol/v3/event.schema.json)、[能力 schema](../protocol/v3/capability.schema.json) 与 [固定合成样本](../protocol/v3/examples.json)。
+
+```sh
+cargo run --locked --offline -q -p finance-market-protocol --bin export-market-protocol -- protocol/v3 --v3
+```
+
 ## 首批读契约的 WS 与 SSE 消息
 
 `finance-api export-read-stream DIRECTORY` 从代码导出以下 1.0 版文件。更新仓库产物时用同一命令指向 `protocol/v1`，同步样本来源和摘要。导出器只读已提交的合成事件种子与代码中的确定性状态样本。
@@ -129,7 +141,7 @@ cargo run --locked --offline -q -p finance-market-protocol --bin export-market-p
 
 ## 解码与错误定位
 
-Rust 使用 `finance_market_protocol::decode_json::<T>(input)`，其中 `T` 为 `Instrument`、`Capability` 或 `Event`。通过错误的 `path()` 和 `kind().as_str()` 读取诊断。Python 使用 `fertile_finance.market_protocol` 的同名类型及 `from_json(input)`，通过 `ProtocolError.path` 和 `ProtocolError.kind` 读取诊断。Python 的 `Kind` 枚举对应 v1.0 消息种类，永续上下文使用 `ContextKind.PERPETUAL_CONTEXT`。
+Rust 使用 `finance_market_protocol::decode_json::<T>(input)`，其中 `T` 为 `Instrument`、`Capability` 或 `Event`。通过错误的 `path()` 和 `kind().as_str()` 读取诊断。Python 使用 `fertile_finance.market_protocol` 的同名类型及 `from_json(input)`，通过 `ProtocolError.path` 和 `ProtocolError.kind` 读取诊断。Python 的 `Kind` 枚举包含 v1.0 消息种类和 2.0 复用的控制消息种类。永续观测使用 `ContextKind`，v3.0 期权历史证据使用 `OptionHistoryKind`。
 
 路径使用相对于所读对象的 JSON Pointer，数组下标从零开始。语法错误等定位到整个输入的情况使用空路径。调用方可按错误种类分支，并用可读错误消息显示原因。
 

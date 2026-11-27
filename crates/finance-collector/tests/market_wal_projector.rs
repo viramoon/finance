@@ -7,6 +7,7 @@ use std::process::{Command, Output};
 use std::{env, fs};
 
 const EXAMPLES: &str = include_str!("../../../protocol/v1/examples.json");
+const OPTION_EXAMPLES: &str = include_str!("../../../protocol/v3/examples.json");
 const WAL_BIN: &str = env!("CARGO_BIN_EXE_finance-market-wal");
 const SOURCE: &str = "fixture";
 const PRODUCT: &str = "us-etf-delayed";
@@ -222,6 +223,77 @@ fn cli_refuses_remote_manifest_for_locally_recordable_product() {
     let output = cli(root.path(), "manifest").output().unwrap();
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
+}
+
+#[test]
+#[ignore = "requires FINANCE_F3_TEST_PYTHON pointing to the built project Python environment"]
+fn historical_option_wal_projects_through_python_cli() {
+    let root = tempfile::tempdir().unwrap();
+    let examples: Value = serde_json::from_str(OPTION_EXAMPLES).unwrap();
+    let instrument = fixture::<Instrument>(&examples["instruments"][0]);
+    let capability = fixture::<Capability>(&examples["capabilities"][0]);
+    let events = examples["events"].as_array().unwrap();
+    let mut ingress = MarketIngress::open(
+        root.path(),
+        ProductPolicy {
+            source: capability.source.clone(),
+            product: capability.product.clone(),
+            license: events[0]["license"].as_str().unwrap().parse().unwrap(),
+            ..policy(false)
+        },
+    )
+    .unwrap();
+    for event in events {
+        ingress
+            .publish(fixture::<Event>(event), &instrument, &capability)
+            .unwrap();
+    }
+    assert_eq!(ingress.flush().unwrap(), Some(2));
+
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let python = env::var_os("FINANCE_F3_TEST_PYTHON").unwrap();
+    checked_output(
+        Command::new(&python)
+            .env("PYTHONPATH", repo.join("python"))
+            .args([
+                "-B",
+                "-m",
+                "fertile_finance.market_projector",
+                "--data-root",
+            ])
+            .arg(root.path())
+            .args(["--wal-bin", WAL_BIN, "--once"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(ingress.watermarks().unwrap().projected.get(), 2);
+    let output = checked_output(
+        Command::new(&python)
+            .env("PYTHONPATH", repo.join("python"))
+            .args([
+                "-B",
+                "-c",
+                r#"
+import sys
+from pathlib import Path
+import pyarrow.parquet as pq
+from fertile_finance.market_projector import projected_partitions
+
+partition, = projected_partitions(Path(sys.argv[1]), "ibkr", "opra-history")
+for event in pq.ParquetFile(partition.path).read()["event_json"].to_pylist():
+    print(event)
+"#,
+            ])
+            .arg(root.path())
+            .output()
+            .unwrap(),
+    );
+    let projected: Vec<Value> = std::str::from_utf8(&output)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(&projected, events);
 }
 
 #[test]

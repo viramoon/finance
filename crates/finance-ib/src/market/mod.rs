@@ -274,6 +274,8 @@ pub enum QuoteField {
     BidSize,
     AskSize,
     LastSize,
+    /// Trading-day cumulative volume for the selected contract.
+    CumulativeVolume,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -382,7 +384,8 @@ impl MarketObservation {
                     QuoteField::AskPrice => self.ask.price = positive.map(|p| (p, received_at)),
                     QuoteField::BidSize => self.bid.size_invalid = positive.is_none(),
                     QuoteField::AskSize => self.ask.size_invalid = positive.is_none(),
-                    QuoteField::LastPrice | QuoteField::LastSize => {}
+                    QuoteField::LastPrice | QuoteField::LastSize | QuoteField::CumulativeVolume => {
+                    }
                 }
             }
             MarketEvent::OpenInterest { value, .. } => {

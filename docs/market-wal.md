@@ -2,6 +2,8 @@
 
 [F1 事件协议](market-protocol.md) 的生产者可以把已授权事件交给 `finance_collector::market_ingress::MarketIngress`。每个 source/product 有自己的 WAL 和投影游标。旧 `BarSource`、Nautilus bar catalog 和 [旧采集状态](../catalog/README.md) 继续使用原有路径。本接口供适配器、查询实现和 fertile 备份接入。[Binance 永续上下文](integrations/binance.md)使用独立 F3 产品记录 2.0 观测，Parquet 仍保留原始事件 JSON。 [Hyperliquid 永续上下文](integrations/hyperliquid.md)也通过 F3 发布 2.0 观测，同一产品的盘口与控制消息沿用 1.0。
 
+[IBKR 历史期权流](option-flow.md) 通过相同入口发布 v3.0 原始逐笔证据。Parquet 与 SQLite 索引保留新种类及各自的流位置。
+
 ## 生产者与许可
 
 - `MarketIngress::open(data_root, policy)` 接受调用方从已审核配置解析出的 `ProductPolicy`。策略绑定 `source`、`product`、`license` 以及 `display_live`、`record_local`、`derive_non_display`、`backup_personal_drive` 四个布尔值。项目禁用再分发。落盘前须准备数据根，打开时策略与该产品的 WAL 根绑定。权限或许可范围变动时，协调方应停写、按许可处置已有归档并选择新的数据根，再启用新策略。
@@ -15,6 +17,10 @@
 ## WAL 格式与恢复边界
 
 WAL 根为 `<data-root>/finance-state/market-wal`。产品目录为 `<source>/<product>`，两部分都使用 F1 标识。对一个产品只有一个进程可持有 `writer.lock`。每次获得写锁并成功打开后递增持久化写者代际。WAL 本地位置从 1 开始按投递递增，同一产品内以 0 表示起点。写者代际与 F1 事件的 epoch 是独立坐标。
+
+F3 逐级打开真实目录并拒绝符号链接。WAL 写入和封段恢复检查数据根的祖先及每一级 WAL 目录中的 Git 工作树标记。打开后，读写由已打开的产品目录句柄定位。配置通用 F3 入口时，数据根使用工作树外的实际路径。
+
+WAL 段、写锁和写入或恢复时读取的元数据须为单链接普通文件。只读元数据快照接受单链接普通文件，也接受打开后因原子替换失去最后一个链接的普通文件。读者继续从原描述符解码该已提交前缀，其他读者可打开新前缀。
 
 段格式 v1 从 8 字节魔数 `FINWAL1\n` 开始，每个帧依次为：
 
@@ -66,6 +72,8 @@ WAL 根为 `<data-root>/finance-state/market-wal`。产品目录为 `<source>/<p
 
 - `<data-root>/catalog/market-events/<source>/<product>/positions-<first:020>-<last:020>.parquet`。
 - `<data-root>/finance-state/market-projection/<source>/<product>/`，包括 `projection.sqlite3` 和原子更新的 `watermark.json`。
+
+投影逐级检查工作树标记和符号链接，状态目录及 Parquet 目录均使用工作树外的实际路径。发布 Parquet 时，临时文件、校验和原子替换都通过已打开的目标目录定位。状态路径校验使用 Linux 的 `/proc/self/fd`。SQLite 索引及其辅助文件须为单链接普通文件，投影器在读取 WAL 前后检查状态目录仍与持锁目录一致。
 
 投影以 F1 流分区、epoch 和 seq 去重。同一秒或纳秒的不同 seq 分开保留，重复投递保留首次接收数据。位置相同却内容冲突、修订目标缺失、类型不符或修订号未递增时，该产品投影报错，游标停在上一成功批次。原事件与有效修订各自保留。完全重复的批次也推进 WAL 游标。
 

@@ -1,0 +1,73 @@
+{
+  "$defs": {
+    "DelayTier": {
+      "enum": [
+        "realtime",
+        "delayed",
+        "replay"
+      ],
+      "type": "string"
+    },
+    "MarketKind": {
+      "description": "Historical option evidence kinds a source/product can advertise.",
+      "enum": [
+        "option_history_trade",
+        "option_history_quote"
+      ],
+      "type": "string"
+    },
+    "SchemaVersion": {
+      "enum": [
+        "3.0"
+      ],
+      "type": "string"
+    },
+    "Token": {
+      "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}(?![\\s\\S])",
+      "type": "string"
+    }
+  },
+  "$id": "urn:viramoon:finance:market-protocol:3.0:capability",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Advertised market data capability of a source/product pair.",
+  "properties": {
+    "can_backfill": {
+      "type": "boolean"
+    },
+    "delay_tier": {
+      "$ref": "#/$defs/DelayTier"
+    },
+    "max_depth": {
+      "const": 0
+    },
+    "message_kinds": {
+      "items": {
+        "$ref": "#/$defs/MarketKind"
+      },
+      "maxItems": 2,
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "product": {
+      "$ref": "#/$defs/Token"
+    },
+    "schema_version": {
+      "$ref": "#/$defs/SchemaVersion"
+    },
+    "source": {
+      "$ref": "#/$defs/Token"
+    }
+  },
+  "required": [
+    "schema_version",
+    "source",
+    "product",
+    "message_kinds",
+    "max_depth",
+    "can_backfill",
+    "delay_tier"
+  ],
+  "type": "object"
+}

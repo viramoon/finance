@@ -1,4 +1,5 @@
-//! Bounded historical stock minute requests via a verified, read-only paper session.
+//! Bounded historical stock minutes and option tick pages via read-only paper sessions.
+pub mod option_ticks;
 mod pacing;
 
 use crate::{ConnectionManager, Error, IbTransport, PaperPeer, Result, Session, Transport};

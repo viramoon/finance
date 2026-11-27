@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     fs::File,
-    io::{BufReader, BufWriter, ErrorKind, Write},
+    io::BufReader,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -9,15 +9,10 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use finance_ib::depth::permission::{PRODUCT as TOTALVIEW_PRODUCT, SOURCE as TOTALVIEW_SOURCE};
 use finance_market_protocol::{Capability, Event, Instrument, InstrumentId, Token, U64Text};
-use rustix::{
-    fs::{Mode, OFlags, open},
-    io::Errno,
-};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use tempfile::NamedTempFile;
 use utoipa::ToSchema;
 
-use crate::market_wal::{WAL_SUBDIRECTORIES, WalManifest, WalReader, WalWriter};
+use crate::market_wal::{WAL_SUBDIRECTORIES, WalDirectory, WalManifest, WalReader, WalWriter};
 use crate::projection_read::{ProjectionArtifact, projection_read_path};
 
 const DISPLAY_TTL: Duration = Duration::from_secs(5);
@@ -31,10 +26,13 @@ pub fn wal_root(data_root: &Path) -> PathBuf {
     data_root.join(state).join(wal)
 }
 
-fn product_dir(data_root: &Path, source: &Token, product: &Token) -> PathBuf {
-    wal_root(data_root)
-        .join(source.as_str())
-        .join(product.as_str())
+fn recorded_directory(
+    data_root: &Path,
+    source: &Token,
+    product: &Token,
+) -> Result<Option<WalDirectory>> {
+    let [state, wal] = WAL_SUBDIRECTORIES;
+    WalDirectory::open_existing(data_root, &[state, wal, source.as_str(), product.as_str()])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -176,27 +174,12 @@ impl MarketIngress {
     pub fn open(data_root: &Path, policy: ProductPolicy) -> Result<Self> {
         policy.validate()?;
         let writer = if policy.record_local {
-            ensure!(
-                data_root.is_dir(),
-                "WAL data root must be an existing directory"
-            );
-            if let Some(existing) = recording_policy(data_root, &policy.source, &policy.product)? {
-                ensure!(
-                    existing == policy,
-                    "WAL policy binding changed; use a separate data root"
-                );
-            }
-            let writer = WalWriter::open(
-                &wal_root(data_root),
-                policy.source.as_str(),
-                policy.product.as_str(),
-            )?;
-            bind_policy(
-                writer.product_dir(),
-                &policy,
-                writer.durable_position() == 0,
-            )?;
-            Some(writer)
+            Some(WalWriter::open_product(
+                data_root,
+                &policy.source,
+                &policy.product,
+                |dir, allow_new| bind_policy(dir, &policy, allow_new),
+            )?)
         } else {
             None
         };
@@ -263,8 +246,19 @@ impl MarketIngress {
     }
 
     pub fn watermarks(&self) -> Result<Watermarks> {
-        let mut marks = if self.writer.is_some() {
-            read_watermarks(&self.data_root, &self.policy.source, &self.policy.product)?
+        let mut marks = if let Some(writer) = &self.writer {
+            let projected_path = projection_read_path(
+                &self.data_root,
+                &self.policy.source,
+                &self.policy.product,
+                ProjectionArtifact::Watermark,
+            )?;
+            directory_watermarks(
+                writer.directory(),
+                &self.policy.source,
+                &self.policy.product,
+                projected_path.as_deref(),
+            )?
         } else {
             empty_watermarks()
         };
@@ -278,11 +272,12 @@ impl MarketIngress {
     pub fn report_quality(&mut self, report: QualityReport) -> Result<()> {
         ensure!(report.from_ts <= report.to_ts, "reversed quality interval");
         if let Some(writer) = &self.writer {
-            let path = writer.product_dir().join("quality.json");
-            let mut reports: Vec<QualityReport> = read_json(&path)?.unwrap_or_default();
+            let dir = writer.directory();
+            let mut reports: Vec<QualityReport> =
+                decode_json_metadata(dir.open_optional("quality.json")?)?.unwrap_or_default();
             if !reports.contains(&report) {
                 reports.push(report);
-                atomic_json(&path, &reports)?;
+                dir.publish_json("quality.json", &reports)?;
             }
         } else {
             let now = Instant::now();
@@ -301,8 +296,12 @@ impl MarketIngress {
     }
 
     pub fn quality(&self) -> Result<Vec<QualityReport>> {
-        if self.writer.is_some() {
-            read_quality(&self.data_root, &self.policy.source, &self.policy.product)
+        if let Some(writer) = &self.writer {
+            directory_quality(
+                writer.directory(),
+                &self.policy.source,
+                &self.policy.product,
+            )
         } else {
             let now = Instant::now();
             Ok(self
@@ -375,10 +374,21 @@ fn empty_watermarks() -> Watermarks {
 pub fn read_watermarks(data_root: &Path, source: &Token, product: &Token) -> Result<Watermarks> {
     let projected_path =
         projection_read_path(data_root, source, product, ProjectionArtifact::Watermark)?;
-    let Some(policy) = recording_policy(data_root, source, product)? else {
+    let Some(dir) = recorded_directory(data_root, source, product)? else {
         return Ok(empty_watermarks());
     };
+    directory_watermarks(&dir, source, product, projected_path.as_deref())
+}
 
+fn directory_watermarks(
+    dir: &WalDirectory,
+    source: &Token,
+    product: &Token,
+    projected_path: Option<&Path>,
+) -> Result<Watermarks> {
+    let Some(policy) = read_policy(dir, source, product)? else {
+        return Ok(empty_watermarks());
+    };
     #[derive(Deserialize)]
     struct ProjectionWatermark {
         projected_through: U64Text,
@@ -386,27 +396,16 @@ pub fn read_watermarks(data_root: &Path, source: &Token, product: &Token) -> Res
 
     // Read the projection position first to avoid comparing a new projector cursor to
     // an older WAL checkpoint during concurrent commits.
-    let mut projected = 0;
-    if let Some(path) = projected_path {
-        match open(
-            path,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-            Mode::empty(),
-        ) {
-            Ok(fd) => {
-                let file = File::from(fd);
-                ensure!(
-                    file.metadata()?.is_file(),
-                    "projection watermark must be a regular file"
-                );
-                let mark: ProjectionWatermark = serde_json::from_reader(BufReader::new(file))?;
-                projected = mark.projected_through.get();
-            }
-            Err(Errno::NOENT) => (),
-            Err(error) => return Err(error.into()),
-        }
-    }
-    let reader = WalReader::open(&wal_root(data_root), source.as_str(), product.as_str())?;
+    let projection = match projected_path.and_then(Path::parent) {
+        Some(parent) => WalDirectory::open_existing(parent, &[])?,
+        None => None,
+    };
+    let projected = match projection {
+        Some(dir) => read_json::<ProjectionWatermark>(&dir, "watermark.json")?
+            .map_or(0, |mark| mark.projected_through.get()),
+        None => 0,
+    };
+    let reader = WalReader::from_directory(dir, source, product)?;
     let durable = reader.durable_position();
     ensure!(
         projected <= durable,
@@ -438,13 +437,21 @@ pub fn read_quality(
     source: &Token,
     product: &Token,
 ) -> Result<Vec<QualityReport>> {
-    if recording_policy(data_root, source, product)?.is_none() {
+    let Some(dir) = recorded_directory(data_root, source, product)? else {
+        return Ok(Vec::new());
+    };
+    directory_quality(&dir, source, product)
+}
+
+fn directory_quality(
+    dir: &WalDirectory,
+    source: &Token,
+    product: &Token,
+) -> Result<Vec<QualityReport>> {
+    if read_policy(dir, source, product)?.is_none() {
         return Ok(Vec::new());
     }
-    Ok(
-        read_json(&product_dir(data_root, source, product).join("quality.json"))?
-            .unwrap_or_default(),
-    )
+    Ok(read_json(dir, "quality.json")?.unwrap_or_default())
 }
 
 pub fn recording_policy(
@@ -452,8 +459,26 @@ pub fn recording_policy(
     source: &Token,
     product: &Token,
 ) -> Result<Option<ProductPolicy>> {
-    let path = product_dir(data_root, source, product).join("access.json");
-    let policy: Option<ProductPolicy> = read_json(&path)?;
+    let Some(dir) = recorded_directory(data_root, source, product)? else {
+        return Ok(None);
+    };
+    read_policy(&dir, source, product)
+}
+
+fn read_policy(
+    dir: &WalDirectory,
+    source: &Token,
+    product: &Token,
+) -> Result<Option<ProductPolicy>> {
+    decode_policy(dir.open_optional_snapshot("access.json")?, source, product)
+}
+
+fn decode_policy(
+    file: Option<File>,
+    source: &Token,
+    product: &Token,
+) -> Result<Option<ProductPolicy>> {
+    let policy: Option<ProductPolicy> = decode_json_metadata(file)?;
     if let Some(policy) = &policy {
         policy.validate()?;
         ensure!(
@@ -469,9 +494,10 @@ pub fn backup_manifest(
     source: &Token,
     product: &Token,
 ) -> Result<BackupManifest> {
-    let access = recording_policy(data_root, source, product)?.context("WAL policy is missing")?;
+    let dir = recorded_directory(data_root, source, product)?.context("WAL policy is missing")?;
+    let access = read_policy(&dir, source, product)?.context("WAL policy is missing")?;
     ensure_backup(&access)?;
-    let reader = WalReader::open(&wal_root(data_root), source.as_str(), product.as_str())?;
+    let reader = WalReader::from_directory(&dir, source, product)?;
     Ok(BackupManifest {
         access,
         wal: reader.manifest(),
@@ -508,9 +534,14 @@ fn ensure_backup(policy: &ProductPolicy) -> Result<()> {
     Ok(())
 }
 
-fn bind_policy(dir: &Path, policy: &ProductPolicy, allow_new: bool) -> Result<()> {
-    let path = dir.join("access.json");
-    if let Some(existing) = read_json::<ProductPolicy>(&path)? {
+fn bind_policy(dir: &WalDirectory, policy: &ProductPolicy, allow_new: bool) -> Result<()> {
+    // Validate the quality file before opening a writable generation, too.
+    dir.open_optional("quality.json")?;
+    if let Some(existing) = decode_policy(
+        dir.open_optional("access.json")?,
+        &policy.source,
+        &policy.product,
+    )? {
         ensure!(
             existing == *policy,
             "WAL policy binding changed; use a separate data root"
@@ -518,32 +549,16 @@ fn bind_policy(dir: &Path, policy: &ProductPolicy, allow_new: bool) -> Result<()
         return Ok(());
     }
     ensure!(allow_new, "committed WAL has lost its policy binding");
-    atomic_json(&path, policy)
+    dir.publish_json("access.json", policy)
 }
 
-fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
-    match File::open(path) {
-        Ok(file) => Ok(Some(serde_json::from_reader(BufReader::new(file))?)),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
+fn read_json<T: DeserializeOwned>(dir: &WalDirectory, name: &str) -> Result<Option<T>> {
+    decode_json_metadata(dir.open_optional_snapshot(name)?)
 }
 
-fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
-    let parent = path
-        .parent()
-        .context("metadata file needs a parent directory")?;
-    let mut temp = NamedTempFile::new_in(parent)?;
-    {
-        let mut output = BufWriter::new(temp.as_file_mut());
-        serde_json::to_writer(&mut output, value)?;
-        output.write_all(b"\n")?;
-        output.flush()?;
-    }
-    temp.as_file().sync_all()?;
-    temp.persist(path)?;
-    File::open(parent)?.sync_all()?;
-    Ok(())
+fn decode_json_metadata<T: DeserializeOwned>(file: Option<File>) -> Result<Option<T>> {
+    file.map(|file| serde_json::from_reader(BufReader::new(file)).map_err(Into::into))
+        .transpose()
 }
 
 #[cfg(test)]
@@ -753,7 +768,10 @@ mod tests {
         assert!(MarketIngress::open(temp.path(), changed.clone()).is_err());
         assert!(backup_manifest(temp.path(), &policy.source, &policy.product).is_err());
         fs::remove_file(
-            product_dir(temp.path(), &policy.source, &policy.product).join("access.json"),
+            wal_root(temp.path())
+                .join(policy.source.as_str())
+                .join(policy.product.as_str())
+                .join("access.json"),
         )
         .unwrap();
         assert!(MarketIngress::open(temp.path(), changed).is_err());

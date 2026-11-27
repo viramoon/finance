@@ -16,6 +16,7 @@ use super::AsyncTcpMessageBus;
 use crate::connection::{r#async::AsyncConnection, ConnectionMetadata};
 use crate::contracts::tick_types::TickType;
 use crate::contracts::{ContractDetails, OptionChain};
+use crate::market_data::historical::{ExactTickBidAsk, ExactTickLast};
 use crate::market_data::realtime::ExactMarketDepth;
 use crate::messages::{encode_protobuf_message, IncomingMessages, OutgoingMessages, PROTOBUF_MSG_ID};
 use crate::{proto, server_versions, Client, ClientBuilder, Error};
@@ -95,6 +96,31 @@ pub enum MarketWrite {
         /// Whether the request was for aggregated depth.
         smart_depth: bool,
     },
+    /// A historical tick page anchored at one end.
+    HistoricalTicks {
+        /// Identifies callbacks for this request.
+        request_id: Option<i32>,
+        /// Broker contract identity in the request.
+        con_id: Option<i32>,
+        /// Requested routing exchange.
+        exchange: Option<String>,
+        /// Requested contract security type.
+        security_type: Option<String>,
+        /// Optional cursor for a forward page.
+        start: Option<String>,
+        /// Optional cursor for a backward page.
+        end: Option<String>,
+        /// Requested number of ticks before completing the final second.
+        limit: Option<i32>,
+        /// Requested stream token, such as `TRADES` or `BID_ASK`.
+        kind: Option<String>,
+        /// Whether the request is restricted to regular trading hours.
+        regular_hours: bool,
+        /// Whether the request suppresses size-only quote changes.
+        ignore_size: bool,
+    },
+    /// Cancellation of an incomplete historical page.
+    CancelHistoricalTicks(Option<i32>),
     /// A historical bars request and its transmitted selection parameters.
     Historical {
         /// Assigned request ID.
@@ -288,16 +314,61 @@ impl MarketReplay {
 
     /// Inject a global (-1) or request-scoped IB notice, without any real vendor text.
     pub async fn notice(&self, id: i32, code: i32) -> Result<(), Error> {
+        self.notice_text(id, code, "synthetic notice").await
+    }
+
+    /// Deliver a synthetic error or notice with controlled fixture text.
+    pub async fn notice_text(&self, id: i32, code: i32, message: &str) -> Result<(), Error> {
         self.inject(
             IncomingMessages::Error,
             proto::ErrorMessage {
                 id: Some(id),
                 error_code: Some(code),
-                error_msg: Some("synthetic notice".into()),
+                error_msg: Some(message.into()),
                 ..Default::default()
             },
         )
         .await
+    }
+
+    /// Deliver one synthetic trade-data frame and its completion bit.
+    pub async fn historical_trades(&self, request_id: i32, rows: Vec<ExactTickLast>, done: bool) -> Result<(), Error> {
+        let rows = rows.into_iter().map(|row| proto::HistoricalTickLast {
+            time: row.timestamp,
+            tick_attrib_last: Some(proto::TickAttribLast {
+                past_limit: Some(row.tick_attribute_last.past_limit),
+                unreported: Some(row.tick_attribute_last.unreported),
+            }),
+            price: row.price,
+            size: row.size,
+            exchange: row.exchange,
+            special_conditions: row.special_conditions,
+        }).collect();
+        self.inject(IncomingMessages::HistoricalTickLast, proto::HistoricalTicksLast {
+            req_id: Some(request_id),
+            historical_ticks_last: rows,
+            is_done: Some(done),
+        }).await
+    }
+
+    /// Deliver one synthetic bid/ask frame and its completion bit.
+    pub async fn historical_quotes(&self, request_id: i32, rows: Vec<ExactTickBidAsk>, done: bool) -> Result<(), Error> {
+        let rows = rows.into_iter().map(|row| proto::HistoricalTickBidAsk {
+            time: row.timestamp,
+            tick_attrib_bid_ask: Some(proto::TickAttribBidAsk {
+                bid_past_low: Some(row.tick_attribute_bid_ask.bid_past_low),
+                ask_past_high: Some(row.tick_attribute_bid_ask.ask_past_high),
+            }),
+            price_bid: row.price_bid,
+            price_ask: row.price_ask,
+            size_bid: row.size_bid,
+            size_ask: row.size_ask,
+        }).collect();
+        self.inject(IncomingMessages::HistoricalTickBidAsk, proto::HistoricalTicksBidAsk {
+            req_id: Some(request_id),
+            historical_ticks_bid_ask: rows,
+            is_done: Some(done),
+        }).await
     }
 
     /// Inject a request-scoped actual market type callback in its generated Protobuf representation.
@@ -530,6 +601,8 @@ fn decode_write(frame: &[u8]) -> MarketWrite {
     const CANCEL: i32 = OutgoingMessages::CancelMarketData as i32;
     const SUBSCRIBE_DEPTH: i32 = OutgoingMessages::RequestMarketDepth as i32;
     const CANCEL_DEPTH: i32 = OutgoingMessages::CancelMarketDepth as i32;
+    const HISTORICAL_TICKS: i32 = OutgoingMessages::RequestHistoricalTicks as i32;
+    const CANCEL_HISTORICAL_TICKS: i32 = OutgoingMessages::CancelHistoricalTicks as i32;
     const HISTORICAL: i32 = OutgoingMessages::RequestHistoricalData as i32;
     match kind {
         ACCOUNTS => MarketWrite::Accounts,
@@ -587,6 +660,23 @@ fn decode_write(frame: &[u8]) -> MarketWrite {
                 smart_depth: request.is_smart_depth.unwrap_or_default(),
             }
         }
+        HISTORICAL_TICKS => {
+            let request = proto::HistoricalTicksRequest::decode(body).unwrap();
+            let contract = request.contract.unwrap();
+            MarketWrite::HistoricalTicks {
+                request_id: request.req_id,
+                con_id: contract.con_id,
+                exchange: contract.exchange,
+                security_type: contract.sec_type,
+                start: request.start_date_time,
+                end: request.end_date_time,
+                limit: request.number_of_ticks,
+                kind: request.what_to_show,
+                regular_hours: request.use_rth.unwrap_or_default(),
+                ignore_size: request.ignore_size.unwrap_or_default(),
+            }
+        }
+        CANCEL_HISTORICAL_TICKS => MarketWrite::CancelHistoricalTicks(proto::CancelHistoricalTicks::decode(body).unwrap().req_id),
         HISTORICAL => {
             let request = proto::HistoricalDataRequest::decode(body).unwrap();
             let contract = request.contract.unwrap_or_default();

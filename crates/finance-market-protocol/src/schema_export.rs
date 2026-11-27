@@ -7,6 +7,8 @@ use utoipa::ToSchema;
 
 /// Context observations reserved for the v2.0 event envelope.
 pub const V2_CONTEXT_KINDS: [&str; 3] = ["perpetual_context", "funding_rate", "open_interest"];
+/// Historical option observations reserved for the v3.0 event envelope.
+pub const V3_OPTION_HISTORY_KINDS: [&str; 2] = ["option_history_trade", "option_history_quote"];
 /// Controls shared by the v1.0 and v2.0 event envelopes.
 pub const CONTROL_KINDS: [&str; 4] = ["gap", "reset", "heartbeat", "status"];
 
@@ -81,40 +83,68 @@ pub fn event_schema_for_version(id: &str, version: SchemaVersion) -> Result<Valu
             let kind = branch["properties"]["kind"]["enum"][0]
                 .as_str()
                 .unwrap_or_default();
-            CONTROL_KINDS.contains(&kind)
-                || V2_CONTEXT_KINDS.contains(&kind) == (version == SchemaVersion::V2)
+            match version {
+                SchemaVersion::V1 => {
+                    !V2_CONTEXT_KINDS.contains(&kind) && !V3_OPTION_HISTORY_KINDS.contains(&kind)
+                }
+                SchemaVersion::V2 => {
+                    CONTROL_KINDS.contains(&kind) || V2_CONTEXT_KINDS.contains(&kind)
+                }
+                SchemaVersion::V3 => V3_OPTION_HISTORY_KINDS.contains(&kind),
+            }
         });
 
     let defs = root["$defs"]
         .as_object_mut()
         .ok_or("missing event definitions")?;
-    match version {
-        SchemaVersion::V1 => {
-            for name in ["PerpetualContext", "FundingRate", "OpenInterest"] {
-                defs.remove(name);
-            }
-            defs["Message"]["description"] =
-                "The version 1.0 kind tag and its corresponding payload.".into();
+    if version != SchemaVersion::V3 {
+        for name in [
+            "OptionHistoryBatch",
+            "OptionHistoryQuote",
+            "OptionHistoryTrade",
+        ] {
+            defs.remove(name);
         }
-        SchemaVersion::V2 => {
-            for name in [
-                "AssetKind",
-                "BookDelta",
-                "BookLevel",
-                "BookSide",
-                "BookSnapshot",
-                "BookUpdate",
-                "ClosedBar",
-                "Correction",
-                "MarketMessage",
-                "Trade",
-                "TradeSide",
-            ] {
-                defs.remove(name);
-            }
-            root["allOf"][1]["properties"]["asset_kind"] = json!({"const": "perpetual"});
-            root["allOf"][1]["properties"]["revision"] = json!({"const": "0"});
+    }
+    if version != SchemaVersion::V2 {
+        for name in ["PerpetualContext", "FundingRate", "OpenInterest"] {
+            defs.remove(name);
         }
+    }
+    if version == SchemaVersion::V3 {
+        for name in ["ConnectionState", "Gap", "Heartbeat", "Reset", "Status"] {
+            defs.remove(name);
+        }
+    }
+    if version == SchemaVersion::V1 {
+        defs["Message"]["description"] =
+            "The version 1.0 kind tag and its corresponding payload.".into();
+    } else {
+        for name in [
+            "AssetKind",
+            "BookDelta",
+            "BookLevel",
+            "BookSide",
+            "BookSnapshot",
+            "BookUpdate",
+            "ClosedBar",
+            "Correction",
+            "MarketMessage",
+            "Trade",
+            "TradeSide",
+        ] {
+            defs.remove(name);
+        }
+        let asset = if version == SchemaVersion::V2 {
+            "perpetual"
+        } else {
+            "option"
+        };
+        root["allOf"][1]["properties"]["asset_kind"] = json!({"const": asset});
+        root["allOf"][1]["properties"]["revision"] = json!({"const": "0"});
+    }
+    if version == SchemaVersion::V3 {
+        root["allOf"][1]["properties"]["exchange_ts"] = json!({"$ref": "#/$defs/U64Text"});
     }
     Ok(root)
 }
