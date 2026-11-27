@@ -70,6 +70,13 @@ class MarketProjectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ProjectionError, message):
             self.latest(self.first)
 
+    def test_projection_writes_and_reads_a_committed_batch(self):
+        self.assertEqual(self.project(MemoryWal(self.first)), 1)
+        self.assertEqual(self.watermark(), "1")
+        partition, = self.partitions()
+        self.assertTrue(partition.path.is_file())
+        self.assertEqual(self.latest(self.first), self.first)
+
     def test_projection_readers_reject_directory_and_file_symlinks(self):
         self.project(MemoryWal(self.first))
         partition, = self.partitions()

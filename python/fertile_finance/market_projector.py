@@ -478,7 +478,7 @@ def _checked_read_path(path: Path, expected_type) -> bool:
     return True
 
 
-def _reject_checkout(path: Path) -> None:
+def _reject_checkout_path(path: Path) -> None:
     marker = path / ".git"
     try:
         mode = marker.lstat().st_mode
@@ -494,7 +494,7 @@ def _read_root(data_root: Path) -> Path:
     _checked_read_path(data_root, stat.S_ISDIR)
     root = data_root.resolve()
     for directory in (root, *root.parents):
-        _reject_checkout(directory)
+        _reject_checkout_path(directory)
     return root
 
 
@@ -504,7 +504,7 @@ def _read_directory(root: Path, directory: Path) -> bool:
         path /= component
         if not _checked_read_path(path, stat.S_ISDIR):
             return False
-        _reject_checkout(path)
+        _reject_checkout_path(path)
     return True
 
 

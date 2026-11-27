@@ -82,3 +82,5 @@ Parquet schema 版本 `finance.market_projection.version=1`。文件含 WAL 位�
 finance-api 可查询已获准落盘的产品、WAL 持久前缀、水位和缺口。投影查询使用 SQLite v1 索引定位已提交的原事件或最新更正，再从 WAL 读取信封及其许可。传入 `through` 可固定 WAL 翻页截点，`projected_through` 则表示该次查询读取的投影提交水位。[REST 首批读契约](api.md#首批读契约)
 
 Python 和 Rust 的投影读取要求数据根位于 Git 工作树之外。数据根本身及其下方的投影目录、SQLite 索引及附属文件、Parquet 分区和水位文件使用实际目录和普通文件。读取端拒绝符号链接，包括悬空链接，普通文件的原子替换仍可读取。Python 抛出 `ProjectionError`。HTTP 返回 500 `market_storage_error` 并说明路径限制，响应省略本地路径。部署时由可信进程管理数据根和投影目录，发布在同一目录内通过普通文件的原子重命名完成。
+
+Rust 水位读取沿配置的数据根路径逐级打开目录，并拒绝数据根的父路径中的符号链接。进程内查询通过采集器已打开的 WAL 目录读取持久位置。
