@@ -72,7 +72,7 @@ True
 | Hyperliquid / Binance K 线 | 单次窗口上限分别为 5,000 / 1,000 根。Hyperliquid 只提供最近约 5,000 根，分钟线约 3 天半，远端保留期以实际返回为准。Binance 三个标的 30 天分钟线约 132 个请求。先试一天，用请求数和实际响应耗时估算。 |
 | Binance 逐笔 | 每个标的每个可用 UTC 日获取校验和及 ZIP。下载、解压和 Parquet 时间取决于成交量与带宽，先试最近已归档的一个 UTC 日。 |
 
-IBKR 历史任务使用 [paper 连接保护](integrations/ib.md) 及 probe client ID（默认 91），须与 probe 错开。一个 Gateway 的所有 F11 请求应使用同一配置数据根，以使用同一持久 pacing 锁。与实时 collector 回补等其他历史请求错开，避免共享 Gateway 的请求额度叠加。Rust 直连入口为 `finance-ib historical-minute --allow-download SYMBOL START_UNIX END_UNIX`，以 UTC 秒接收 `(START_UNIX, END_UNIX]` 的闭合时间范围。缺少授权参数时在读取连接配置前退出。成功输出一个 JSON 对象，`precision` 是转换口径，`bars` 是闭合 bar 数组。Linux 下使用单调时钟、启动标识和磁盘预约跨进程限速。单次历史读取限时 45 秒，请求失败后从批任务游标重跑。
+IBKR 历史任务使用 [paper 连接保护](integrations/ib.md) 及 probe client ID（默认 91），须与 probe 和 [F12 期权历史读取](option-history.md) 错开。一个 Gateway 的 F11 与 F12 请求使用同一配置数据根，共用持久 pacing 锁。与实时 collector 回补等其他历史请求错开，避免共享 Gateway 的请求额度叠加。Rust 直连入口为 `finance-ib historical-minute --allow-download SYMBOL START_UNIX END_UNIX`，以 UTC 秒接收 `(START_UNIX, END_UNIX]` 的闭合时间范围。缺少授权参数时在读取连接配置前退出。成功输出一个 JSON 对象，`precision` 是转换口径，`bars` 是闭合 bar 数组。Linux 下使用单调时钟、启动标识和磁盘预约跨进程限速。单次历史读取限时 45 秒，请求失败后从批任务游标重跑。
 
 真实 Gateway 的集成测试 `opt_in_paper_historical_minute` 默认忽略。仅在获准部署上设置 `IB_HISTORY_PAPER_TEST=1`，在 `IB_HISTORY_START_UNIX`、`IB_HISTORY_END_UNIX` 中填入已闭合且有成交的 SPY 常规交易时段，再运行 `cargo test --locked -p finance-ib --test paper_historical_minute opt_in_paper_historical_minute -- --ignored --exact`。准备已登录的只读 paper Gateway 和已存在的外部 `FERTILE_DATA_ROOT`。
 

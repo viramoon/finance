@@ -207,6 +207,14 @@ curl -sS http://127.0.0.1:8081/api/v1/market/status
 
 在获准采集并落盘的部署上，使用 [历史价量批任务](docs/historical-pull.md) 拉取九只美股日线和 IBKR paper 只读分钟线、BTC/ETH/SOL 公共 K 线及 Binance Spot 逐笔归档。命令需显式授权，Binance 默认关闭。使用独立于工作树的配置数据根，记录 JSON 的水位和缺口，失败后用同一参数续拉。与 Gateway 的其他历史请求错开。来源口径、命令、退出状态和耗时估算见批任务文档。
 
+### 离线验证历史期权链
+
+在已准备好锁定的 Rust 工具链和依赖缓存后运行 `cargo test -p finance-collector --test option_history --locked --offline`。测试通过 F9a 接口的合成替身核对合约确认、历史请求和到期行为。真实读取仅使用已验证的只读 paper 会话，并与 F11 使用同一数据根以共用历史请求节流。权限或连接错误按单合约返回。
+
+运行 `cargo test -p finance-ib --lib verified_paper_option_history_requests_and_decodes_synthetic_bars --locked --offline`，在内存传输上验证生产历史请求的发出、解码与到期阻断。
+
+Databento 缺省禁用，即使配置估算常量也只进行离线估算。取得注明日期和来源的按量费率后才能用于预算。启用任何真实 Databento 请求之前须由 vira 确认费用、预算和数据用途授权。[历史期权链](docs/option-history.md)
+
 ### 隔离验收配置策略作业
 
 使用源码构建的 Python 环境从仓库根运行以下测试。测试在临时数据根生成合成日线，通过 Axum 路由提交并在独立 worker 中执行，再查询结果。无需启动常驻服务或绑定端口。

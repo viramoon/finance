@@ -38,6 +38,7 @@ fertile 以 git submodule 引入 finance、web、frontend，agent 单独维护�
 - [IBKR 接入](integrations/ib.md)
 - [Binance 公共行情适配](integrations/binance.md)
 - [Hyperliquid 公共永续行情](integrations/hyperliquid.md)
+- [历史期权链与 OPRA 费用估算](option-history.md)
 - [HTTP 与代码导出](api.md)
 - [行情标的、事件与流协议](market-protocol.md)
 - [历史价量补拉与逐笔归档](historical-pull.md)

@@ -20,6 +20,9 @@ use crate::market_data::realtime::ExactMarketDepth;
 use crate::messages::{encode_protobuf_message, IncomingMessages, OutgoingMessages, PROTOBUF_MSG_ID};
 use crate::{proto, server_versions, Client, ClientBuilder, Error};
 
+/// A synthetic history message row in the SDK's generated wire format.
+pub use crate::proto::HistoricalDataBar as ReplayHistoricalBar;
+
 /// One successfully written market data operation, decoded from an outbound frame.
 #[derive(Debug, Eq, PartialEq)]
 pub enum MarketWrite {
@@ -91,6 +94,35 @@ pub enum MarketWrite {
         request_id: Option<i32>,
         /// Whether the request was for aggregated depth.
         smart_depth: bool,
+    },
+    /// A historical bars request and its transmitted selection parameters.
+    Historical {
+        /// Assigned request ID.
+        request_id: Option<i32>,
+        /// Contract ID.
+        con_id: Option<i32>,
+        /// IB security type.
+        sec_type: Option<String>,
+        /// Routed exchange.
+        exchange: Option<String>,
+        /// Settlement currency.
+        currency: Option<String>,
+        /// Whether expired contracts are included.
+        include_expired: bool,
+        /// Page anchor in IB's timestamp format.
+        end: Option<String>,
+        /// Page duration.
+        duration: Option<String>,
+        /// Bar granularity.
+        bar_size: Option<String>,
+        /// Source data type.
+        what_to_show: Option<String>,
+        /// Whether only regular trading hours were requested.
+        use_rth: bool,
+        /// Requested timestamp encoding.
+        format_date: Option<i32>,
+        /// Whether to keep streaming bar updates after the history page.
+        keep_up_to_date: bool,
     },
 }
 
@@ -209,6 +241,27 @@ impl MarketReplay {
     pub async fn contract_data_end(&self, request_id: i32) -> Result<(), Error> {
         self.inject(IncomingMessages::ContractDataEnd, proto::ContractDataEnd { req_id: Some(request_id) })
             .await
+    }
+
+    /// Answer a one-shot history request with a synthetic page and its end marker.
+    pub async fn historical_bars(&self, request_id: i32, bars: Vec<ReplayHistoricalBar>, start: &str, end: &str) -> Result<(), Error> {
+        self.inject(
+            IncomingMessages::HistoricalData,
+            proto::HistoricalData {
+                req_id: Some(request_id),
+                historical_data_bars: bars,
+            },
+        )
+        .await?;
+        self.inject(
+            IncomingMessages::HistoricalDataEnd,
+            proto::HistoricalDataEnd {
+                req_id: Some(request_id),
+                start_date_str: Some(start.into()),
+                end_date_str: Some(end.into()),
+            },
+        )
+        .await
     }
 
     /// Answer an explicit managed-account request with synthetic identities.
@@ -477,6 +530,7 @@ fn decode_write(frame: &[u8]) -> MarketWrite {
     const CANCEL: i32 = OutgoingMessages::CancelMarketData as i32;
     const SUBSCRIBE_DEPTH: i32 = OutgoingMessages::RequestMarketDepth as i32;
     const CANCEL_DEPTH: i32 = OutgoingMessages::CancelMarketDepth as i32;
+    const HISTORICAL: i32 = OutgoingMessages::RequestHistoricalData as i32;
     match kind {
         ACCOUNTS => MarketWrite::Accounts,
         SERVER_TIME => MarketWrite::ServerTime,
@@ -531,6 +585,25 @@ fn decode_write(frame: &[u8]) -> MarketWrite {
             MarketWrite::CancelDepth {
                 request_id: request.req_id,
                 smart_depth: request.is_smart_depth.unwrap_or_default(),
+            }
+        }
+        HISTORICAL => {
+            let request = proto::HistoricalDataRequest::decode(body).unwrap();
+            let contract = request.contract.unwrap_or_default();
+            MarketWrite::Historical {
+                request_id: request.req_id,
+                con_id: contract.con_id,
+                sec_type: contract.sec_type,
+                exchange: contract.exchange,
+                currency: contract.currency,
+                include_expired: contract.include_expired.unwrap_or_default(),
+                end: request.end_date_time,
+                duration: request.duration,
+                bar_size: request.bar_size_setting,
+                what_to_show: request.what_to_show,
+                use_rth: request.use_rth.unwrap_or_default(),
+                format_date: request.format_date,
+                keep_up_to_date: request.keep_up_to_date.unwrap_or_default(),
             }
         }
         _ => panic!("unexpected outgoing message in market replay: {kind}"),

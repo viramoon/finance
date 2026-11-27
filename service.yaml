@@ -178,4 +178,12 @@ nasdaq_totalview:
   output: private_session_display
   persistence: disabled
   documentation: docs/integrations/ib.md#nasdaq-totalview-场所深度
+library_interfaces:
+  option_history:
+    entry: finance_collector::option_history
+    ibkr: f9a_verified_paper_market
+    pacing_state: finance-state/historical # 与 F11 共用数据根
+    databento_opra: disabled_without_estimate_config
+    databento_network: false
+    documentation: docs/option-history.md
 runbook: RUNBOOK.md

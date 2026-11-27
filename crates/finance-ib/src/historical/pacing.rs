@@ -59,13 +59,13 @@ impl Reservation {
     }
 }
 
-pub(super) struct Pacer {
+pub(crate) struct Pacer {
     dir: PathBuf,
     _lock: File,
 }
 
 impl Pacer {
-    pub(super) async fn acquire(root: &Path) -> Result<Self> {
+    pub(crate) async fn acquire(root: &Path) -> Result<Self> {
         let dir = state_dir(root)?;
         let lock = File::from(
             open(
@@ -89,7 +89,7 @@ impl Pacer {
         }
     }
 
-    pub(super) async fn wait(&self) -> Result<()> {
+    pub(crate) async fn wait(&self) -> Result<()> {
         let delay = self.delay_at(&Stamp::now()?)?;
         tokio::time::sleep(delay).await;
         Ok(())
@@ -115,11 +115,11 @@ impl Pacer {
         Ok(previous.wait_at(now))
     }
 
-    pub(super) fn begin(&self) -> Result<()> {
+    pub(crate) fn begin(&self) -> Result<()> {
         self.save(&Reservation::Pending)
     }
 
-    pub(super) fn finish(&self) -> Result<()> {
+    pub(crate) fn finish(&self) -> Result<()> {
         self.save(&Reservation::Completed(Stamp::now()?))
     }
 

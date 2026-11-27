@@ -145,6 +145,8 @@ finance 合并后，web 先固定 `openapi/finance.commit` 的完整 SHA，从�
 
 历史价量补拉通过本地命令运行。入口、JSON 运行报告和 Parquet 目录见批任务文档。[历史价量批任务](historical-pull.md)
 
+历史期权读取与 OPRA 费用估算通过 collector 的 Rust 库调用。IBKR 读取使用 `IbkrOptionHistory` 和 F9a 的只读 `PaperMarket` 会话，分别返回 `Expired`、`NoBars` 和请求错误。HTTP 与行情流的对外接口留待后续接入。[历史期权链](option-history.md)
+
 ## 历史回测与提交确认
 
 GET /api/v1/backtests/datasets 返回具名日线 catalog 的可选标的、来源和日期范围。POST /api/v1/backtests 接受 `SmaCrossover`、一个已导入的 `instrument`、UTC 午夜的 `start` / `end`，以及整数 `fast_period`、`slow_period`、`shares`。要求 `2 ≤ fast_period < slow_period ≤ 250` 与 `1 ≤ shares ≤ 1000`。研究结果的 `research` 字段含数据血缘、执行模型、覆盖与成交审计。无匹配 catalog 的新请求返回 422。缺失会话或 warmup 不够的作业进入失败终态，错误码为 `missing_sessions` 或 `insufficient_history`。不替换为示例数据。

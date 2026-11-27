@@ -182,6 +182,25 @@ def hyperliquid():
     }
 
 
+def option_bars():
+    origin = 1_741_363_200_000_000_000
+    minute = 60_000_000_000
+    return json.dumps([
+        {
+            "close_ts": str(origin + (slot + 1) * minute),
+            "data": {
+                "open_ts": str(origin + slot * minute),
+                "open": "1.200000000000000001",
+                "high": "1.4000",
+                "low": "1.1000",
+                "close": "1.300000000000000001",
+                "volume": str(9_007_199_254_740_993 + slot),
+            },
+        }
+        for slot in (1, -1, 2, 0, 0)
+    ], indent=2) + "\n"
+
+
 def fixtures():
     ibm_events = ''',
         "events": {
@@ -236,6 +255,7 @@ def fixtures():
         **binance(),
         **{f"tests/fixtures/historical/{name}": text for name, text in historical.items()},
         **hyperliquid(),
+        "tests/fixtures/option-history/ibkr-trade-bars.json": option_bars(),
         "config/collector/replay.csv": rows(
             ("open", "high", "low", "close", "volume"),
             ("591.123456789", "591.220000000", "591.010000000", "591.131234567", "153"),

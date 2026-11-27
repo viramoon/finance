@@ -145,6 +145,12 @@
       "seed": "fixed",
       "source": "固定模拟断线后的早到旧簿、新簿、成交 ID 重叠及缺省方向。运行 generate_synthetic_fixtures.py OUTPUT 重建。"
     },
+    "tests/fixtures/option-history/ibkr-trade-bars.json": {
+      "sha256": "8a1c3d1e5ad31edcd7bb3c3075e4d5a74a6709e3e5d7109647471127b1b16e34",
+      "generator": "scripts/generate_synthetic_fixtures.py",
+      "seed": "fixed",
+      "source": "用固定 UTC 分钟偏移和手写十进制行情生成窄接口的回放输入，覆盖乱序、相同重复、查询范围之外的 bar 与长小数和大成交量。"
+    },
     "third_party/ibapi/src/messages.rs": {
       "sha256": "19fde85e7334259832948e61b5ba2c2e07770b605328a7364d1f751e6fceedc6",
       "generator": "scripts/export-ib-review-sources.sh",

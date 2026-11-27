@@ -46,6 +46,37 @@ wire_object! {
     }
 }
 
+impl ClosedBar {
+    /// Validate a closed bar before placing it in an event or returning it from history.
+    pub fn validate_at_close(&self, close_ts: U64Text) -> Result<(), ValidationError> {
+        self.validate_with_path(close_ts, "bar")
+    }
+
+    fn validate_with_path(&self, close_ts: U64Text, path: &str) -> Result<(), ValidationError> {
+        require(
+            self.open_ts < close_ts,
+            format!("{path}.open_ts"),
+            "must be before the bar close exchange_ts",
+        )?;
+        let (open, high, low, close) = (
+            self.open.value(),
+            self.high.value(),
+            self.low.value(),
+            self.close.value(),
+        );
+        require(
+            low <= open.min(close) && high >= open.max(close),
+            path,
+            "bar low/high must enclose open and close",
+        )?;
+        require(
+            self.volume.value() >= Decimal::ZERO,
+            format!("{path}.volume"),
+            "must be nonnegative",
+        )
+    }
+}
+
 wire_object! {
     pub struct Trade {
         pub price: DecimalText,
@@ -616,29 +647,7 @@ impl MarketPayload<'_> {
 
     fn validate(&self, exchange_ts: U64Text, path: &str) -> Result<(), ValidationError> {
         match self {
-            Self::BarClosed(bar) => {
-                require(
-                    bar.open_ts < exchange_ts,
-                    format!("{path}.open_ts"),
-                    "must be before the bar close exchange_ts",
-                )?;
-                let (open, high, low, close) = (
-                    bar.open.value(),
-                    bar.high.value(),
-                    bar.low.value(),
-                    bar.close.value(),
-                );
-                require(
-                    low <= open.min(close) && high >= open.max(close),
-                    path,
-                    "bar low/high must enclose open and close",
-                )?;
-                require(
-                    bar.volume.value() >= Decimal::ZERO,
-                    format!("{path}.volume"),
-                    "must be nonnegative",
-                )
-            }
+            Self::BarClosed(bar) => bar.validate_with_path(exchange_ts, path),
             Self::Trade(trade) => require(
                 trade.quantity.value() > Decimal::ZERO,
                 format!("{path}.quantity"),
