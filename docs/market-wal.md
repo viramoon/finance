@@ -79,6 +79,8 @@ WAL 段、写锁和写入或恢复时读取的元数据须为单链接普通文�
 
 Parquet schema 版本 `finance.market_projection.version=1`。文件含 WAL 位置、F1 产品、流、标的、种类、epoch、seq、revision、三个时钟、修订目标以及 `event_json`。位置、序号和时钟列为精确 `uint64`，行情价格与数量保存在 `event_json` 的原始十进制字符串中。读取端用 `projected_partitions(data_root, source, product)` 按 SQLite 已提交的范围枚举 Parquet。用 `read_latest_event(data_root, source, product, channel, instrument_id, epoch, seq)` 读取某原始位置的原事件或最新更正信封。需要重建时先停止该产品投影，保留旧投影供核对，在隔离根从已恢复的 WAL 重新投影。
 
+重放校验与 `read_latest_event` 通过已打开的文件同步读取单个分区，关闭预读与并行列解码。最新事件查询只读取 `wal_position` 和 `event_json` 两列，按 SQLite 索引给出的精确 `uint64` 位置匹配。位置缺失或重复均抛出 `ProjectionError`。同步读取让 Python 文件和缓冲区的清理在解释器退出前完成，避免 Arrow Dataset 后台线程在退出期间尝试获取 GIL。
+
 finance-api 可查询已获准落盘的产品、WAL 持久前缀、水位和缺口。投影查询使用 SQLite v1 索引定位已提交的原事件或最新更正，再从 WAL 读取信封及其许可。传入 `through` 可固定 WAL 翻页截点，`projected_through` 则表示该次查询读取的投影提交水位。[REST 首批读契约](api.md#首批读契约)
 
 Python 和 Rust 的投影读取要求数据根位于 Git 工作树之外。数据根本身及其下方的投影目录、SQLite 索引及附属文件、Parquet 分区和水位文件使用实际目录和普通文件。读取端拒绝符号链接，包括悬空链接，普通文件的原子替换仍可读取。Python 抛出 `ProjectionError`。HTTP 返回 500 `market_storage_error` 并说明路径限制，响应省略本地路径。部署时由可信进程管理数据根和投影目录，发布在同一目录内通过普通文件的原子重命名完成。

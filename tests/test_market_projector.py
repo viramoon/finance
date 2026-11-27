@@ -77,6 +77,19 @@ class MarketProjectionTests(unittest.TestCase):
         self.assertTrue(partition.path.is_file())
         self.assertEqual(self.latest(self.first), self.first)
 
+    def test_latest_event_requires_a_unique_wal_position_in_the_partition(self):
+        self.project(MemoryWal(self.first, self.second))
+        partition, = self.partitions()
+        with pq.ParquetFile(partition.path) as reader:
+            table = reader.read()
+        self.assertEqual(self.latest(self.second), self.second)
+
+        for indices in ([0], [0, 1, 1]):
+            with self.subTest(indices=indices):
+                pq.write_table(table.take(indices), partition.path)
+                with self.assertRaisesRegex(ProjectionError, "no unique WAL position 0*2$"):
+                    self.latest(self.second)
+
     def test_projection_readers_reject_directory_and_file_symlinks(self):
         self.project(MemoryWal(self.first))
         partition, = self.partitions()
