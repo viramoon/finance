@@ -32,8 +32,12 @@ use tokio::{
     time::{Instant, timeout},
 };
 
-/// A verified paper session with streaming L1 access. Obtain it from the
-/// connection manager so account verification precedes market requests.
+#[path = "../depth/transport.rs"]
+mod depth_transport;
+pub use depth_transport::PaperDepthSubscription;
+
+/// A verified paper session for L1 and Nasdaq venue depth.
+/// The connection manager verifies the account before creating this handle.
 pub struct PaperMarket {
     peer: Arc<PaperPeer>,
     timeout: Duration,

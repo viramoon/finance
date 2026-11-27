@@ -166,6 +166,10 @@ pub(crate) trait StreamDecoder<T> {
     #[allow(dead_code)]
     const RESPONSE_MESSAGE_IDS: &'static [IncomingMessages] = &[];
 
+    /// Ordered deltas cannot be decoded correctly after a dropped message.
+    #[cfg(feature = "async")]
+    const REQUIRES_COMPLETE_SEQUENCE: bool = false;
+
     /// Decode a response message into the stream's data type
     fn decode(context: &DecoderContext, message: &mut ResponseMessage) -> Result<T, Error>;
 

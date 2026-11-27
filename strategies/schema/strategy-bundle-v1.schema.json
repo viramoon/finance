@@ -172,6 +172,269 @@
                     "minItems": 0,
                     "type": "array"
                   },
+                  "output": {
+                    "enum": [
+                      "value"
+                    ]
+                  },
+                  "params": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "period": {
+                        "maximum": 2520,
+                        "minimum": 1,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "period"
+                    ],
+                    "type": "object"
+                  },
+                  "use": {
+                    "const": "indicator.atr@1.0.0"
+                  }
+                },
+                "required": [
+                  "use",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "depends_on": {
+                    "items": {
+                      "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+                      "type": "string"
+                    },
+                    "minItems": 0,
+                    "type": "array"
+                  },
+                  "output": {
+                    "enum": [
+                      "middle",
+                      "upper",
+                      "lower"
+                    ]
+                  },
+                  "params": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "period": {
+                        "maximum": 2520,
+                        "minimum": 1,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "period"
+                    ],
+                    "type": "object"
+                  },
+                  "use": {
+                    "const": "indicator.bollinger@1.0.0"
+                  }
+                },
+                "required": [
+                  "use",
+                  "params",
+                  "output"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "depends_on": {
+                    "items": {
+                      "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+                      "type": "string"
+                    },
+                    "minItems": 0,
+                    "type": "array"
+                  },
+                  "output": {
+                    "enum": [
+                      "value"
+                    ]
+                  },
+                  "params": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "period": {
+                        "maximum": 2520,
+                        "minimum": 1,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "period"
+                    ],
+                    "type": "object"
+                  },
+                  "use": {
+                    "const": "indicator.close_return@1.0.0"
+                  }
+                },
+                "required": [
+                  "use",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "depends_on": {
+                    "items": {
+                      "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+                      "type": "string"
+                    },
+                    "minItems": 0,
+                    "type": "array"
+                  },
+                  "output": {
+                    "enum": [
+                      "value"
+                    ]
+                  },
+                  "params": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "period": {
+                        "maximum": 2520,
+                        "minimum": 1,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "period"
+                    ],
+                    "type": "object"
+                  },
+                  "use": {
+                    "const": "indicator.ema@1.0.0"
+                  }
+                },
+                "required": [
+                  "use",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "depends_on": {
+                    "items": {
+                      "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+                      "type": "string"
+                    },
+                    "minItems": 0,
+                    "type": "array"
+                  },
+                  "output": {
+                    "enum": [
+                      "macd",
+                      "signal",
+                      "histogram"
+                    ]
+                  },
+                  "params": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "fast_period": {
+                        "maximum": 2520,
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "signal_period": {
+                        "maximum": 2520,
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "slow_period": {
+                        "maximum": 2520,
+                        "minimum": 2,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "fast_period",
+                      "slow_period",
+                      "signal_period"
+                    ],
+                    "type": "object"
+                  },
+                  "use": {
+                    "const": "indicator.macd@1.0.0"
+                  }
+                },
+                "required": [
+                  "use",
+                  "params",
+                  "output"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "depends_on": {
+                    "items": {
+                      "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+                      "type": "string"
+                    },
+                    "minItems": 0,
+                    "type": "array"
+                  },
+                  "output": {
+                    "enum": [
+                      "value"
+                    ]
+                  },
+                  "params": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "period": {
+                        "maximum": 2520,
+                        "minimum": 2,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "period"
+                    ],
+                    "type": "object"
+                  },
+                  "use": {
+                    "const": "indicator.realized_volatility@1.0.0"
+                  }
+                },
+                "required": [
+                  "use",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "depends_on": {
+                    "items": {
+                      "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+                      "type": "string"
+                    },
+                    "minItems": 0,
+                    "type": "array"
+                  },
+                  "output": {
+                    "enum": [
+                      "value"
+                    ]
+                  },
                   "params": {
                     "additionalProperties": false,
                     "properties": {
@@ -192,6 +455,118 @@
                   },
                   "use": {
                     "const": "indicator.rsi_wilder@1.0.0"
+                  }
+                },
+                "required": [
+                  "use",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "depends_on": {
+                    "items": {
+                      "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+                      "type": "string"
+                    },
+                    "minItems": 0,
+                    "type": "array"
+                  },
+                  "output": {
+                    "enum": [
+                      "value"
+                    ]
+                  },
+                  "params": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "period": {
+                        "maximum": 2520,
+                        "minimum": 1,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "period"
+                    ],
+                    "type": "object"
+                  },
+                  "use": {
+                    "const": "indicator.sma@1.0.0"
+                  }
+                },
+                "required": [
+                  "use",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "depends_on": {
+                    "items": {
+                      "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+                      "type": "string"
+                    },
+                    "minItems": 0,
+                    "type": "array"
+                  },
+                  "output": {
+                    "enum": [
+                      "value"
+                    ]
+                  },
+                  "params": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "period": {
+                        "maximum": 2520,
+                        "minimum": 1,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "period"
+                    ],
+                    "type": "object"
+                  },
+                  "use": {
+                    "const": "indicator.volume_sma@1.0.0"
+                  }
+                },
+                "required": [
+                  "use",
+                  "params"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "depends_on": {
+                    "items": {
+                      "pattern": "^(?:[A-Za-z][A-Za-z0-9_-]{0,63})(?![\\s\\S])",
+                      "type": "string"
+                    },
+                    "minItems": 0,
+                    "type": "array"
+                  },
+                  "output": {
+                    "enum": [
+                      "value"
+                    ]
+                  },
+                  "params": {
+                    "additionalProperties": false,
+                    "properties": {},
+                    "required": [],
+                    "type": "object"
+                  },
+                  "use": {
+                    "const": "indicator.vwap@1.0.0"
                   }
                 },
                 "required": [

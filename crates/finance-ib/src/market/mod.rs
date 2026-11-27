@@ -8,7 +8,7 @@ use finance_market_protocol::DecimalText;
 use serde::Serialize;
 
 pub(crate) use ib::request_notice_kind as market_notice_kind;
-pub use ib::{PaperMarket, option_market_date};
+pub use ib::{PaperDepthSubscription, PaperMarket, option_market_date};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

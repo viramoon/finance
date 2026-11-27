@@ -8,6 +8,8 @@ fertile 的主项目与 submodule，基于 NautilusTrader 的交易与数据系�
 
 `finance_collector::line_budget` 为美股 L1 和 OPRA 提供进程内订阅调度、分批期权链轮询、共享读者和覆盖查询。使用方显式启动调度器，默认分配 9 个股票行、16 个热点期权行、45 个轮换行并预留 30 行。[IBKR 行情线预算](docs/integrations/ib-line-budget.md)
 
+Nasdaq TotalView 提供八只自选标的的场所深度，最多同时钉住两只，另有一个名额跟随当前页面。SPY 保留综合顶档。场所簿仅供授权的会话在内存中展示。接口和权限见 [Nasdaq TotalView 场所深度](docs/integrations/ib.md#nasdaq-totalview-场所深度)。
+
 本地行情链路支持 F1 事件追加、恢复和独立 Parquet 投影，Hyperliquid 公共永续行情已接入。[本地行情 WAL、投影与封段接口](docs/market-wal.md)
 
 finance-api 提供 v1 行情 WAL、投影、水位、缺口及因子研究只读查询，并从代码导出 REST OpenAPI 和版本化 WS/SSE 消息契约。[首批读契约与导出命令](docs/api.md#首批读契约)
@@ -55,6 +57,7 @@ finance/
 - [行情标的、事件与流协议](docs/market-protocol.md)
 - [历史价量补拉与逐笔归档](docs/historical-pull.md)
 - [本地行情 WAL、投影与封段接口](docs/market-wal.md)
+- [统一指标与回放口径](docs/indicators.md)
 - [期权 GEX、gamma wall、flip 与 0DTE 计算接口](docs/option-exposure.md)
 - [StrategyBundle v1 配置与编译](docs/strategy-bundle.md)
 - [离线因子评价与研究登记](docs/factor-research.md)
@@ -93,5 +96,7 @@ curl http://127.0.0.1:8081/api/v1/backtests/sample
 ```
 
 端口默认 8081，配置优先级、错误状态、精确金额与 OpenAPI 导出见 [API 文档](docs/api.md)。示例接口读取 latest.json。提交的作业由 worker 独立执行，collector 的行情状态可在 /api/v1/market/status 查询。
+
+主图通过 `GET /api/v1/market/bars` 查询已发布的 bar 和派生指标。版本、参数、数值域和预览规则见 [统一指标](docs/indicators.md)，数据源接入见 [主图 API](docs/api.md#主图行情与指标)。
 
 `StrategyBundle` 作业用同一编译器接受内联 YAML/JSON 或已登记版本，支持入场/出场与目标权重两类配方。作业锁定本地回放快照，可从结果查看各配方的资金、仓位、净额和成本归因。离线复验方法见 [运行手册](RUNBOOK.md#隔离验收配置策略作业)。

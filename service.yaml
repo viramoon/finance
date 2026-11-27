@@ -98,6 +98,11 @@ processes:
     bind_host: 127.0.0.1
     port: 8081 # FINANCE_API_PORT / config.api.port 可覆盖
     dependencies: [data_root]
+    query_routes:
+      bars: /api/v1/market/bars
+      indicator_registry: /api/v1/indicators
+      indicator_values: /api/v1/indicators/values
+    bars_query_projection: "${FERTILE_DATA_ROOT}/finance-state/bars/v1"
     read_contract:
       version: v1
       documentation: docs/api.md
@@ -154,4 +159,12 @@ ib_line_budget:
   depth_defaults: {pinned: 2, page_focus: 1}
   coverage: memory_only
   documentation: docs/integrations/ib-line-budget.md
+nasdaq_totalview:
+  invocation: in_process_rust_library
+  account: paper_read_only
+  activation: 由共享行情所有者接入，启用前核对综合股票 L1、TotalView-OpenView 和 EDS
+  concurrent_depth: {pinned: 2, page_focus: 1}
+  output: private_session_display
+  persistence: disabled
+  documentation: docs/integrations/ib.md#nasdaq-totalview-场所深度
 runbook: RUNBOOK.md

@@ -121,6 +121,10 @@ pub enum Error {
     #[error("AlreadySubscribed")]
     AlreadySubscribed,
 
+    /// An ordered subscription could not read all its queued messages.
+    #[error("ordered subscription lost {0} messages")]
+    SubscriptionLagged(u64),
+
     /// Wraps errors parsing historical data parameters.
     #[error("HistoricalParseError: {0}")]
     HistoricalParseError(HistoricalParseError),
@@ -265,6 +269,7 @@ impl Clone for Error {
             Error::ResponseLagged(skipped) => Error::ResponseLagged(*skipped),
             Error::Notice(n) => Error::Notice(n.clone()),
             Error::AlreadySubscribed => Error::AlreadySubscribed,
+            Error::SubscriptionLagged(count) => Error::SubscriptionLagged(*count),
             Error::HistoricalParseError(e) => Error::HistoricalParseError(e.clone()),
             Error::ProtobufDecode(e) => Error::ProtobufDecode(e.clone()),
         }
