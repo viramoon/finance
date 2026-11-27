@@ -3,7 +3,7 @@
 use crate::{
     ApiError, AppState, BacktestSummary, ErrorBody,
     bundle_jobs::{self, BundleAdmission, BundleRequestView, BundleSubmission, QueuedBundle},
-    error, research,
+    error, read_store, research,
     strategy_bundle::legacy_sma_parameters_valid,
 };
 use axum::{
@@ -16,8 +16,11 @@ use axum::{
 use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
+use std::path::Path as FsPath;
 use utoipa::ToSchema;
 
+pub(crate) const QUEUE_PATH: &str = "finance-state/backtests/jobs.sqlite3";
+const CANCELLED_ERROR: &str = "job_cancelled";
 const CAPACITY: i64 = 128;
 const LEGACY_REQUEST_BYTES: usize = 8192;
 // Each UTF-8 source byte can expand to at most six bytes in a JSON string.
@@ -178,6 +181,12 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/backtests/by-key", get(by_key))
         .route("/api/v1/strategies", post(bundle_jobs::register))
 }
+
+pub(crate) fn contract_routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/v1/backtests/{id}/cancel", post(cancel))
+        .route("/api/v1/backtests/worker-status", get(worker_status))
+}
 pub(super) fn invalid(message: &str) -> ApiError {
     error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_request", message)
 }
@@ -234,18 +243,7 @@ pub(super) async fn db<T: Send + 'static>(
     op: impl FnOnce(&mut Connection) -> Result<T, ApiError> + Send + 'static,
 ) -> Result<T, ApiError> {
     tokio::task::spawn_blocking(move || {
-        // An absent data root may indicate a missing persistent mount.
-        // Create children one level at a time and never recreate that root.
-        let dir = state.data_root.join("finance-state/backtests");
-        for path in [state.data_root.join("finance-state"), dir.clone()] {
-            match std::fs::create_dir(&path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => {}
-                Err(e) => return Err(storage_error(e)),
-            }
-        }
-        let mut conn = Connection::open(dir.join("jobs.sqlite3")).map_err(storage_error)?;
-        conn.busy_timeout(std::time::Duration::from_secs(3))
+        let mut conn = read_store::open_queue(&state.data_root, FsPath::new(QUEUE_PATH))
             .map_err(storage_error)?;
         conn.execute_batch(include_str!("../../../sql/backtest-queue.sql"))
             .map_err(storage_error)?;
@@ -423,23 +421,123 @@ pub async fn detail(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Job>, ApiError> {
-    let id = id
-        .parse::<i64>()
+    let id = job_id(&id)?;
+    db(state, move |conn| read_job(conn, id).map(Json)).await
+}
+
+fn job_id(id: &str) -> Result<i64, ApiError> {
+    id.parse::<i64>()
         .ok()
         .filter(|i| *i > 0)
-        .ok_or_else(|| invalid("Invalid job id"))?;
+        .ok_or_else(|| invalid("Invalid job id"))
+}
+
+fn read_job(conn: &Connection, id: i64) -> Result<Job, ApiError> {
+    conn.query_row(
+        &format!("SELECT {COLUMNS} FROM jobs WHERE id=?1"),
+        [id],
+        row,
+    )
+    .optional()
+    .map_err(storage_error)?
+    .ok_or_else(|| error(StatusCode::NOT_FOUND, "job_not_found", "No such job"))
+}
+
+/// Cancel a queued or running backtest. Cancellations use the legacy failed
+/// status with a distinct error code so older clients can still decode jobs.
+#[utoipa::path(post, path = "/api/v1/backtests/{id}/cancel", operation_id = "cancel_backtest",
+    params(("id" = i64, Path)), responses(
+    (status=200,body=Job),(status=404,body=ErrorBody),(status=409,body=ErrorBody),
+    (status=422,body=ErrorBody),(status=500,body=ErrorBody)))]
+pub(crate) async fn cancel(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Job>, ApiError> {
+    let id = job_id(&id)?;
     db(state, move |conn| {
-        conn.query_row(
-            &format!("SELECT {COLUMNS} FROM jobs WHERE id=?1"),
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        // Running jobs keep their lease until the worker cleans up. Recovery
+        // also checks older running jobs that were never given a lease.
+        tx.execute(
+            "DELETE FROM job_leases WHERE job_id=?1
+             AND EXISTS (SELECT 1 FROM jobs WHERE id=?1 AND status='queued')",
             [id],
-            row,
         )
-        .optional()
-        .map_err(storage_error)?
-        .map(Json)
-        .ok_or_else(|| error(StatusCode::NOT_FOUND, "job_not_found", "No such job"))
+        .map_err(storage_error)?;
+        tx.execute(
+            "UPDATE jobs SET status='failed',summary=NULL,error=?2
+             WHERE id=?1 AND status IN ('queued','running')",
+            params![id, CANCELLED_ERROR],
+        )
+        .map_err(storage_error)?;
+        let job = read_job(&tx, id)?;
+        if !matches!(job.status, JobStatus::Failed) || job.error.as_deref() != Some(CANCELLED_ERROR)
+        {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "job_already_finished",
+                "Job already finished",
+            ));
+        }
+        tx.commit().map_err(storage_error)?;
+        Ok(Json(job))
     })
     .await
+}
+
+#[derive(Default, Serialize, ToSchema)]
+pub(crate) struct WorkerStatus {
+    /// Whether the queue has been initialized.
+    queue_present: bool,
+    queued: u32,
+    running: u32,
+    /// Running jobs with a lease whose expiry is after as_of.
+    leased_running: u32,
+    /// Running jobs with missing or expired leases. Recovery may still be fenced by a lock.
+    unleased_running: u32,
+    as_of: DateTime<Utc>,
+}
+
+/// Read queue and lease counts. These counts do not report process liveness.
+#[utoipa::path(get, path = "/api/v1/backtests/worker-status", operation_id = "backtest_worker_status",
+    responses((status=200,body=WorkerStatus),(status=500,body=ErrorBody)))]
+pub(crate) async fn worker_status(
+    State(state): State<AppState>,
+) -> Result<Json<WorkerStatus>, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        let mut status = WorkerStatus { as_of: Utc::now(), ..WorkerStatus::default() };
+        let Some(mut conn) = read_store::open(&state.data_root, FsPath::new(QUEUE_PATH)).map_err(storage_error)? else {
+            return Ok(Json(status));
+        };
+        let tx = conn.transaction().map_err(storage_error)?;
+        if !read_store::has_table(&tx, "jobs").map_err(storage_error)? {
+            return Ok(Json(status));
+        }
+        status.queue_present = true;
+        let leases = if read_store::has_table(&tx, "job_leases").map_err(storage_error)? {
+            "job_leases"
+        } else {
+            "(SELECT NULL AS job_id, NULL AS expires_at_ms WHERE 0)"
+        };
+        status.as_of = Utc::now();
+        (status.queued, status.running, status.leased_running) = tx
+            .query_row(
+                &format!(
+                    "SELECT count(*) FILTER (WHERE status='queued'), count(*) FILTER (WHERE status='running'),
+                            count(*) FILTER (WHERE status='running' AND expires_at_ms>?1)
+                     FROM jobs LEFT JOIN {leases} ON job_id=id WHERE status IN ('queued','running')"
+                ),
+                [status.as_of.timestamp_millis()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(storage_error)?;
+        status.unleased_running = status.running - status.leased_running;
+        Ok(Json(status))
+    })
+    .await
+    .map_err(storage_error)?
 }
 
 #[utoipa::path(get, path = "/api/v1/backtests", params(("limit"=Option<u32>, Query, description="1..100, default 20"),("cursor"=Option<i64>,Query,description="Exclusive last id in ascending order")),responses((status=200,body=Page),(status=422,body=ErrorBody),(status=500,body=ErrorBody)))]

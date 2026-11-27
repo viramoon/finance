@@ -140,6 +140,23 @@ processes:
       documentation: docs/api.md
       market_state: [finance-state/market-wal, finance-state/market-projection]
       factor_snapshot: finance-state/factor-research/read-v1.json
+      strategy_routes:
+        validate: 'POST /api/v1/strategies/validate'
+        register: 'POST /api/v1/strategies'
+        versions: 'GET /api/v1/strategies'
+        version: 'GET /api/v1/strategies/{id}/versions/{version}'
+      backtest_routes:
+        detail: 'GET /api/v1/backtests/{id}'
+        cancel: 'POST /api/v1/backtests/{id}/cancel'
+        worker_status: 'GET /api/v1/backtests/worker-status'
+      factor_report: 'GET /api/v1/factors/{id}/evaluations/{evaluation_id}'
+      decision_signals:
+        route: 'GET /api/v1/decisions/signals'
+        database: finance-state/decisions/decisions.sqlite3
+        publication: finance-state/decisions/read-v1.json
+        access: published_plan_with_local_recording_and_non_display_derivation
+        sma_license_proof: sma_replay_license
+      local_state_paths: 数据根以下的目录和文件禁止使用符号链接
       cache_control: private, no-store
       openapi_export: cargo run --locked -q -p finance-api -- export-openapi
       stream_schema_export: cargo run --locked -q -p finance-api -- export-read-stream DIRECTORY

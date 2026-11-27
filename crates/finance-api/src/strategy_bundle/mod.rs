@@ -17,7 +17,7 @@ pub(crate) use compile::{diagnose_version_conflict, legacy_sma_parameters_valid}
 pub use parse::{InputFormat, MAX_BYTES};
 pub use registry::{Component, Input, Output, Warmup, component, components};
 pub use schema::bundle_schema;
-pub(crate) use schema::valid_strategy_version;
+pub(crate) use schema::{valid_recipe_id, valid_strategy_id, valid_strategy_version};
 
 use parse::Parsed;
 use serde::Serialize;

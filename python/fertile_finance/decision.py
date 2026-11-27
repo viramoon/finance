@@ -76,6 +76,8 @@ def _commit(
         if updated.rowcount != 1:
             raise DecisionError("decision checkpoint moved during evaluation; another process owns the stream")
         replay.record(connection, checkpoint.offset, frame, decision)
+        if isinstance(replay, _SmaReplay):
+            replay.certify(connection, checkpoint)
 
 
 def _replay_error_path(error: ProtocolError) -> str:
@@ -122,6 +124,7 @@ class _SmaReplay:
         self.evaluator = open_evaluator(plan)
         self.previous = None
         self.decision_ts = 0
+        self.license = None
 
     def close(self):
         """The in-process evaluator holds no external resources."""
@@ -147,8 +150,35 @@ class _SmaReplay:
             )
         """)
 
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS sma_replay_license (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                license TEXT NOT NULL,
+                replay_offset INTEGER NOT NULL CHECK (replay_offset > 0),
+                replay_sha256 TEXT NOT NULL
+            )
+        """)
+
+    def certify(self, connection, checkpoint):
+        connection.execute("""
+            INSERT INTO sma_replay_license (id, license, replay_offset, replay_sha256)
+            SELECT id, ?, replay_offset, replay_sha256 FROM decision_checkpoint
+            WHERE id = 1 AND replay_offset = ? AND replay_sha256 = ?
+            ON CONFLICT(id) DO UPDATE SET
+                license = excluded.license,
+                replay_offset = excluded.replay_offset,
+                replay_sha256 = excluded.replay_sha256
+            WHERE sma_replay_license.license != excluded.license
+                OR sma_replay_license.replay_offset != excluded.replay_offset
+                OR sma_replay_license.replay_sha256 != excluded.replay_sha256
+        """, (self.license, checkpoint.offset, checkpoint.prefix_sha256))
+
     def decode(self, raw, offset):
         event = _decode(raw, offset, self.previous, self.plan)
+        if self.license is None:
+            self.license = event.license
+        elif event.license != self.license:
+            raise DecisionError(f"replay license changed at byte {offset}")
         self.previous = event
         if isinstance(event.payload, BarClosed):
             self.decision_ts = max(self.decision_ts, event.exchange_ts.integer, event.first_available_ts.integer)
@@ -259,6 +289,11 @@ def _consume(
                 if consumed.offset > checkpoint.offset:
                     _commit(connection, adapter, checkpoint, consumed, frame, decision)
                     checkpoint = consumed
+                elif consumed == checkpoint and isinstance(adapter, _SmaReplay):
+                    # A legacy store can be certified only after rebuilding
+                    # its complete committed prefix and checking its digest.
+                    with connection:
+                        adapter.certify(connection, checkpoint)
 
 
 def main() -> int:

@@ -16,6 +16,8 @@ Nasdaq TotalView 提供八只自选标的的场所深度，最多同时钉住两
 
 finance-api 提供 v1 行情 WAL、投影、水位、缺口及因子研究只读查询，并从代码导出 REST OpenAPI 和版本化 WS/SSE 消息契约。[首批读契约与导出命令](docs/api.md#首批读契约)
 
+第二批生产者契约覆盖配置策略校验与版本选择、离线回测与取消、worker 租约状态、获准发布的决策信号以及因子报告直达查询。[第二批契约](docs/api.md#第二批策略回测与研究契约)
+
 历史期权库复用 F9a 的只读 paper 会话确认合约，读取未到期 IBKR 期权的闭合分钟 bar。合成回放覆盖到期、权限与数据边界。Databento OPRA 提供默认禁用的离线费用估算。[历史期权链](docs/option-history.md)
 
 ## 系统中的位置

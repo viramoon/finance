@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
+use utoipa::ToSchema;
 
 /// The earliest usable point within or after the identified session.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Availability {
     SessionOpen,
@@ -11,7 +12,7 @@ pub enum Availability {
     NextSessionClose,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Universe<'a> {
     pub id: &'a str,
@@ -22,7 +23,7 @@ pub struct Universe<'a> {
     pub available_at: Availability,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Bars<'a> {
     pub id: &'a str,

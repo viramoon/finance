@@ -1,11 +1,13 @@
 pub mod bars;
 mod bundle_jobs;
 pub mod config;
+mod decision_read;
 mod factor_read;
 pub mod indicators;
 pub mod jobs;
 pub mod market;
 mod market_read;
+mod read_store;
 pub mod read_stream;
 pub mod research;
 pub mod strategy_bundle;
@@ -190,6 +192,9 @@ pub fn router(state: AppState) -> Router {
 pub fn router_with_bars_source(state: AppState, source: Arc<dyn bars::BarsSource>) -> Router {
     let restricted_reads = market_read::routes()
         .merge(factor_read::routes())
+        .merge(bundle_jobs::routes())
+        .merge(decision_read::routes())
+        .merge(jobs::contract_routes())
         .layer(middleware::from_fn(private_read));
     Router::new()
         .route("/healthz/live", get(live))
@@ -216,7 +221,12 @@ pub fn router_with_bars_source(state: AppState, source: Arc<dyn bars::BarsSource
         jobs::detail,
         jobs::list,
         jobs::by_key,
+        jobs::cancel,
+        jobs::worker_status,
         bundle_jobs::register,
+        bundle_jobs::validate,
+        bundle_jobs::versions,
+        bundle_jobs::version,
         research::datasets,
         market_read::products,
         market_read::wal,
@@ -224,7 +234,9 @@ pub fn router_with_bars_source(state: AppState, source: Arc<dyn bars::BarsSource
         market_read::projected,
         market_read::gaps,
         factor_read::list,
-        factor_read::evaluations
+        factor_read::evaluations,
+        factor_read::evaluation,
+        decision_read::signals
     ),
     components(schemas(
         BacktestSummary,

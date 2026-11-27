@@ -221,3 +221,223 @@ async fn historical_catalog_and_lookup_use_the_committed_request() {
     std::fs::remove_file(dataset.join("dataset.json")).unwrap();
     assert_eq!(request(&t, "POST", path, "daily", DAILY).await, accepted);
 }
+
+#[tokio::test]
+async fn cancellation_is_idempotent_and_preserves_legacy_job_and_key_contract() {
+    let root = tempfile::tempdir().unwrap();
+    let queue = "/api/v1/backtests";
+    for (id, key) in [(1, "queued"), (2, "running"), (3, "done")] {
+        assert_eq!(
+            request(&root, "POST", queue, key, BODY).await,
+            (202, json!({"id":id}))
+        );
+    }
+    let conn = rusqlite::Connection::open(root.path().join("finance-state/backtests/jobs.sqlite3"))
+        .unwrap();
+    conn.execute_batch(
+        "UPDATE jobs SET status='running',attempt=1 WHERE id=2;
+         INSERT INTO job_leases VALUES(2,9223372036854775807);
+         UPDATE jobs SET status='succeeded',attempt=1 WHERE id=3;",
+    )
+    .unwrap();
+    let cancel_first = format!("{queue}/1/cancel");
+    let (a, b) = tokio::join!(
+        request(&root, "POST", &cancel_first, "", ""),
+        request(&root, "POST", &cancel_first, "", ""),
+    );
+    assert_eq!(a, b);
+    assert_eq!(a.0, 200);
+    assert_eq!(a.1["attempt"], 0);
+    for (id, key) in [(1, "queued"), (2, "running")] {
+        let (status, job) = request(&root, "POST", &format!("{queue}/{id}/cancel"), "", "").await;
+        assert_eq!(status, 200);
+        assert_eq!(job["status"], "failed");
+        assert_eq!(job["error"], "job_cancelled");
+        assert_eq!(job["summary"], Value::Null);
+        assert_eq!(
+            request(&root, "GET", &format!("{queue}/{id}"), "", "").await,
+            (200, job)
+        );
+        assert_eq!(
+            request(&root, "GET", &format!("{queue}/by-key"), key, "").await,
+            (200, json!({"id":id}))
+        );
+        assert_eq!(
+            request(&root, "POST", queue, key, BODY).await,
+            (202, json!({"id":id}))
+        );
+    }
+    assert_eq!(
+        conn.query_row("SELECT job_id FROM job_leases", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    for (id, code, error) in [
+        (3, 409, "job_already_finished"),
+        (4, 404, "job_not_found"),
+        (0, 422, "invalid_request"),
+    ] {
+        let (status, body) = request(&root, "POST", &format!("{queue}/{id}/cancel"), "", "").await;
+        assert_eq!(status, code);
+        assert_eq!(body["error"]["code"], error);
+    }
+    assert_eq!(
+        request(&root, "GET", &format!("{queue}/3"), "", "").await.1["status"],
+        "succeeded"
+    );
+}
+
+#[tokio::test]
+async fn worker_status_is_read_only_and_counts_legacy_and_current_leases() {
+    let root = tempfile::tempdir().unwrap();
+    let path = "/api/v1/backtests/worker-status";
+    let (status, empty) = request(&root, "GET", path, "", "").await;
+    assert_eq!(status, 200);
+    assert_eq!(empty["queue_present"], false);
+    assert_eq!(empty["running"], 0);
+    assert_eq!(root.path().read_dir().unwrap().count(), 0);
+
+    let queue = "/api/v1/backtests";
+    for key in ["queued", "active", "expired", "legacy"] {
+        assert_eq!(request(&root, "POST", queue, key, BODY).await.0, 202);
+    }
+    let conn = rusqlite::Connection::open(root.path().join("finance-state/backtests/jobs.sqlite3"))
+        .unwrap();
+    conn.execute_batch(
+        "UPDATE jobs SET status='running',attempt=1 WHERE id>1;
+         INSERT INTO job_leases VALUES(2,9223372036854775807),(3,0);",
+    )
+    .unwrap();
+    let (status, body) = request(&root, "GET", path, "", "").await;
+    assert_eq!(status, 200);
+    assert_eq!(body["queue_present"], true);
+    assert_eq!(body["queued"], 1);
+    assert_eq!(body["running"], 3);
+    assert_eq!(body["leased_running"], 1);
+    assert_eq!(body["unleased_running"], 2);
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM job_leases", [], |row| row
+            .get::<_, u32>(0))
+            .unwrap(),
+        2
+    );
+    conn.execute_batch("DROP TABLE job_leases;").unwrap();
+    let (status, body) = request(&root, "GET", path, "", "").await;
+    assert_eq!(status, 200);
+    assert_eq!(body["running"], 3);
+    assert_eq!(body["leased_running"], 0);
+    assert_eq!(body["unleased_running"], 3);
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name='job_leases'",
+            [],
+            |row| row.get::<_, u32>(0)
+        )
+        .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn cancellation_of_old_running_job_without_lease_is_recovered_after_unlock() {
+    use std::{fs, path::Path, process::Command};
+
+    let root = tempfile::tempdir().unwrap();
+    assert_eq!(
+        request(&root, "POST", "/api/v1/backtests", "legacy", BODY)
+            .await
+            .0,
+        202
+    );
+    let directory = root.path().join("finance-state/backtests");
+    let conn = rusqlite::Connection::open(directory.join("jobs.sqlite3")).unwrap();
+    conn.execute_batch(
+        "UPDATE jobs SET status='running',attempt=1 WHERE id=1; DROP TABLE job_leases;",
+    )
+    .unwrap();
+    fs::create_dir(directory.join("run-1-1-synthetic")).unwrap();
+    let (status, job) = request(&root, "POST", "/api/v1/backtests/1/cancel", "", "").await;
+    assert_eq!(status, 200);
+    assert_eq!(job["error"], "job_cancelled");
+
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let recovered = Command::new("python3")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("PYTHONPATH", repo.join("python"))
+        .args([
+            "-B",
+            "-c",
+            r#"
+from contextlib import closing
+import fcntl
+from pathlib import Path
+import sys
+
+from fertile_finance import worker
+
+directory = Path(sys.argv[1])
+guard_path = worker.guard_path(directory, 1)
+scratch = directory / "run-1-1-synthetic"
+with closing(worker.open_queue(directory)) as db:
+    assert db.execute("SELECT count(*) FROM job_leases").fetchone() == (0,)
+    with worker.open_guard(guard_path, create=True) as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        worker.recover(db, directory)
+        assert guard_path.is_file() and scratch.is_dir()
+    worker.recover(db, directory)
+    assert not guard_path.exists() and not scratch.exists()
+    assert worker.claim(db, directory, 1) is None
+"#,
+        ])
+        .arg(directory)
+        .output()
+        .unwrap();
+    assert!(
+        recovered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    assert_eq!(
+        request(&root, "GET", "/api/v1/backtests/1", "", "").await,
+        (200, job)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancellation_refuses_linked_queue_without_writing_outside_data_root() {
+    use std::{fs, os::unix::fs::symlink};
+
+    let outside = tempfile::tempdir().unwrap();
+    assert_eq!(
+        request(&outside, "POST", "/api/v1/backtests", "outside", BODY)
+            .await
+            .0,
+        202
+    );
+    let database = "finance-state/backtests/jobs.sqlite3";
+    let original = fs::read(outside.path().join(database)).unwrap();
+    for component in ["finance-state", "finance-state/backtests", database] {
+        let root = tempfile::tempdir().unwrap();
+        let link = root.path().join(component);
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        symlink(outside.path().join(component), link).unwrap();
+        let (status, body) = request(&root, "POST", "/api/v1/backtests/1/cancel", "", "").await;
+        assert_eq!(status, 500, "{component}");
+        assert_eq!(body["error"]["code"], "queue_error");
+        assert_eq!(fs::read(outside.path().join(database)).unwrap(), original);
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let outside_empty = tempfile::tempdir().unwrap();
+    symlink(outside_empty.path(), root.path().join("finance-state")).unwrap();
+    assert_eq!(
+        request(&root, "POST", "/api/v1/backtests/1/cancel", "", "")
+            .await
+            .0,
+        500
+    );
+    assert_eq!(outside_empty.path().read_dir().unwrap().count(), 0);
+}
