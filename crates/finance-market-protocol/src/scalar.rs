@@ -201,7 +201,8 @@ impl DecimalText {
         self.value
     }
 
-    pub(crate) fn is_multiple_of(&self, step: &Self) -> bool {
+    /// Test divisibility exactly across decimal scales. A zero divisor returns false.
+    pub fn is_multiple_of(&self, step: &Self) -> bool {
         let value = self.value.mantissa();
         let step_value = step.value.mantissa();
         if step_value == 0 {

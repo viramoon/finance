@@ -162,8 +162,11 @@ impl From<MarketError> for Reason {
             MarketError::ExpiredContract => Self::ExpiredContract,
             MarketError::InvalidRequest => Self::InvalidRequest,
             MarketError::Timeout => Self::RequestTimeout,
+            MarketError::Pacing => Self::Pacing,
             MarketError::Disconnected => Self::GatewayDisconnected,
-            MarketError::Transport => Self::TransportFailure,
+            MarketError::Transport
+            | MarketError::IncompleteResponse
+            | MarketError::HandshakeFailed => Self::TransportFailure,
             MarketError::UnsafeAccount => Self::UnsafeAccount,
             MarketError::InvalidConfiguration => Self::InvalidConfiguration,
         }

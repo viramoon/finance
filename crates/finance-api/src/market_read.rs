@@ -360,6 +360,8 @@ fn event_matches(query: &ProjectionQuery, matched: &ProjectionMatch, event: &Eve
         Message::Snapshot(_) => (event.epoch, event.seq, "snapshot"),
         Message::Delta(_) => (event.epoch, event.seq, "delta"),
         Message::PerpetualContext(_) => (event.epoch, event.seq, "perpetual_context"),
+        Message::FundingRate(_) => (event.epoch, event.seq, "funding_rate"),
+        Message::OpenInterest(_) => (event.epoch, event.seq, "open_interest"),
         Message::Correction(correction) => (
             correction.target_epoch,
             correction.target_seq,
@@ -536,4 +538,51 @@ pub(crate) async fn gaps(
         })
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn projection_matches_separate_binance_context_observations() {
+        let examples: Value =
+            serde_json::from_str(include_str!("../../../protocol/v2/examples.json")).unwrap();
+        for (kind, payload) in [
+            (
+                "funding_rate",
+                json!({"rate": "-0.00001", "next_funding_ts": null}),
+            ),
+            ("open_interest", json!({"quantity": "12.3456789"})),
+        ] {
+            let mut raw = examples["events"][0].clone();
+            raw["source"] = json!("binance");
+            raw["product"] = json!("usdt-perp-context");
+            raw["instrument_id"] = json!("BTC-USDT-PERP.BINANCE");
+            raw["venue"] = json!("BINANCE");
+            raw["channel"] = json!(kind);
+            raw["kind"] = json!(kind);
+            raw["exchange_ts"] = raw["receive_ts"].clone();
+            raw["payload"] = payload;
+            let event: Event = serde_json::from_value(raw).unwrap();
+            let query = ProjectionQuery {
+                source: event.source.clone(),
+                product: event.product.clone(),
+                channel: event.channel.clone(),
+                instrument_id: event.instrument_id.clone(),
+                epoch: event.epoch,
+                seq: event.seq,
+            };
+            let mut matched = ProjectionMatch {
+                through: 1.into(),
+                position: 1,
+                revision: 0.into(),
+                kind: kind.to_owned(),
+            };
+            assert!(event_matches(&query, &matched, &event));
+            matched.kind = "perpetual_context".into();
+            assert!(!event_matches(&query, &matched, &event));
+        }
+    }
 }

@@ -106,6 +106,8 @@ wire_enum! {
         Trade = "trade",
         Snapshot = "snapshot",
         Delta = "delta",
+        FundingRate = "funding_rate",
+        OpenInterest = "open_interest",
         PerpetualContext = "perpetual_context",
     }
 }
@@ -134,12 +136,25 @@ wire_object! {
     validate = validate;
 }
 
+impl MarketKind {
+    fn is_separate_context(self) -> bool {
+        matches!(self, Self::FundingRate | Self::OpenInterest)
+    }
+}
+
 impl Capability {
+    pub(crate) fn has_separate_context(&self) -> bool {
+        self.message_kinds
+            .iter()
+            .any(|kind| kind.is_separate_context())
+    }
+
     pub fn validate(&self) -> Result<(), ValidationError> {
+        let separate = self.has_separate_context();
         require_schema_version(
             (self.schema_version == SchemaVersion::V2)
-                == self.message_kinds.contains(&MarketKind::PerpetualContext),
-            "capability uses version 2.0 exactly when it supports perpetual_context",
+                == (separate || self.message_kinds.contains(&MarketKind::PerpetualContext)),
+            "capability uses version 2.0 exactly when it supports perpetual context",
         )?;
         require(
             !self.message_kinds.is_empty(),
@@ -147,6 +162,11 @@ impl Capability {
             "must contain at least one market message kind",
         )?;
         for (index, kind) in self.message_kinds.iter().enumerate() {
+            require(
+                !separate || kind.is_separate_context(),
+                format!("message_kinds.{index}"),
+                "separate funding and open interest cannot share a capability with other kinds",
+            )?;
             require(
                 !self.message_kinds[..index].contains(kind),
                 "message_kinds",

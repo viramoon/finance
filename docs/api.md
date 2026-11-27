@@ -35,9 +35,11 @@ FERTILE_PROFILE=cloudbox cargo run --locked -p finance-api
 
 ## 行情与作业
 
-GET /api/v1/market/status 从 collector 持久状态读取各标的水位和新鲜度。没有状态文件时返回明确的缺失状态，collector 停止后会反映过期。可用性和精度验证见 [行情目录](../catalog/README.md)。
+GET /api/v1/market/status 从 collector 持久状态读取各标的水位和新鲜度。没有状态文件时返回明确的缺失状态，collector 停止后会反映过期。可用性和精度验证见 [行情目录](../catalog/README.md)。[Binance 公共行情](integrations/binance.md)通过 F3 和独立进程状态提供，现有 `/api/v1/market/status` 仍描述 bar collector。
 
 IBKR 顶档订阅与权限验收由 `finance-ib` 的 Rust 接口和私有 CLI 提供，运行时独立于 HTTP API 和 collector 持久状态。接口与权限结论见 [IBKR 接入](integrations/ib.md#美股-l1-和-opra-权限验收)。
+
+IBKR 行情线预算、共享事件、已确认期权链和覆盖区间由 `finance_collector::line_budget::LineHandle` 提供。该接口属于进程内 Rust 调用，HTTP OpenAPI、`GET /api/v1/market/status` 的持久状态来源和 `protocol/v1` 流契约维持原约定。[IBKR 行情线预算](integrations/ib-line-budget.md)
 
 Nasdaq TotalView 的页面焦点与场所深度由进程内 Rust 接口提供。接入共享行情所有者后，由 web 提供会话内展示入口。当前 HTTP 行情状态仍来自持久化采集状态。场所深度接口和接入边界见 [IBKR 接入](integrations/ib.md#nasdaq-totalview-场所深度)。
 
@@ -78,7 +80,7 @@ POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /a
 
 行情查询的 `as_of` 是 API 的 UTC 观察时间。事件时间与覆盖分别由 F1 时钟、持久和投影水位、质量报告说明。`position`、`generation`、`epoch`、`seq`、`revision` 与 UTC 纳秒时间在 JSON 和查询参数中均使用十进制字符串，`after` 默认 `"0"`。价格与数量沿用 F1 的精确十进制字符串。`offset` 默认 0，`limit` 默认 100、最大 500，`next_offset: null` 表示已到列表末尾。[F1 事件](market-protocol.md) · [F3 存储](market-wal.md)
 
-WAL 的 `records[].event` 和投影的 `record.event` 保留原始 `schema_version`。同一 WAL 页面可以包含 F1 `1.0` 和 F5 `2.0` 事件。消费端按每条事件的版本解码，`2.0` 事件的 `kind` 为 `perpetual_context`。首批独立导出的 WS/SSE 消息继续使用 `1.0`。[版本化行情协议](market-protocol.md)
+WAL 的 `records[].event` 和投影的 `record.event` 保留原始 `schema_version`。同一 WAL 页面可以包含 `1.0` 和 `2.0` 事件。消费端按每条事件的版本与消息种类解码。Hyperliquid 的 `2.0` 观测使用 `perpetual_context`，Binance 的独立上下文使用 `funding_rate`、`open_interest` 及该产品的 `2.0` 控制消息。首批独立导出的 WS/SSE 消息继续使用 `1.0`。[版本化行情协议](market-protocol.md)
 
 市场响应的 `access` 来自 F3 的落盘策略，含 `license`、`display_live`、`record_local`、`derive_non_display`、`backup_personal_drive`。事件另携带原 `license`。仅展示产品由生产者在内存处理，不进入这些查询和生成物。项目禁止再分发。参数不合法返回 `400 / market_query_invalid`。产品未登记或目标投影位置缺失返回 `404 / market_product_not_found` 或 `market_projection_not_found`。策略、索引或 WAL 损坏返回 `500 / market_storage_error`，响应省略本地路径和数据正文。
 

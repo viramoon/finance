@@ -265,6 +265,111 @@ async fn account_verification_distinguishes_loss_empty_reply_and_silence() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn failed_account_verification_preserves_global_pacing() {
+    let (manager, [replay]) = manager();
+    let (pacing, observed) = watch::channel(None);
+    let (opened, sent_at) =
+        tokio::join!(manager.open_verified_market_with_pacing(&pacing), async {
+            replay.wait_for_writes(1).await;
+            let sent_at = Instant::now();
+            replay.notice(-1, 100).await.unwrap();
+            replay.notice(-1, 1100).await.unwrap();
+            sent_at
+        });
+    assert!(matches!(opened, Err(MarketError::Disconnected)));
+    assert_eq!(replay.writes(), [MarketWrite::Accounts]);
+    assert!(replay.is_closed());
+    assert!(observed.borrow().is_some_and(|at| at >= sent_at));
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_market_type_selection_preserves_global_pacing() {
+    let (manager, [replay]) = manager();
+    let (pacing, observed) = watch::channel(None);
+    let (opened, (_release, sent_at)) =
+        tokio::join!(manager.open_verified_market_with_pacing(&pacing), async {
+            replay.wait_for_writes(1).await;
+            let release = replay.hold_next_write();
+            replay.managed_accounts("DU-SYNTH").await.unwrap();
+            replay.wait_for_writes(2).await;
+            let sent_at = Instant::now();
+            replay.notice(-1, 100).await.unwrap();
+            replay.notice(-1, 1100).await.unwrap();
+            (release, sent_at)
+        });
+    assert!(matches!(opened, Err(MarketError::Disconnected)));
+    assert_eq!(
+        replay.writes(),
+        [MarketWrite::Accounts, MarketWrite::SelectType(Some(3))]
+    );
+    assert!(replay.is_closed());
+    assert!(observed.borrow().is_some_and(|at| at >= sent_at));
+}
+
+#[tokio::test(start_paused = true)]
+async fn initial_connect_failure_or_timeout_is_classified_without_a_peer() {
+    #[derive(Clone, Copy, Debug)]
+    enum InitialFault {
+        Disconnect,
+        Silent,
+        InvalidConfiguration,
+        UnsafeAccount,
+    }
+
+    #[async_trait]
+    impl Transport for InitialFault {
+        type S = PaperPeer;
+
+        async fn connect(&self, _: &str, _: i32) -> Result<Self::S> {
+            match self {
+                Self::Disconnect => Err(Error::Disconnected("synthetic startup loss".into())),
+                Self::Silent => std::future::pending().await,
+                Self::InvalidConfiguration => Err(Error::Config("synthetic invalid setup".into())),
+                Self::UnsafeAccount => Err(Error::UnsafeAccount),
+            }
+        }
+    }
+
+    let (fixture, []) = manager();
+    for (fault, expected, legacy) in [
+        (
+            InitialFault::Disconnect,
+            MarketError::HandshakeFailed,
+            MarketError::Disconnected,
+        ),
+        (
+            InitialFault::Silent,
+            MarketError::HandshakeFailed,
+            MarketError::Timeout,
+        ),
+        (
+            InitialFault::InvalidConfiguration,
+            MarketError::InvalidConfiguration,
+            MarketError::InvalidConfiguration,
+        ),
+        (
+            InitialFault::UnsafeAccount,
+            MarketError::UnsafeAccount,
+            MarketError::UnsafeAccount,
+        ),
+    ] {
+        let manager = ConnectionManager::new(fixture.config.clone(), fault).unwrap();
+        let (pacing, observed) = watch::channel(None);
+        let opened = manager.open_verified_market_with_pacing(&pacing).await;
+        assert!(
+            matches!(opened, Err(error) if error == expected),
+            "{fault:?}"
+        );
+        assert_eq!(*observed.borrow(), None);
+        let legacy_opened = manager.open_verified_market().await;
+        assert!(
+            matches!(legacy_opened, Err(error) if error == legacy),
+            "{fault:?}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn manager_stops_recovery_if_replacement_fails_paper_verification() {
     #[derive(Default)]
     struct Hooks {

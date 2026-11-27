@@ -32,16 +32,28 @@
       "source": "MarketReplay 从固定合约、模拟账户标识、价量及通知码生成内存 Protobuf，验证 paper 保护、精确解码和请求生命周期。用 sh scripts/export-totalview-review-sources.sh 从当前提交导出测试源码。"
     },
     "crates/finance-ib/src/market/replay_tests.rs": {
-      "sha256": "247dea98dc62e76c1a1513dbd71c74aafee52a0f0e9113337aa1857161045e74",
+      "sha256": "aca2a6471cc07a90cff3f3a7b3e581cc382dfdcb4a5494f008e9f38db6b6ee48",
       "generator": "scripts/export-ib-review-sources.sh",
       "seed": "fixed",
-      "source": "手写的内存回放测试用固定合成合约和回调验证 SDK 路由。相邻的 request 调用含数字参数，触发表格检测。用 sh scripts/export-ib-review-sources.sh 从当前检出提交导出原始 Rust 源文件。"
+      "source": "手写的内存回放测试用固定合成合约及回调验证 SDK 路由，包括无请求 ID 的 100、101、420 节流通知和 1100 断连通知。相邻的 request 调用含数字参数，触发表格检测。用 sh scripts/export-ib-review-sources.sh 从当前检出提交导出原始 Rust 源文件。"
     },
     "crates/finance-ib/tests/entitlements.rs": {
       "sha256": "f21c35b818768c74d31dd2c8f18cdc30896df8b78676cb9d5de4c3288f957cb2",
       "generator": "scripts/export-ib-review-sources.sh",
       "seed": "fixed",
       "source": "手写的权限探针测试以固定构造的合约、日期、报价和错误驱动替身，日期参数和预期值触发表格检测。用 sh scripts/export-ib-review-sources.sh 从当前检出提交导出原始 Rust 源文件。"
+    },
+    "crates/finance-collector/fixtures/binance/depth.json": {
+      "sha256": "0f2cc82aa600351f68b1a7853b11225913c98bdd9ded8bfd3dba6eb2b6ec8921",
+      "generator": "scripts/generate_synthetic_fixtures.py",
+      "seed": "fixed",
+      "source": "运行 python3 -B scripts/generate_synthetic_fixtures.py OUTPUT_DIRECTORY。固定价格、数量和更新 ID 生成现货及永续快照和增量；覆盖删档、断序与超安全整数 ID。"
+    },
+    "crates/finance-collector/fixtures/binance/observations.json": {
+      "sha256": "e67a017e55648cd3743f31532befdade74e6a2c4df1ab0b49194e800943dfdcb",
+      "generator": "scripts/generate_synthetic_fixtures.py",
+      "seed": "fixed",
+      "source": "运行 python3 -B scripts/generate_synthetic_fixtures.py OUTPUT_DIRECTORY。固定成交、资金费率及 OI 响应；覆盖成交方向、费率符号和十进制精度。"
     },
     "crates/finance-market-protocol/fixtures/examples-v2.input.json": {
       "sha256": "fdc6b95863efa58d9cc1f8360bd39e3fd813ff35cd33e31bb39078ace987e2d1",

@@ -338,3 +338,35 @@ async fn active_probe_reports_disconnection_before_session_poll() {
 
 #[path = "lifecycle_tests.rs"]
 mod lifecycle;
+
+#[tokio::test(start_paused = true)]
+async fn global_protobuf_pacing_notices_are_latched_without_disconnecting() {
+    let (replay, market) = paper_market().await;
+    let mut pacing = market.pacing_notices();
+    assert_eq!(*pacing.borrow(), None);
+    let disconnected = market.disconnected();
+    tokio::pin!(disconnected);
+
+    for code in [100, 101, 420] {
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let sent_at = Instant::now();
+        replay.notice(-1, code).await.unwrap();
+        tokio::select! {
+            error = &mut disconnected => panic!("global notice {code} disconnected: {error}"),
+            result = timeout(WAIT, pacing.changed()) => result.unwrap().unwrap(),
+        }
+        let received_at = *pacing.borrow_and_update();
+        assert!(
+            received_at.is_some_and(|at| at >= sent_at),
+            "global notice {code}"
+        );
+        assert_eq!(*market.pacing_notices().borrow(), received_at);
+    }
+
+    replay.notice(-1, 1100).await.unwrap();
+    assert_eq!(
+        timeout(WAIT, disconnected).await.unwrap(),
+        MarketError::Disconnected
+    );
+    market.close().await;
+}

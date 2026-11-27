@@ -154,8 +154,9 @@ impl From<MarketError> for DepthError {
             }
             MarketError::NotEntitled => Self::NotEntitled,
             MarketError::Timeout => Self::Timeout,
-            MarketError::Disconnected => Self::Disconnected,
-            MarketError::Transport => Self::Transport,
+            MarketError::Disconnected | MarketError::HandshakeFailed => Self::Disconnected,
+            MarketError::Transport | MarketError::IncompleteResponse => Self::Transport,
+            MarketError::Pacing => Self::Pacing,
             MarketError::InvalidRequest
             | MarketError::UnsafeAccount
             | MarketError::InvalidConfiguration => Self::InvalidRequest,

@@ -1,5 +1,8 @@
 use finance_api::{ApiDoc, AppState, config::Settings, read_stream, router};
-use finance_market_protocol::{SchemaVersion, schema_export::close_event_envelopes};
+use finance_market_protocol::{
+    SchemaVersion,
+    schema_export::{CONTROL_KINDS, V2_CONTEXT_KINDS, close_event_envelopes},
+};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -30,17 +33,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )?;
         // REST reads both versions from the same WAL. The common envelope and
         // kind union alone do not express which version is valid for each kind.
+        let v2_kinds: Vec<_> = V2_CONTEXT_KINDS.into_iter().chain(CONTROL_KINDS).collect();
         spec.pointer_mut("/components/schemas/Event/allOf")
             .and_then(Value::as_array_mut)
             .ok_or("missing REST event envelope schema")?
             .push(json!({"oneOf": [
                 {"properties": {
                     "schema_version": {"const": SchemaVersion::V1},
-                    "kind": {"not": {"const": "perpetual_context"}}
+                    "kind": {"not": {"enum": V2_CONTEXT_KINDS}}
                 }},
                 {"properties": {
                     "schema_version": {"const": SchemaVersion::V2},
-                    "kind": {"const": "perpetual_context"},
+                    "kind": {"enum": v2_kinds},
                     "asset_kind": {"const": "perpetual"},
                     "revision": {"const": "0"}
                 }}

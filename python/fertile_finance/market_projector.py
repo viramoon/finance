@@ -29,7 +29,7 @@ from fertile_finance.market_protocol import ContextKind, Correction, Event, Kind
 _TOKEN = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 _MAX_BATCH = 4096
 _INDEX_NAME = "projection.sqlite3"
-_MARKET_KINDS = frozenset((Kind.BAR_CLOSED, Kind.TRADE, Kind.SNAPSHOT, Kind.DELTA, ContextKind.PERPETUAL_CONTEXT))
+_MARKET_KINDS = frozenset((Kind.BAR_CLOSED, Kind.TRADE, Kind.SNAPSHOT, Kind.DELTA, *ContextKind))
 
 _PARQUET_SCHEMA = pa.schema([
     ("wal_position", pa.uint64()),

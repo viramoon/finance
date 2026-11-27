@@ -6,7 +6,7 @@ use crate::client::ClientRequestBuilders;
 use crate::common::request_helpers;
 use crate::messages::{IncomingMessages, OutgoingMessages};
 use crate::protocol::{check_version, Features};
-use crate::subscriptions::{StreamDecoder, Subscription};
+use crate::subscriptions::{DecoderContext, StreamDecoder, Subscription};
 use crate::{Client, Error};
 use log::{error, info};
 
@@ -14,6 +14,7 @@ impl Client {
     /// Requests contract information.
     ///
     /// Provides all the contracts matching the contract provided. It can also be used to retrieve complete options and futures chains.
+    /// An overwritten response or missing end marker fails the entire request.
     ///
     /// # Arguments
     /// * `contract` - The [Contract] used as sample to query the available contracts.
@@ -47,7 +48,7 @@ impl Client {
 
         let mut contract_details: Vec<ContractDetails> = Vec::default();
 
-        while let Some(response_result) = responses.next().await {
+        while let Some(response_result) = responses.next_complete().await {
             match response_result {
                 Ok(mut response) => {
                     log::debug!("response: {response:#?}");
@@ -334,5 +335,30 @@ impl Client {
             encoders::encode_request_option_chain(request_id, symbol, exchange, security_type, contract_id)
         })
         .await
+    }
+
+    /// Collect all option-chain definitions through their protocol end marker.
+    /// An overwritten response or missing end marker fails the entire request.
+    pub async fn option_chain_complete(
+        &self,
+        symbol: &str,
+        exchange: &str,
+        security_type: SecurityType,
+        contract_id: i32,
+    ) -> Result<Vec<OptionChain>, Error> {
+        check_version(self.server_version(), Features::SEC_DEF_OPT_PARAMS_REQ)?;
+        let builder = self.request();
+        let packet = encoders::encode_request_option_chain(builder.request_id(), symbol, exchange, security_type, contract_id)?;
+        let mut responses = builder.send_raw(packet).await?;
+        let context = DecoderContext::default();
+        let mut rows = Vec::new();
+        while let Some(response) = responses.next_complete().await {
+            match OptionChain::decode(&context, &mut response?) {
+                Ok(row) => rows.push(row),
+                Err(Error::EndOfStream) => return Ok(rows),
+                Err(error) => return Err(error),
+            }
+        }
+        Err(Error::UnexpectedEndOfStream)
     }
 }

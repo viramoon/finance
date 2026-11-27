@@ -15,6 +15,7 @@ use super::io::{AsyncIo, AsyncReconnect, AsyncStream};
 use super::AsyncTcpMessageBus;
 use crate::connection::{r#async::AsyncConnection, ConnectionMetadata};
 use crate::contracts::tick_types::TickType;
+use crate::contracts::{ContractDetails, OptionChain};
 use crate::market_data::realtime::ExactMarketDepth;
 use crate::messages::{encode_protobuf_message, IncomingMessages, OutgoingMessages, PROTOBUF_MSG_ID};
 use crate::{proto, server_versions, Client, ClientBuilder, Error};
@@ -35,6 +36,30 @@ pub enum MarketWrite {
     SelectType(Option<i32>),
     /// Contract confirmation for the assigned request ID.
     Confirm(Option<i32>),
+    /// An option-chain metadata request.
+    DiscoverOptions {
+        /// ID used for definition callbacks.
+        request_id: Option<i32>,
+        /// Confirmed underlying identity.
+        underlying_con_id: Option<i32>,
+        /// Underlying symbol in the request.
+        symbol: Option<String>,
+        /// Futures or futures-options exchange in the request.
+        exchange: Option<String>,
+        /// Requested underlying security type.
+        security_type: Option<String>,
+    },
+    /// One bounded request for listed options in an expiry and trading class.
+    ConfirmOptionSeries {
+        /// ID used for contract-details callbacks.
+        request_id: Option<i32>,
+        /// Requested expiry.
+        expiry: Option<String>,
+        /// Requested trading class.
+        trading_class: Option<String>,
+        /// Neither strike nor right was specified.
+        wildcard_strike_and_right: bool,
+    },
     /// Request for the given contract and stream options.
     Subscribe {
         /// Subscription's assigned request ID.
@@ -164,6 +189,56 @@ impl MarketReplay {
             },
         )
         .await?;
+        self.contract_data_end(request_id).await
+    }
+
+    /// Deliver a synthetic option-parameter row through the production dispatcher.
+    pub async fn option_parameters(&self, request_id: i32, row: &OptionChain) -> Result<(), Error> {
+        self.inject(
+            IncomingMessages::SecurityDefinitionOptionParameter,
+            proto::SecDefOptParameter {
+                req_id: Some(request_id),
+                exchange: Some(row.exchange.clone()),
+                underlying_con_id: Some(row.underlying_contract_id),
+                trading_class: Some(row.trading_class.clone()),
+                multiplier: Some(row.multiplier.clone()),
+                expirations: row.expirations.clone(),
+                strikes: row.strikes.clone(),
+            },
+        )
+        .await
+    }
+
+    /// Complete a synthetic option-parameter response.
+    pub async fn option_parameters_end(&self, request_id: i32) -> Result<(), Error> {
+        self.inject(
+            IncomingMessages::SecurityDefinitionOptionParameterEnd,
+            proto::SecDefOptParameterEnd { req_id: Some(request_id) },
+        )
+        .await
+    }
+
+    /// Deliver synthetic option details, including the underlying identity.
+    pub async fn option_contract(&self, request_id: i32, row: &ContractDetails) -> Result<(), Error> {
+        self.inject(
+            IncomingMessages::ContractData,
+            proto::ContractData {
+                req_id: Some(request_id),
+                contract: Some(proto::encoders::encode_contract(&row.contract)),
+                contract_details: Some(proto::ContractDetails {
+                    under_con_id: Some(row.under_contract_id),
+                    under_sec_type: Some(row.under_security_type.clone()),
+                    real_expiration_date: Some(row.real_expiration_date.clone()),
+                    valid_exchanges: Some(row.valid_exchanges.join(",")),
+                    ..Default::default()
+                }),
+            },
+        )
+        .await
+    }
+
+    /// Complete a synthetic contract-details response.
+    pub async fn contract_data_end(&self, request_id: i32) -> Result<(), Error> {
         self.inject(IncomingMessages::ContractDataEnd, proto::ContractDataEnd { req_id: Some(request_id) })
             .await
     }
@@ -433,6 +508,11 @@ impl MarketReplay {
         self.bus.request_channels.read().await.len()
     }
 
+    /// Capacity of each broadcast buffer for request-scoped response frames.
+    pub fn request_buffer_capacity(&self) -> usize {
+        super::BROADCAST_CHANNEL_CAPACITY
+    }
+
     /// Wait until the given number of requests has reached the replay transport.
     pub async fn wait_for_writes(&self, count: usize) {
         let signals = self.stream.dispatcher.as_ref().expect("requires background dispatcher");
@@ -475,6 +555,7 @@ fn decode_write(frame: &[u8]) -> MarketWrite {
     const SERVER_TIME: i32 = OutgoingMessages::RequestCurrentTime as i32;
     const SELECT_TYPE: i32 = OutgoingMessages::RequestMarketDataType as i32;
     const CONFIRM: i32 = OutgoingMessages::RequestContractData as i32;
+    const DISCOVER_OPTIONS: i32 = OutgoingMessages::RequestSecurityDefinitionOptionalParameters as i32;
     const SUBSCRIBE: i32 = OutgoingMessages::RequestMarketData as i32;
     const CANCEL: i32 = OutgoingMessages::CancelMarketData as i32;
     const SUBSCRIBE_DEPTH: i32 = OutgoingMessages::RequestMarketDepth as i32;
@@ -485,7 +566,28 @@ fn decode_write(frame: &[u8]) -> MarketWrite {
         SERVER_TIME => MarketWrite::ServerTime,
         START_API => MarketWrite::StartApi(proto::StartApiRequest::decode(body).unwrap().client_id),
         SELECT_TYPE => MarketWrite::SelectType(proto::MarketDataTypeRequest::decode(body).unwrap().market_data_type),
-        CONFIRM => MarketWrite::Confirm(proto::ContractDataRequest::decode(body).unwrap().req_id),
+        CONFIRM => {
+            let request = proto::ContractDataRequest::decode(body).unwrap();
+            match request.contract {
+                Some(contract) if contract.sec_type.as_deref() == Some("OPT") && contract.con_id.is_none() => MarketWrite::ConfirmOptionSeries {
+                    request_id: request.req_id,
+                    expiry: contract.last_trade_date_or_contract_month,
+                    trading_class: contract.trading_class,
+                    wildcard_strike_and_right: contract.strike.is_none() && contract.right.is_none(),
+                },
+                _ => MarketWrite::Confirm(request.req_id),
+            }
+        }
+        DISCOVER_OPTIONS => {
+            let request = proto::SecDefOptParamsRequest::decode(body).unwrap();
+            MarketWrite::DiscoverOptions {
+                request_id: request.req_id,
+                underlying_con_id: request.underlying_con_id,
+                symbol: request.underlying_symbol,
+                exchange: request.fut_fop_exchange,
+                security_type: request.underlying_sec_type,
+            }
+        }
         SUBSCRIBE => {
             let request = proto::MarketDataRequest::decode(body).unwrap();
             MarketWrite::Subscribe {
