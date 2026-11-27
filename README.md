@@ -55,6 +55,7 @@ finance/
 - [行情标的、事件与流协议](docs/market-protocol.md)
 - [历史价量补拉与逐笔归档](docs/historical-pull.md)
 - [本地行情 WAL、投影与封段接口](docs/market-wal.md)
+- [统一指标与回放口径](docs/indicators.md)
 - [期权 GEX、gamma wall、flip 与 0DTE 计算接口](docs/option-exposure.md)
 - [StrategyBundle v1 配置与编译](docs/strategy-bundle.md)
 - [离线因子评价与研究登记](docs/factor-research.md)
@@ -93,5 +94,7 @@ curl http://127.0.0.1:8081/api/v1/backtests/sample
 ```
 
 端口默认 8081，配置优先级、错误状态、精确金额与 OpenAPI 导出见 [API 文档](docs/api.md)。示例接口读取 latest.json。提交的作业由 worker 独立执行，collector 的行情状态可在 /api/v1/market/status 查询。
+
+主图通过 `GET /api/v1/market/bars` 查询已发布的 bar 和派生指标。版本、参数、数值域和预览规则见 [统一指标](docs/indicators.md)，数据源接入见 [主图 API](docs/api.md#主图行情与指标)。
 
 `StrategyBundle` 作业用同一编译器接受内联 YAML/JSON 或已登记版本，支持入场/出场与目标权重两类配方。作业锁定本地回放快照，可从结果查看各配方的资金、仓位、净额和成本归因。离线复验方法见 [运行手册](RUNBOOK.md#隔离验收配置策略作业)。

@@ -157,6 +157,14 @@ cargo run --locked -p finance-collector --bin finance-hyperliquid -- /path/to/re
 
 离线验收使用 `cargo test --locked --offline -p finance-collector --test hyperliquid` 与 `PYTHONPATH=python "$FINANCE_PYTHON" -m unittest discover -s tests -p 'test_hyperliquid*.py' -v`。Rust 测试用 `finance-hyperliquid CONFIG --replay FILE` 重放合成报文。该模式读取 UTF-8 JSON Lines，`event` 为 `metadata`、`connected`、`disconnected` 或 `frame`，每行都含十进制字符串 `receive_ts`（UTC 纳秒）。`metadata` 和 `frame` 行的 `data` 是原始 JSON 文本字符串。回放使用隔离数据根。行情帧校验失败后，回放丢弃该连接剩余帧，直到下一条 `connected`。完整语义见 [Hyperliquid 行情接口](docs/integrations/hyperliquid.md)。
 
+### 主图查询
+
+F3 投影进程发布 F1 事件的 Parquet 和修订索引。主图读取 `finance-state/bars/v1/` 下由受信发布方按许可另行生成的展示快照。
+
+用 `GET /api/v1/indicators` 核对已注册的算法版本。请求 `GET /api/v1/market/bars` 时提供与展示投影一致的标的、源、产品、周期和复权口径。404 时检查同一数据根下是否已发布该序列。收到 `indicator_history_unavailable` 时核对 `history_complete` 和序列起点，补足前置历史后重新发布。收到 `indicator_work_limit` 时减小 `limit` 后分页，若前置历史已超预算，则选择更少或更短周期的指标。收到 `indicator_calculation_failed` 时按同一组件参数检查整个闭合前缀的数值和精度。其余投影 500 错误按文件权限、时间次序和 OHLCV 类型排查。旧数据的问题按快照覆盖、`as_of`、`first_available_ts` 和 `delay_tier` 排查。API 启动参数与健康检查沿用原接口，部署须在受控数据根发布合法展示投影。详细契约见 [主图 API](docs/api.md#主图行情与指标)。
+
+收到 500 `bars_invalid` 时，核对投影 OHLCV 是否符合 F1 十进制文本规则。每个字段的整数位和小数位合计最多 28 位，超限在投影解析时即会报错。合法输入的计算结果还须满足输出编码范围，详见 [数值域与舍入](docs/indicators.md#数值域与舍入)。
+
 ### 在盒子上验证 paper 行情恢复
 
 先用已登录的 Gateway 运行上方 probe。给 paper collector 配置独立的已挂载数据根目录，例如 /home/box/fertile/data-paper；finance-api 用同一数据根，回放继续使用自己的目录。使用实时市场数据订阅时将 FINANCE_COLLECTOR_CONFIG 指向 config/collector/ib-cloudbox.yaml；选择延迟数据时使用 config/collector/ib-delayed.yaml。确认 SPY 对应交易时段有行情，按 [IB 接入](docs/integrations/ib.md) 检查订阅权限与 pacing 日志。
