@@ -55,3 +55,9 @@ fn market_sources_have_no_order_or_raw_wire_entrypoints() {
     check_source(&root.join("../finance-collector/src/ib.rs"));
     check_source(&root.join("../../scripts/check-ib-entitlements.sh"));
 }
+
+#[test]
+fn line_budget_sources_have_no_order_or_raw_wire_entrypoints() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    check_source(&root.join("../finance-collector/src/line_budget"));
+}

@@ -32,10 +32,10 @@
       "source": "MarketReplay 从固定合约、模拟账户标识、价量及通知码生成内存 Protobuf，验证 paper 保护、精确解码和请求生命周期。用 sh scripts/export-totalview-review-sources.sh 从当前提交导出测试源码。"
     },
     "crates/finance-ib/src/market/replay_tests.rs": {
-      "sha256": "247dea98dc62e76c1a1513dbd71c74aafee52a0f0e9113337aa1857161045e74",
+      "sha256": "aca2a6471cc07a90cff3f3a7b3e581cc382dfdcb4a5494f008e9f38db6b6ee48",
       "generator": "scripts/export-ib-review-sources.sh",
       "seed": "fixed",
-      "source": "手写的内存回放测试用固定合成合约和回调验证 SDK 路由。相邻的 request 调用含数字参数，触发表格检测。用 sh scripts/export-ib-review-sources.sh 从当前检出提交导出原始 Rust 源文件。"
+      "source": "手写的内存回放测试用固定合成合约及回调验证 SDK 路由，包括无请求 ID 的 100、101、420 节流通知和 1100 断连通知。相邻的 request 调用含数字参数，触发表格检测。用 sh scripts/export-ib-review-sources.sh 从当前检出提交导出原始 Rust 源文件。"
     },
     "crates/finance-ib/tests/entitlements.rs": {
       "sha256": "f21c35b818768c74d31dd2c8f18cdc30896df8b78676cb9d5de4c3288f957cb2",
