@@ -22,6 +22,7 @@ FERTILE_PROFILE=cloudbox cargo run --locked -p finance-api
 | FINANCE_API_BIND_HOST | IP 地址，默认 127.0.0.1 |
 | FINANCE_API_PORT | 1～65535，默认 8081 |
 | FERTILE_DATA_ROOT | 绝对数据根目录，默认 /home/box/fertile/data |
+| FINANCE_BINANCE_CONFIG | 沿用 Binance profile 覆盖，仅供 API 读取启用状态和用途许可，默认 `FINANCE_CONFIG_DIR/binance/<profile>.yaml` |
 
 未知 YAML 字段、未知 profile、非法 IP / 端口、相对数据根路径在启动时拒绝。配置不读取账户密钥。当前无认证，默认 loopback；部署方只在受控内网显式覆盖绑定地址，不能作为公网写操作入口。更丰富的查询、认证和受控交易接口由后续独立 issue 确定。
 
@@ -35,13 +36,7 @@ FERTILE_PROFILE=cloudbox cargo run --locked -p finance-api
 
 ## 行情与作业
 
-GET /api/v1/market/status 从 collector 持久状态读取各标的水位和新鲜度。没有状态文件时返回明确的缺失状态，collector 停止后会反映过期。可用性和精度验证见 [行情目录](../catalog/README.md)。[Binance 公共行情](integrations/binance.md)通过 F3 和独立进程状态提供，现有 `/api/v1/market/status` 仍描述 bar collector。
-
-IBKR 顶档订阅与权限验收由 `finance-ib` 的 Rust 接口和私有 CLI 提供，运行时独立于 HTTP API 和 collector 持久状态。接口与权限结论见 [IBKR 接入](integrations/ib.md#美股-l1-和-opra-权限验收)。
-
-IBKR 行情线预算、共享事件、已确认期权链和覆盖区间由 `finance_collector::line_budget::LineHandle` 提供。该接口属于进程内 Rust 调用，HTTP OpenAPI、`GET /api/v1/market/status` 的持久状态来源和 `protocol/v1` 流契约维持原约定。[IBKR 行情线预算](integrations/ib-line-budget.md)
-
-Nasdaq TotalView 的页面焦点与场所深度由进程内 Rust 接口提供。接入共享行情所有者后，由 web 提供会话内展示入口。当前 HTTP 行情状态仍来自持久化采集状态。场所深度接口和接入边界见 [IBKR 接入](integrations/ib.md#nasdaq-totalview-场所深度)。
+GET /api/v1/market/status 从 bar collector 持久状态读取各标的水位和新鲜度。没有状态文件时返回明确的缺失状态，collector 停止后会反映过期。可用性和精度验证见 [行情目录](../catalog/README.md)。Binance 的 profile 状态和 IBKR 的私有查询见 [第三批读契约](#第三批读契约)。
 
 POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /api/v1/backtests/{id} 查看执行进度与摘要，GET /api/v1/backtests 按 cursor 和 limit 翻页。提交使用同库事务完成幂等检查和容量检查。多个 worker 可独立领取并续租，租约是服务端状态。完整输入范围、超时和恢复见 [作业运维](backtest-jobs.md)。公网入口由 web 鉴权并限流。
 
@@ -124,6 +119,38 @@ finance-api 读取现有 `FERTILE_DATA_ROOT` 下的 `finance-state/bars/v1/<sour
 
 当前查询端提供 `BarsSource` 读取边界。[F3 投影](market-wal.md#parquet-与投影游标)发布获准落盘的 F1 事件 Parquet 和修订索引。受信的主图发布方可用该索引构建上述 `bars/v1` 快照，并在事件更正后重新发布。长期分钟历史需要向指标内核提供完整闭合前缀，或接入与同一组件版本对应的等价状态检查点。现有 collector 闭合 bar Parquet 和研究目录使用各自管道。
 
+## 第三批读契约
+
+以下路径使用 `/api/v1` 前缀，均为 GET，成功和错误响应均设置 `Cache-Control: private, no-store`。符合展示权限的 web 调用在鉴权和产品授权后向浏览器转发。
+
+| 路径 | 查询 | OpenAPI 响应与含义 |
+| --- | --- | --- |
+| `/market/bars` | 标的、复权、时窗等 | 复用 F6 的 `ChartBars`、`ChartContext`、`ChartCoverage`。 |
+| `/indicators`、`/indicators/values` | 注册表或带指标的时窗 | 复用 F6 的 `IndicatorCatalog`、`ChartValues`。见 [主图行情与指标](#主图行情与指标)。 |
+| `/market/binance/status` | 无 | `BinanceReadStatus`。禁用或 profile 文件缺失时为 `disabled_by_profile`、`products: []`。启用时为 `enabled_by_profile` 及配置中各产品的 `ProductPolicy`。配置无法读取或校验时返回 `500 / binance_profile_invalid`。 |
+| `/market/book` | `symbol` 为 QQQ、AAPL、MSFT、NVDA、AMZN、GOOGL、META、TSLA | `DepthBook`。Nasdaq TotalView 的具体场所、L1/TotalView/EDS 确认状态、请求和返回档数、同步状态及精确价量。 |
+| `/market/subscriptions` | 无 | `SubscriptionBudget`。账户上限、预留、各池实际占用、确认数、观察数和发现状态。 |
+| `/market/subscriptions/coverage` | 正整数 OPRA `con_id`，UTC RFC3339 的 `start`、`end` | `SubscriptionCoverage`。半开区间内的 `covered`、`uncovered`、`unknown`，以及最近一次观察时间。未知合约在有效区间内返回 `unknown`。 |
+| `/options/chain` | 正整数 `underlying_con_id`，可选 `expiry`（YYYY-MM-DD）、排他游标 `after_con_id` 和 `limit` | `OptionChainPage`。返回已确认未过期的合约、乘数与执行价等，按 `con_id` 升序。每页默认 100 条，最大 500 条，`next_after_con_id: null` 表示查询到末页。 |
+| `/options/exposure` | F1 `underlying_id`，可选 UTC RFC3339 `as_of` 和 `scenario` | `OptionExposureResponse` 包装 `ExposureReport`，包含情景、估值时点、`all`、`zero_dte`、`later` 的 GEX、wall、flip 和 `ExposureCoverage`。默认 `absolute`，另有 `dealer_short`、`dealer_long` 和 `call_long_put_short`。 |
+| `/options/history` | 正整数 `underlying_con_id`，UTC Unix 纳秒字符串 `start`、`end`，可选 `offset`、`limit` | `OptionHistoryPage`。每个 `HistoricalOptionResult` 保留 `available`、`no_bars`、`expired` 或 `request_failed`，可用时附一分钟 `OptionMinuteBar`（F1 `ClosedBar` 外加 `close_ts`）。按已发布批次的合约顺序分页，默认 20 条，最多 50 条，`next_offset: null` 表示末页。 |
+
+Binance profile 状态是配置意图。启用后的采集进程状态仍由 F4 日志报告。行情正文通过 F3 的 `/market/products`、`/market/wal`、`/market/projection/latest`、`/market/watermarks` 和 `/quality/gaps` 读取，`source=binance`，`product` 依次可选 `spot`、`usdt-perp`、`usdt-perp-context`。读取仍受 F3 已登记的记录许可约束。永续上下文用 v2.0 的 `funding_rate` 和 `open_interest`。策略状态包含许可元数据，仅展示品种的行情正文留在内存。相关标识与降级行为见 [Binance 公共行情](integrations/binance.md)。
+
+IBKR 响应的 `access` 是 API 的显示用途许可，来源为 `ibkr`，产品为 `opra` 或 `nasdaq-totalview`，含所有者提供的 `license`、`display_live: true`、`record_local: false`、`derive_non_display: false`、`backup_personal_drive: false`。深度仅在三项权限已确认且 `state=receiving` 时提供行；`market_data_type` 为 `null`，时间为本地 `received_at`。链分页基于当前候选集，继续请求需保留筛选条件；一轮分页期间确认集可能变化。`discovery_complete` 是调度器自选范围的发现状态。覆盖始于合格的本地观察，止于取消或中断；`end` 须不晚于调度器当前时间。敞口的 `as_of` 缺省取最近快照，指定时查询完全相同的估值时点，见 [模型和覆盖口径](option-exposure.md)。
+
+历史请求只查所有者已取得的精确 `[start, end)` 窗口，完整 bar 可在 `end` 处闭合。`as_of` 表示该批次的取得时间；换批后应从第一页开始。失败只返回状态，省略供应商错误详情。时间戳及已有流序号沿用 `U64Text`，价格、数量、乘数和敞口沿用 `DecimalText`。接口不会触发 paper 历史请求或 Databento 下载。[F12 窗口与限制](option-history.md)
+
+### 行情所有者接入
+
+独立 `finance-api` 进程提供本地 bars、Binance profile 和 F3 记录查询。IBKR 查询需由拥有已验证 paper 只读会话、确认产品展示许可的一方将数据接入 `router_with_market_reads` 的 `MarketReadSources`。
+
+- 期权链和预算接入现有 `LineHandle`（实现 `OptionLineSource`），GET 不分配行情行。
+- 场所深度将 `run_depth` 的显示回调交给 `DepthFrames::publish`，包括 reset、inactive 和冷启动空簿。
+- 敞口由 `ExposureSource` 查找估值快照、时序阈值和可选价格网格，计算走 F9d 的 `evaluate`。历史由 `HistorySource` 查找 F12 的 `ContractHistory` 结果。两个查找接口读取内存，由所有者提供生命周期与留存策略。
+
+数据源未接入时返回 `503 / market_read_source_unavailable`；数据源已接入但深度、估值或历史窗口不可用时返回 `404 / market_read_not_found`。查询参数无效返回 `400 / market_read_query_invalid`，数据源返回不匹配结果或估值失败返回 `500 / market_read_failed`。IBKR 响应和敞口计算结果只在进程内与授权的私有请求中使用。F9e 的期权流观察与逐笔证据、页面焦点写接口和行情所有者的部署接线留待后续集成。本批复用 F1/F3 数据通道与既有 WS/SSE 导出。
+
 ## 示例批任务
 
 先完成 [源码构建](build.md)，执行一条命令：
@@ -147,7 +174,7 @@ finance 合并后，web 先固定 `openapi/finance.commit` 的完整 SHA，从�
 
 历史价量补拉通过本地命令运行。入口、JSON 运行报告和 Parquet 目录见批任务文档。[历史价量批任务](historical-pull.md)
 
-历史期权读取与 OPRA 费用估算通过 collector 的 Rust 库调用。IBKR 读取使用 `IbkrOptionHistory` 和 F9a 的只读 `PaperMarket` 会话，分别返回 `Expired`、`NoBars` 和请求错误。HTTP 与行情流的对外接口留待后续接入。[历史期权链](option-history.md)
+历史期权读取与 OPRA 费用估算通过 collector 的 Rust 库调用。IBKR 读取使用 `IbkrOptionHistory` 和 F9a 的只读 `PaperMarket` 会话。已取得的批次可接入第三批 HTTP 查询，费用估算和期权流证据各自沿用独立边界。[历史期权链](option-history.md)
 
 ## 历史回测与提交确认
 

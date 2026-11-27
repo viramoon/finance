@@ -15,7 +15,7 @@ use super::{
     flip::PreparedGammaGrid,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct ExposureView {
     pub totals: ExposureTotals,
     pub by_strike: Vec<StrikeExposure>,
@@ -25,38 +25,39 @@ pub struct ExposureView {
     pub flip: GammaFlip,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct ExposureTotals {
     pub absolute: Option<DecimalText>,
     pub gex: Option<DecimalText>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct StrikeExposure {
     pub strike: DecimalText,
     pub totals: ExposureTotals,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct ExpiryExposure {
     pub expiry: NaiveDate,
     pub totals: ExposureTotals,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct Wall {
     pub strike: DecimalText,
     pub exposure: DecimalText,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct GammaWalls {
     pub largest_absolute: Option<Wall>,
     pub largest_positive: Option<Wall>,
     pub most_negative: Option<Wall>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[schema(as = ExposureCoverage)]
 pub struct Coverage {
     pub universe_complete: bool,
     pub candidate_contracts: usize,
@@ -70,11 +71,20 @@ pub struct Coverage {
     pub observed: ObservationRange,
     pub open_interest_observed: Option<ObservationRange>,
     pub gamma_observed: Option<ObservationRange>,
+    #[schema(value_type = Option<ObservationSkew>)]
     pub max_oi_gamma_skew: Option<Duration>,
 }
 
+/// Serde's wire representation of a standard Duration.
+#[derive(utoipa::ToSchema)]
+#[expect(dead_code)]
+struct ObservationSkew {
+    secs: u64,
+    nanos: u32,
+}
+
 /// Independent counts. A contract may contribute to several exclusion reasons.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct Exclusions {
     pub missing_open_interest: usize,
     pub missing_gamma: usize,
@@ -93,7 +103,7 @@ impl Exclusions {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct ObservationRange {
     pub earliest: DateTime<Utc>,
     pub latest: DateTime<Utc>,

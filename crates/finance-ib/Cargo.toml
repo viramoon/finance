@@ -22,6 +22,7 @@ time-tz = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
+utoipa = "5"
 
 [dev-dependencies]
 ibapi = { version = "=3.2.0", features = ["test-support"] }

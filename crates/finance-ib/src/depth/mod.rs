@@ -22,7 +22,7 @@ pub const MAX_DEPTH_ROWS: u32 = 50;
 pub const PINNED_DEPTH_SLOTS: usize = 2;
 pub const MAX_DEPTH_SUBSCRIPTIONS: usize = PINNED_DEPTH_SLOTS + 1;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum DepthSymbol {
     Qqq,
@@ -113,7 +113,7 @@ impl DepthRequest {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, thiserror::Error)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, thiserror::Error, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DepthError {
     #[error("stock is outside the Nasdaq depth watchlist")]
@@ -213,7 +213,7 @@ pub enum DepthUpdate {
     Reset,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, utoipa::ToSchema)]
 pub struct DepthLevel {
     pub price: DecimalText,
     pub size: DecimalText,

@@ -67,6 +67,16 @@ cargo run --locked --offline -q -p finance-api -- export-read-stream /tmp/financ
 
 `FINANCE_PYTHON` 指向已构建 Nautilus 的 Python，`WAL_BIN` 指向刚构建的 `finance-market-wal`。联测在临时数据根用合成样本验证 Python 投影、因子发布和 Rust API 读取。生成器无需启动 API 或连接数据源。取用同一 finance 提交生成的 OpenAPI、WS/SSE schema 和合成样本供下游核对。[导出与下游更新顺序](docs/api.md#openapi-与契约)
 
+## 第三批读契约验收
+
+用进程内路由和合成输入核对 bars、指标、Binance profile 与期权响应。测试使用临时数据根。
+
+```sh
+cargo test --locked --offline -p finance-api --test bars --test market_options --test market_read --test read_contract --test read_stream
+```
+
+若 `/api/v1/market/binance/status` 返回 `disabled_by_profile`，核对 API 的 `FINANCE_BINANCE_CONFIG` 和 `FERTILE_PROFILE`。若配置已启用，采集端实际状态查看独立日志，数据持久进度查看 F3 水位。独立 API 的期权查询返回 `market_read_source_unavailable` 时，检查部署是否接入获准的共享行情所有者。接入后，深度的 `permission_unconfirmed` 表示须核对 L1、TotalView 和 EDS，`reset` 时清空两侧。历史窗口 404 时核对所有者取得的窗口，`expired` 表示该合约在 F12 读取时已不可得。[第三批接口与权限](docs/api.md#第三批读契约)
+
 ## 离线因子研究验收
 
 在仓库根目录用含研究依赖的现有 Python 环境执行。定向测试在内存生成截面和收盘价，月频登记读取仓库内原报告并核对证据哈希。

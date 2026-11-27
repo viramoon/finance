@@ -12,7 +12,7 @@ Nasdaq TotalView 提供八只自选标的的场所深度，最多同时钉住两
 
 本地行情链路支持 F1 事件追加、恢复和独立 Parquet 投影。已接入 [Hyperliquid 公共永续行情](docs/integrations/hyperliquid.md) 和 [Binance 现货与 USDT 永续](docs/integrations/binance.md)，Binance 内置 profile 默认关闭。[本地行情 WAL、投影与封段接口](docs/market-wal.md)
 
-finance-api 提供 v1 行情 WAL、投影、水位、缺口及因子研究只读查询，并从代码导出 REST OpenAPI 和版本化 WS/SSE 消息契约。[首批读契约与导出命令](docs/api.md#首批读契约)
+finance-api 提供 v1 行情 WAL、投影、水位、缺口及因子研究只读查询，并从代码导出 REST OpenAPI 和版本化 WS/SSE 消息契约。第三批覆盖主图 K 线、指标、Binance profile 状态以及期权链、订阅预算、Nasdaq 场所簿、期权敞口和历史窗口。IBKR 查询由获准的共享行情所有者接入，独立 API 未接入时返回 503。[第三批读契约](docs/api.md#第三批读契约)
 
 历史期权库复用 F9a 的只读 paper 会话确认合约，读取未到期 IBKR 期权的闭合分钟 bar。合成回放覆盖到期、权限与数据边界。Databento OPRA 提供默认禁用的离线费用估算。[历史期权链](docs/option-history.md)
 

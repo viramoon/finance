@@ -71,7 +71,7 @@ IB_LIVE_TEST=1 cargo test --locked -p finance-ib --test paper opt_in_paper_entit
 
 行情流提供实际类型、L1 bid/ask/last 价格与数量、期权 OI、带来源的 Greeks 和脱敏通知。顶档 Protobuf 数量和 `TickSize` 传来的 OI 用原十进制字符串构造 F1 `DecimalText`，保留有效范围内的全部位数及小数位。期权 OI 使用 streaming generic tick `101`，显式零值与缺失分别处理。`TickGeneric` 的数值在供应商报文中为 binary64，OI 只接受能精确转成整数的值。顶档价格和期权计算字段由 Protobuf 传输 binary64，在进入 finance 时转成可往返的 `DecimalText`。Greeks 区分 bid、ask、last 和 model，无法表示或缺失的字段留空。事件保留本地 UTC 接收时间。last 更新为顶档采样。期权实时异动线索和历史逐笔核验由后续任务处理。
 
-F9a 的行情和报告驻于会话内存，私有脚本只输出摘要。许可策略及后续投影接入由相应 issue 处理。HTTP OpenAPI 与 `protocol/v1` schema 维持原版本。
+F9a 的行情和报告驻于会话内存，私有脚本只输出摘要。共享行情所有者可将确认的期权链接入第三批 HTTP 查询。[第三批读契约](../api.md#第三批读契约)
 
 ## Nasdaq TotalView 场所深度
 
@@ -87,7 +87,7 @@ F9a 的行情和报告驻于会话内存，私有脚本只输出摘要。许可�
 
 源端 insert、update、delete 分别按该买卖侧的返回位置插入、替换或删除。数量沿用 Protobuf 的原始十进制字符串，价格在 IBKR 的 binary64 边界转换一次，进入 `DecimalText` 时保留可往返的十进制表示。Gateway 的 316（深度暂停）、317（重置）、本地队列溢出或其他回调失同步都会先发布空簿，再取消旧请求并尝试重订一次。重订后、收到首条有效更新前再次重置时，该标的保持空簿并报告 `Failed(InvalidCallback)`。调用方可在重新选择标的或建立新会话后重试。会话失效后，由所有者在新 paper 会话完成账户与合约核验，再恢复焦点。`DepthState` 分别表示权限待确认、等首笔、正在接收、清簿、退出焦点和失败。失败原因区分供应商无权限、额度已满、竞争会话、限频和连接故障。[SDK 补丁决策](../adr/ADR-0038-ibapi-market-data.md#f9c-的-nasdaq-场所深度扩展)
 
-深度只用于获准的私有会话内存展示。`ibkr/nasdaq-totalview` 产品禁止本地记录、非展示派生与个人 Drive 备份，项目禁用再分发。`open_market` 在检测到 SDK 原始报文记录已启用时拒绝打开会话。场所深度通过进程内接口提供。F9b 合并后由统一的 IBKR 行情所有者以 `DepthSource` 的合约确认和订阅接口接入预算，复用会话及深度名额。web 与 frontend 通过后续经授权的流接口接入页面焦点和展示。参阅 [WAL 产品许可](../market-wal.md#生产者与许可) 与 [HTTP 与代码导出](../api.md#行情与作业)。
+深度只用于获准的私有会话内存展示。`ibkr/nasdaq-totalview` 产品禁止本地记录、非展示派生与个人 Drive 备份，项目禁用再分发。`open_market` 在检测到 SDK 原始报文记录已启用时拒绝打开会话。统一的 IBKR 行情所有者可复用会话及 F9b 的深度名额，将最新场所簿接入第三批 HTTP 查询。页面焦点写接口由后续集成提供。[WAL 产品许可](../market-wal.md#生产者与许可) · [第三批读契约](../api.md#第三批读契约)
 
 ## 采集模式与数据目录
 
