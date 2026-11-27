@@ -145,25 +145,29 @@ pub(crate) async fn observations(
     let source = sources.flow_observations.as_ref().ok_or_else(unavailable)?;
     let access = source.display_access(OPRA).ok_or_else(missing)?;
     let snapshot = (source.read)(window).ok_or_else(missing)?;
+    for record in &snapshot.records {
+        let clue = &record.clue;
+        if &record.access != access
+            || clue.con_id != window.con_id
+            || !(window.start..window.end).contains(&clue.observed_at)
+            || clue.observed_at > snapshot.as_of
+        {
+            return Err(failed());
+        }
+        validate_coverage_key(record.coverage.as_ref(), window.con_id)?;
+    }
     let (records, next_offset) = query.page(&snapshot.records);
     let items = records
         .iter()
-        .map(|record| {
-            let clue = &record.clue;
-            if &record.access != access
-                || clue.con_id != window.con_id
-                || !(window.start..window.end).contains(&clue.observed_at)
-                || clue.observed_at > snapshot.as_of
-            {
-                return Err(failed());
-            }
-            Ok(OptionFlowObservation {
-                clue: clue.clone(),
-                budget: record.budget.clone(),
-                coverage: coverage(record.coverage.as_ref(), access, window.con_id)?,
-            })
+        .map(|record| OptionFlowObservation {
+            clue: record.clue.clone(),
+            budget: record.budget.clone(),
+            coverage: record
+                .coverage
+                .as_ref()
+                .map(|report| SubscriptionCoverage::from_report(access.clone(), report)),
         })
-        .collect::<Result<_, ApiError>>()?;
+        .collect();
     Ok(Json(OptionFlowObservationPage {
         access: access.clone(),
         as_of: snapshot.as_of,
@@ -236,11 +240,11 @@ pub(crate) async fn verification(
         .as_ref()
         .and_then(|source| source.display_access(OPRA))
     {
-        Some(opra_access) => coverage(
-            result.observation_coverage.as_ref(),
-            opra_access,
-            window.con_id,
-        )?,
+        Some(opra_access) => {
+            let report = result.observation_coverage.as_ref();
+            validate_coverage_key(report, window.con_id)?;
+            report.map(|report| SubscriptionCoverage::from_report(opra_access.clone(), report))
+        }
         None => None,
     };
     let (trades, next_offset) = query.page(&evidence.trades);
@@ -262,17 +266,11 @@ pub(crate) async fn verification(
     }))
 }
 
-fn coverage(
-    report: Option<&CoverageReport>,
-    access: &ProductPolicy,
-    con_id: i32,
-) -> Result<Option<SubscriptionCoverage>, ApiError> {
-    report
-        .map(|report| {
-            if report.key.product != Product::Opra || report.key.con_id != con_id {
-                return Err(failed());
-            }
-            Ok(SubscriptionCoverage::from_report(access.clone(), report))
-        })
-        .transpose()
+fn validate_coverage_key(report: Option<&CoverageReport>, con_id: i32) -> Result<(), ApiError> {
+    if report
+        .is_some_and(|report| report.key.product != Product::Opra || report.key.con_id != con_id)
+    {
+        return Err(failed());
+    }
+    Ok(())
 }

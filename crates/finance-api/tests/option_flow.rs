@@ -254,7 +254,7 @@ fn verification(record_local: bool, expired: bool) -> HistoricalFlow {
             kind: HistoricalKind::Trades,
             start: at(9),
             end: at(12),
-            observed_at: at(12),
+            observed_at: at(13),
             reason: HistoricalIssueReason::Pacing,
         });
         links = vec![
@@ -358,6 +358,61 @@ async fn observations_preserve_pending_clues_exact_values_coverage_and_equal_tim
     assert_eq!(second_row["clue"]["observed_at"], clue["observed_at"]);
     assert_eq!(second_row["clue"]["observation"]["kind"], "quote_widening");
     assert!(second_row["coverage"].is_null());
+    let beyond = get(&app, &path("observations", "&offset=2"), StatusCode::OK).await;
+    assert_eq!(beyond["items"], json!([]));
+    assert!(beyond["next_offset"].is_null());
+    assert!(fs::read_dir(root.path()).unwrap().next().is_none());
+}
+
+#[tokio::test]
+async fn observations_reject_conflicts_outside_the_requested_page() {
+    type CorruptSnapshot = fn(&mut FlowObservationSnapshot);
+    let conflicts: [(&str, CorruptSnapshot); 6] = [
+        ("license", |snapshot| {
+            snapshot.records[1].access.license = "incorrect-license".parse().unwrap();
+        }),
+        ("contract", |snapshot| {
+            snapshot.records[1].clue.con_id = CON_ID + 1;
+        }),
+        ("receipt window", |snapshot| {
+            snapshot.records[1].clue.observed_at = window().end;
+        }),
+        ("snapshot clock", |snapshot| {
+            snapshot.as_of = at(3);
+            snapshot.records[1].clue.observed_at = at(4);
+        }),
+        ("coverage contract", |snapshot| {
+            let mut report = coverage();
+            report.key.con_id = CON_ID + 1;
+            snapshot.records[1].coverage = Some(report);
+        }),
+        ("coverage product", |snapshot| {
+            let mut report = coverage();
+            report.key.product = Product::EquityL1;
+            snapshot.records[1].coverage = Some(report);
+        }),
+    ];
+    let root = tempfile::tempdir().unwrap();
+    for (conflict, corrupt) in conflicts {
+        let mut snapshot = observations();
+        corrupt(&mut snapshot);
+        let app = app(
+            root.path(),
+            MarketReadSources {
+                flow_observations: Some(observation_source(snapshot)),
+                ..Default::default()
+            },
+        );
+        for offset in 0..=2 {
+            let uri = path("observations", &format!("&limit=1&offset={offset}"));
+            let body = get(&app, &uri, StatusCode::INTERNAL_SERVER_ERROR).await;
+            assert_eq!(
+                body,
+                json!({"error": {"code": "market_read_failed", "message": "Could not read market data"}}),
+                "{conflict} at offset {offset}"
+            );
+        }
+    }
     assert!(fs::read_dir(root.path()).unwrap().next().is_none());
 }
 
@@ -387,6 +442,16 @@ async fn verification_pages_preserve_occurrences_corrections_quotes_and_evidence
     assert_eq!(first["counts"]["pending_intervals"], 1);
     assert_eq!(first["issues"][0]["reason"], "pacing");
     assert_eq!(first["issues"], second["issues"]);
+    assert_eq!(
+        first["issues"],
+        json!([{
+            "kind": "trades",
+            "start": at(9),
+            "end": at(12),
+            "observed_at": at(13),
+            "reason": "pacing"
+        }])
+    );
     assert_eq!(first["counts"], second["counts"]);
     assert_eq!(first["next_offset"], 2);
     assert!(second["next_offset"].is_null());
@@ -446,6 +511,15 @@ async fn expired_report_and_display_only_history_have_no_durable_position_or_unl
             assert_eq!(report["counts"]["unavailable_intervals"], 2);
             assert_eq!(report["issues"][0]["reason"], "expired_contract");
             assert_eq!(report["issues"][1]["kind"], "bid_ask");
+            assert_eq!(
+                report["issues"],
+                json!([
+                    {"kind": "trades", "start": at(0), "end": at(12),
+                     "observed_at": at(12), "reason": "expired_contract"},
+                    {"kind": "bid_ask", "start": at(-1), "end": at(12),
+                     "observed_at": at(12), "reason": "expired_contract"}
+                ])
+            );
             assert_eq!(report["trades"], json!([]));
         } else {
             assert_eq!(report["counts"]["verified"], 2);
@@ -619,4 +693,23 @@ fn batch4_openapi_exposes_only_typed_flow_reads_with_exact_numeric_schemas() {
         page["issues"]["items"]["$ref"],
         "#/components/schemas/HistoricalIssue"
     );
+    let issue = &schemas["HistoricalIssue"];
+    let required = issue["required"].as_array().unwrap();
+    for field in ["kind", "start", "end", "observed_at", "reason"] {
+        assert!(required.contains(&json!(field)), "{field} must be required");
+    }
+    for field in ["start", "end", "observed_at"] {
+        let time = &issue["properties"][field];
+        assert_eq!(time["type"], "string", "{field}");
+        assert_eq!(time["format"], "date-time", "{field}");
+    }
+    for (field, schema) in [
+        ("kind", "HistoricalKind"),
+        ("reason", "HistoricalIssueReason"),
+    ] {
+        assert_eq!(
+            issue["properties"][field]["$ref"],
+            format!("#/components/schemas/{schema}")
+        );
+    }
 }

@@ -206,11 +206,11 @@ IBKR 响应的 `access` 是 API 的显示用途许可，来源为 `ibkr`，产�
 | `GET /api/v1/options/flow/observations` | 按接收时间查内存观察快照，保留所有者的记录顺序。同一接收时刻可有多条记录。`as_of` 是快照时间。 | `OptionFlowObservationPage`。`items` 包含 `FlowObservation`、`BudgetStatus` 和可空的 `SubscriptionCoverage`，线索保留 `pending_verification`、规则版本及 `volume_increase` 或 `quote_widening` 的证据。 |
 | `GET /api/v1/options/flow/verification` | 查单一美东交易日期内已经取得的精确成交窗口，边界须为整秒。`quote_start` 是原报告的报价起点。仅对 `trades` 分页，`counts` 与 `issues` 始终覆盖整份报告。 | `OptionFlowVerificationPage`。含 `VerifiedTrade`、`HistoricalCounts`、`HistoricalIssue`、可空的 `observation_coverage` 和 `durable_through`。逐笔返回请求页证据、原始条件码及映射、成交状态、配对报价、方向估计及原因和权利金。 |
 
-观察记录和历史逐笔没有共享的成交标识。放量线索的权利金估计覆盖整个采样区间。历史逐笔的方向是带置信度的估计，参与者身份为 `unknown`。同秒同价的来源行以各自的出现序号保留。`issues` 按 TRADES 和 BID_ASK 给出未完成或不可回补的区间。已有报告可以包含零笔逐笔和 `expired_contract` 等原因。继续分页时保留原筛选条件，若 `as_of` 或 `verified_at` 变化，从首页重新读取。
+观察记录和历史逐笔没有共享的成交标识。放量线索的权利金估计覆盖整个采样区间。历史逐笔的方向是带置信度的估计，参与者身份为 `unknown`。同秒同价的来源行以各自的出现序号保留。`issues` 按 `kind`（`trades` 或 `bid_ask`）给出未完成或不可回补的半开区间 `[start, end)`，并保留发现时间 `observed_at` 和原因 `reason`。已有报告可以包含零笔逐笔和 `expired_contract` 等原因。继续分页时保留原筛选条件，若 `as_of` 或 `verified_at` 变化，从首页重新读取。
 
 `access` 分别返回来自 `ibkr/opra` 与 `ibkr/opra-history` 的 `ProductPolicy`，包含 `license` 和四项用途标记。历史报告的 `observation_coverage` 另外要求 OPRA 展示许可，其 `access` 属于 OPRA。价格、数量、合约乘数、阈值和金额沿用十进制字符串 `DecimalText`。观察 `generation`、修订 `revision` 与 F3 `durable_through` 沿用无符号 64 位整数字符串 `U64Text`。速率基线的 `contracts` 是无符号整数字符串，`elapsed_millis` 是分母。`durable_through` 对应历史产品的 F3 本地位置，未获本地记录许可时为 `null`。展示专用结果仅可通过授权的私有内存视图读取。契约生成只读取代码和固定合成样本，查询路径没有文件导出或落盘入口。历史原始证据仍遵循 [F3](#首批读契约) 和 [F1 v3 事件 schema](../protocol/v3/event.schema.json)。
 
-共享行情所有者通过 `MarketReadSources.flow_observations` 和 `flow_verifications` 提供本地快照查询及当前许可。查询只读取结果。未接入源返回 `503 / market_read_source_unavailable`，无符合条件的快照、报告或展示许可返回 `404 / market_read_not_found`，非法参数返回 `400 / market_read_query_invalid`。所有者返回的键、窗口、许可或水位冲突时返回 `500 / market_read_failed`。合法观察快照可返回空页。授权所有者负责快照生命周期，独立 API 进程默认无这些数据源。[领域接口和生产者规则](option-flow.md)
+共享行情所有者通过 `MarketReadSources.flow_observations` 和 `flow_verifications` 提供本地快照查询及当前许可。查询只读取结果。未接入源返回 `503 / market_read_source_unavailable`，无符合条件的快照、报告或展示许可返回 `404 / market_read_not_found`，非法参数返回 `400 / market_read_query_invalid`。所有者返回的键、窗口、许可或水位冲突时返回 `500 / market_read_failed`。每次观察查询先校验整个快照再分页。任一记录冲突时，同一快照的所有分页请求均返回 `500`，包括超出记录范围的请求。合法观察快照可返回空页。授权所有者负责快照生命周期，独立 API 进程默认无这些数据源。[领域接口和生产者规则](option-flow.md)
 
 第四批导出新增 REST schema。WS/SSE 继续发布[首批流契约](market-protocol.md#首批读契约的-ws-与-sse-消息)。期权流主动推送与续传、页面焦点写接口、集成连通性测试入口及共享行情所有者部署接线仍待后续契约或集成。web 接入按产品鉴权与限流，浏览器页面由 frontend 交付。
 
