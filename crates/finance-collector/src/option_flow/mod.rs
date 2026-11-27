@@ -47,6 +47,7 @@ impl FlowUse {
 
 #[derive(Clone, Debug)]
 pub struct ObservedFlow {
+    pub access: ProductPolicy,
     pub clue: FlowObservation,
     /// F9b local coverage of the half-open sample window, when queryable.
     /// Equal receipt timestamps have no interval to query.
@@ -60,6 +61,7 @@ pub struct LiveOptionFlow {
     scheduler: LineHandle,
     updates: broadcast::Receiver<LineUpdate>,
     observer: ObservationEngine,
+    policy: ProductPolicy,
 }
 
 impl LiveOptionFlow {
@@ -75,6 +77,7 @@ impl LiveOptionFlow {
             scheduler,
             updates,
             observer,
+            policy: policy.clone(),
         })
     }
 
@@ -100,6 +103,7 @@ impl LiveOptionFlow {
             if let Some(clue) = self.observer.apply(&update, contract.as_ref()) {
                 let (start, end) = clue.window();
                 return Some(ObservedFlow {
+                    access: self.policy.clone(),
                     coverage: self.scheduler.coverage(update.key, start, end),
                     budget: self.scheduler.status(),
                     clue,

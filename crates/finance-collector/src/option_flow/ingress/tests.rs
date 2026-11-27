@@ -357,6 +357,8 @@ async fn expired_and_display_only_history_do_not_create_wal_or_call_expired_sour
         .await
         .unwrap();
     assert_eq!(source.0.load(Ordering::Relaxed), 0);
+    assert_eq!(result.access, policy(false));
+    assert_eq!(result.window, window());
     assert_eq!(result.evidence.counts.verified, 0);
     assert_eq!(result.evidence.counts.unavailable_intervals, 2);
     let quality = history.ingress().quality().unwrap();

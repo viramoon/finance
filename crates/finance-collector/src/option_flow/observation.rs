@@ -10,6 +10,7 @@ use finance_ib::market::{
 use finance_market_protocol::{DecimalText, U64Text};
 use rust_decimal::Decimal;
 use serde::{Serialize, Serializer};
+use utoipa::ToSchema;
 
 use super::decimal::{exact_difference, exact_mean, exact_premium};
 use crate::line_budget::{LineMessage, LineUpdate};
@@ -23,7 +24,7 @@ const MIN_BASELINE_SAMPLES: usize = 3;
 const MAX_BASELINE_SAMPLES: usize = 32;
 const MAX_BASELINE_COHORTS: usize = 1024;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, ToSchema)]
 pub struct BaselineCohort {
     pub underlying_con_id: i32,
     pub expiry: NaiveDate,
@@ -31,22 +32,23 @@ pub struct BaselineCohort {
     pub session_segment: u16,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, ToSchema)]
 pub struct L1Sample {
     pub value: DecimalText,
     pub received_at: DateTime<Utc>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ObservationStatus {
     PendingVerification,
 }
 
 /// Exact contracts-per-millisecond ratio for the typical rate.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ToSchema)]
 pub struct BaselineVolumeRate {
     #[serde(serialize_with = "serialize_rate_numerator")]
+    #[schema(value_type = String, pattern = "^(0|[1-9][0-9]*)$")]
     pub contracts: u128,
     pub elapsed_millis: u32,
 }
@@ -58,7 +60,7 @@ fn serialize_rate_numerator<S: Serializer>(
     serializer.collect_str(contracts)
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, ToSchema)]
 pub struct VolumeComparison {
     pub elapsed_millis: u32,
     pub baseline_samples: usize,
@@ -66,7 +68,7 @@ pub struct VolumeComparison {
     pub elevated: Option<bool>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, ToSchema)]
 pub struct VolumeIncrease {
     pub earlier_cumulative_volume: L1Sample,
     pub later_cumulative_volume: L1Sample,
@@ -78,7 +80,7 @@ pub struct VolumeIncrease {
     pub estimated_premium: Option<DecimalText>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, ToSchema)]
 pub struct QuoteWidening {
     pub bid: L1Sample,
     pub ask: L1Sample,
@@ -89,7 +91,7 @@ pub struct QuoteWidening {
     pub baseline_samples: usize,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(tag = "kind", content = "evidence", rename_all = "snake_case")]
 pub enum ObservationEvidence {
     VolumeIncrease(Box<VolumeIncrease>),
@@ -97,7 +99,7 @@ pub enum ObservationEvidence {
 }
 
 /// No trade ID, direction, or participant is implied by these local samples.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, ToSchema)]
 pub struct FlowObservation {
     pub rule_version: &'static str,
     pub status: ObservationStatus,

@@ -21,14 +21,17 @@ use finance_ib::market::{
     ConfirmedContract, ContractKind, ContractQuery, MarketEvent, RequestKey, option_market_date,
 };
 use finance_market_protocol::DecimalText;
+use serde::Serialize;
 use tokio::{
     sync::{Notify, broadcast},
     time::Instant,
 };
+use utoipa::ToSchema;
 
 use self::coverage::Coverage;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum SchedulerPhase {
     Starting,
     Online,
@@ -58,7 +61,7 @@ pub struct LineUpdate {
     pub message: LineMessage,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, ToSchema)]
 pub struct BudgetStatus {
     pub phase: SchedulerPhase,
     pub as_of: DateTime<Utc>,
@@ -464,6 +467,9 @@ mod tests {
         send(volume("20", open));
         send(volume("24", open));
         let same_time = flow.next().await.unwrap();
+        assert_eq!(same_time.access.product.as_str(), OPRA);
+        assert_eq!(same_time.access.license.as_str(), "synthetic");
+        assert!(!same_time.access.record_local);
         assert_eq!(same_time.clue.window(), (open, open));
         assert!(same_time.coverage.is_none());
         assert_eq!(same_time.budget.confirmed_options, 1);

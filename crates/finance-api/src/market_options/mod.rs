@@ -2,6 +2,7 @@
 
 pub(crate) mod analytics;
 pub(crate) mod depth;
+pub(crate) mod flow;
 pub(crate) mod lines;
 
 use analytics::{exposure, history};
@@ -10,6 +11,10 @@ use lines::{chain, coverage, subscriptions};
 
 pub use analytics::{ExposureInput, ExposureSource, HistoryInput, HistorySource};
 pub use depth::DepthFrames;
+pub use flow::{
+    FlowObservationSnapshot, FlowObservationSource, FlowVerificationSource, OptionFlowSource,
+    OptionFlowWindow,
+};
 pub use lines::OptionLineSource;
 
 use crate::{ApiError, AppState, error};
@@ -31,6 +36,8 @@ pub struct MarketReadSources {
     pub depth: Option<Licensed<DepthFrames>>,
     pub exposure: Option<Licensed<Arc<ExposureSource>>>,
     pub history: Option<Licensed<Arc<HistorySource>>>,
+    pub flow_observations: Option<OptionFlowSource<FlowObservationSource>>,
+    pub flow_verifications: Option<OptionFlowSource<FlowVerificationSource>>,
 }
 
 /// Attach a product already authorized by the owner for private display.
@@ -72,6 +79,8 @@ pub(crate) fn routes(sources: MarketReadSources) -> Router<AppState> {
         .route("/api/v1/options/chain", get(chain))
         .route("/api/v1/options/exposure", get(exposure))
         .route("/api/v1/options/history", get(history))
+        .route("/api/v1/options/flow/observations", get(flow::observations))
+        .route("/api/v1/options/flow/verification", get(flow::verification))
         .layer(Extension(Arc::new(sources)))
 }
 

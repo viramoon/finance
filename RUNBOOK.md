@@ -90,6 +90,17 @@ cargo test --locked --offline -p finance-api --test bars --test market_options -
 
 排查期权链时，按快照 `as_of` 的美东日期核对到期日。订阅覆盖返回 `500 / market_read_failed` 时，在行情所有者侧核对响应键的 `con_id`、OPRA 产品和 OI 请求参数。
 
+## 第四批期权流读契约验收
+
+```sh
+cargo test --locked --offline -p finance-api --test option_flow --test market_options --test read_contract --test read_stream
+cargo test --locked --offline -p finance-collector option_flow
+```
+
+测试在临时数据根用合成观察、逐笔与时钟核对分页、精度、许可分流和已有流契约。若查询返回 `503 / market_read_source_unavailable`，核对是否由共享行情所有者给 `router_with_market_reads` 接入对应查询源。收到 `404 / market_read_not_found` 时核对合约、半开时窗、快照保留范围和相应产品的私有展示许可。历史核验缺口按响应的 `issues` 查明 TRADES 或 BID_ASK 及区间。`expired_contract` 表示该时段的逐笔已不可回补。
+
+已获本地记录许可的 `ibkr/opra-history` 核验报告可用 `durable_through` 对照同一数据根和产品的 F3 水位。仅展示模式从进程内读取，核验水位为空。按[接口导出流程](docs/api.md#openapi-与契约)取用同一提交生成的 OpenAPI 和已有的流产物。[第四批接口与权限](docs/api.md#第四批期权流读契约)
+
 ## 离线因子研究验收
 
 在仓库根目录用含研究依赖的现有 Python 环境执行。定向测试在内存生成截面和收盘价，月频登记读取仓库内原报告并核对证据哈希。

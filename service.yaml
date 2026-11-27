@@ -141,6 +141,8 @@ processes:
       option_chain: /api/v1/options/chain
       option_exposure: /api/v1/options/exposure
       option_history: /api/v1/options/history
+      option_flow_observations: /api/v1/options/flow/observations
+      option_flow_verification: /api/v1/options/flow/verification
     bars_query_projection: "${FERTILE_DATA_ROOT}/finance-state/bars/v1"
     read_contract:
       version: v1
@@ -219,6 +221,7 @@ option_flow:
   observation: memory_only
   history_product: ibkr/opra-history
   historical_wal: finance-state/market-wal/ibkr/opra-history # 仅经许可记录
+  http_read_source: 由共享行情所有者注入观察快照和已取得的核验报告
   documentation: docs/option-flow.md
 ib_line_budget:
   invocation: in_process_rust_library

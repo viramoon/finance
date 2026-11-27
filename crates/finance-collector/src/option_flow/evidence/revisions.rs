@@ -6,11 +6,12 @@ use finance_ib::historical::option_ticks::{HistoricalTick, HistoryTrade};
 use finance_market_protocol::{NonEmptyText, U64Text};
 use rust_decimal::Decimal;
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use super::{ConditionMeaning, MappedCondition, VerifiedTrade};
 
 /// The local within-request evidence key. This is never a provider trade ID.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, ToSchema)]
 pub struct TradeOccurrence {
     pub page: u16,
     pub occurred_at: DateTime<Utc>,
@@ -28,7 +29,7 @@ impl From<&HistoricalTick<HistoryTrade>> for TradeOccurrence {
 }
 
 /// Provider or trusted replay metadata for a single occurrence.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TradeAction {
     Original {
@@ -45,13 +46,13 @@ pub enum TradeAction {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, ToSchema)]
 pub struct TradeLink {
     pub occurrence: TradeOccurrence,
     pub action: TradeAction,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TradeStatus {
     Active,

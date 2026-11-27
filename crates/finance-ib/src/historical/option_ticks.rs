@@ -10,19 +10,20 @@ use finance_market_protocol::DecimalText;
 use rust_decimal::Decimal;
 use serde::Serialize;
 use std::{collections::HashMap, hash::Hash};
+use utoipa::ToSchema;
 
 const PAGE_LIMIT: u16 = 1_000;
 const MAX_PAGES_PER_KIND: u16 = 64;
 const MAX_RESPONSE_ROWS: usize = 100_000;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HistoricalKind {
     Trades,
     BidAsk,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HistoricalIssueReason {
     ExpiredContract,
@@ -41,7 +42,7 @@ pub enum HistoricalIssueReason {
     PacingState,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, ToSchema)]
 pub struct HistoricalIssue {
     pub kind: HistoricalKind,
     pub start: DateTime<Utc>,
@@ -50,7 +51,7 @@ pub struct HistoricalIssue {
     pub reason: HistoricalIssueReason,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, ToSchema)]
 pub struct HistoryTrade {
     pub occurred_at: DateTime<Utc>,
     pub price: DecimalText,
@@ -61,7 +62,7 @@ pub struct HistoryTrade {
     pub unreported: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, ToSchema)]
 pub struct HistoryQuote {
     pub occurred_at: DateTime<Utc>,
     pub bid: Option<DecimalText>,
@@ -73,7 +74,7 @@ pub struct HistoryQuote {
 }
 
 /// Request and receipt evidence. The broker request ID is scoped to its connection.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ToSchema)]
 pub struct HistoricalBatch {
     pub kind: HistoricalKind,
     pub requested_start: DateTime<Utc>,
@@ -82,7 +83,7 @@ pub struct HistoricalBatch {
     pub page: u16,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, ToSchema)]
 pub struct HistoricalTick<R> {
     pub row: R,
     pub batch: HistoricalBatch,
