@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use finance_ib::depth::permission::{PRODUCT as TOTALVIEW_PRODUCT, SOURCE as TOTALVIEW_SOURCE};
 use finance_market_protocol::{Capability, Event, Instrument, InstrumentId, Token, U64Text};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tempfile::NamedTempFile;
@@ -45,6 +46,12 @@ pub struct ProductPolicy {
 
 impl ProductPolicy {
     fn validate(&self) -> Result<()> {
+        ensure!(
+            self.source.as_str() != TOTALVIEW_SOURCE
+                || self.product.as_str() != TOTALVIEW_PRODUCT
+                || !(self.record_local || self.derive_non_display || self.backup_personal_drive),
+            "IBKR Nasdaq TotalView policy permits live display only"
+        );
         ensure!(
             !self.backup_personal_drive || self.record_local,
             "WAL backup requires permission to record locally"
@@ -559,6 +566,54 @@ mod tests {
             event,
             policy,
         )
+    }
+
+    #[test]
+    fn totalview_product_cannot_record_derive_or_back_up() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut instrument, mut capability, mut event, mut policy) = fixture();
+        policy.source = TOTALVIEW_SOURCE.parse().unwrap();
+        policy.product = TOTALVIEW_PRODUCT.parse().unwrap();
+        capability.source = policy.source.clone();
+        capability.product = policy.product.clone();
+        event.source = policy.source.clone();
+        event.product = policy.product.clone();
+        // Reuse the existing synthetic payload to exercise the generic F1 admission path.
+        instrument.supplier_symbols[0].source = policy.source.clone();
+        instrument.supplier_symbols[0].product = policy.product.clone();
+
+        for (record, derive, backup) in [
+            (true, false, false),
+            (false, true, false),
+            (true, false, true),
+        ] {
+            let forbidden = ProductPolicy {
+                record_local: record,
+                derive_non_display: derive,
+                backup_personal_drive: backup,
+                ..policy.clone()
+            };
+            assert!(MarketIngress::open(temp.path(), forbidden).is_err());
+        }
+        let mut ingress = MarketIngress::open(temp.path(), policy.clone()).unwrap();
+        assert_eq!(
+            ingress.publish(event, &instrument, &capability).unwrap(),
+            PublishResult::DisplayOnly
+        );
+        assert_eq!(ingress.display_events().count(), 1);
+        assert!(ingress.flush().unwrap().is_none());
+        assert!(ingress.seal_for_backup().is_err());
+        assert!(
+            recording_policy(temp.path(), &policy.source, &policy.product)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            WalReader::products(&wal_root(temp.path()))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(temp.path().read_dir().unwrap().count(), 0);
     }
 
     #[test]

@@ -108,6 +108,20 @@ Replay 可单独运行。paper 模式下 probe 用 client ID 91，collector 用 
 
 经授权后，在美股常规交易时段使用已登录的本机 paper Gateway，确认 Gateway 的 API 设置为只读。选择一份已知活跃的 SMART USD 美股期权，使用该合约的 `conId`，按 [产品权限验收](docs/integrations/ib.md#美股-l1-和-opra-权限验收) 运行 `scripts/check-ib-entitlements.sh`。权限探针占用现有 probe client ID 91，逐标的开一条流并在进入下一项前取消。`pending` 保留具体原因。遇到 `gateway_disconnected` 时，先恢复只读 paper 会话再重新运行探针。遇到 `cancel_failed` 时，本轮行数回收结果未知，探针关闭连接并保留已完成标的的证据。发现休市、无回调或报价不完整时，于常规交易时段复测。探针只输出脱敏摘要，原始行情和账户资料留在私有环境。
 
+### 离线验收 Nasdaq TotalView 场所深度
+
+焦点测试使用独立列出的 QQQ、AAPL、MSFT、NVDA、AMZN、GOOGL、META、TSLA 逐一验证切换，另验证 SPY 拒绝、两个固定名额与一个页面名额、清簿再订阅和场所及档数标签。深度测试使用合成回调和内存 Gateway 回放，无需账户配置。
+
+WAL 隔离测试在子进程中运行深度展示入口，将工作目录和 `FERTILE_DATA_ROOT` 都指向同一个临时目录。子进程在展示盘口时和退出展示循环后核对目录为空，并检查 WAL 产品和 TotalView 记录策略。随后在同一目录落盘一条获准记录的合成 F1 盘口快照作为对照，父进程核对只存在该对照产品且能原样回读快照。产品策略测试另行核对 `ibkr/nasdaq-totalview` 拒绝本地记录、非展示派生与 Drive 备份。
+
+```sh
+cargo test --locked --offline -p finance-ib depth
+cargo test --locked --offline -p finance-collector --test nasdaq_totalview
+cargo test --locked --offline -p finance-collector totalview_product_cannot_record_derive_or_back_up
+```
+
+授权的私有 paper 验收须独立核对综合股票 L1、TotalView-OpenView、EDS、paper 数据共享和实际 Nasdaq 深度回调。遇到休市或无回调时保留待验证状态，遇到名额不足时检查同一用户名的现有深度窗口。真实证据遵循 [数据入仓防护](docs/data-guard.md)。接口和故障状态见 [Nasdaq TotalView 场所深度](docs/integrations/ib.md#nasdaq-totalview-场所深度)。
+
 ### F1 行情 WAL 与投影
 
 生产者通过 [本地行情接口](docs/market-wal.md) 绑定产品许可，并在确认采集前提交 WAL。在独立数据根可使用已有源码构建的 Python 环境追平投影并检查水位。下列命令把 `$DATA_ROOT`、`$SOURCE` 和 `$PRODUCT` 设为目标数据根与已登记产品，`$WAL_BIN` 设为构建的 `finance-market-wal` 路径。
@@ -142,6 +156,14 @@ cargo run --locked -p finance-collector --bin finance-hyperliquid -- /path/to/re
 进程没有监听端口，SIGTERM/SIGINT 停止采集、清除流基线并刷新已暂存 WAL。记录模式下，用 `finance-market-wal --data-root "$FERTILE_DATA_ROOT" watermarks --source hyperliquid --product perp-public` 查持久水位，将子命令换为 `quality` 查质量报告。核对首张新快照的 `book_restored_from_snapshot` 和历史缺口的 `history_unrecoverable`。发生 WebSocket 订阅或帧校验失败时检查连接与订阅确认，采集器按上限退避重试。若重连后仅收到与断线前时间戳相同或更早的簿，当前簿继续等待新快照。遇到策略绑定或存储错误，检查数据根、许可与单写者，策略改变按 [F3 规则](docs/market-wal.md#生产者与许可) 处理。
 
 离线验收使用 `cargo test --locked --offline -p finance-collector --test hyperliquid` 与 `PYTHONPATH=python "$FINANCE_PYTHON" -m unittest discover -s tests -p 'test_hyperliquid*.py' -v`。Rust 测试用 `finance-hyperliquid CONFIG --replay FILE` 重放合成报文。该模式读取 UTF-8 JSON Lines，`event` 为 `metadata`、`connected`、`disconnected` 或 `frame`，每行都含十进制字符串 `receive_ts`（UTC 纳秒）。`metadata` 和 `frame` 行的 `data` 是原始 JSON 文本字符串。回放使用隔离数据根。行情帧校验失败后，回放丢弃该连接剩余帧，直到下一条 `connected`。完整语义见 [Hyperliquid 行情接口](docs/integrations/hyperliquid.md)。
+
+### 主图查询
+
+F3 投影进程发布 F1 事件的 Parquet 和修订索引。主图读取 `finance-state/bars/v1/` 下由受信发布方按许可另行生成的展示快照。
+
+用 `GET /api/v1/indicators` 核对已注册的算法版本。请求 `GET /api/v1/market/bars` 时提供与展示投影一致的标的、源、产品、周期和复权口径。404 时检查同一数据根下是否已发布该序列。收到 `indicator_history_unavailable` 时核对 `history_complete` 和序列起点，补足前置历史后重新发布。收到 `indicator_work_limit` 时减小 `limit` 后分页，若前置历史已超预算，则选择更少或更短周期的指标。收到 `indicator_calculation_failed` 时按同一组件参数检查整个闭合前缀的数值和精度。其余投影 500 错误按文件权限、时间次序和 OHLCV 类型排查。旧数据的问题按快照覆盖、`as_of`、`first_available_ts` 和 `delay_tier` 排查。API 启动参数与健康检查沿用原接口，部署须在受控数据根发布合法展示投影。详细契约见 [主图 API](docs/api.md#主图行情与指标)。
+
+收到 500 `bars_invalid` 时，核对投影 OHLCV 是否符合 F1 十进制文本规则。每个字段的整数位和小数位合计最多 28 位，超限在投影解析时即会报错。合法输入的计算结果还须满足输出编码范围，详见 [数值域与舍入](docs/indicators.md#数值域与舍入)。
 
 ### 在盒子上验证 paper 行情恢复
 

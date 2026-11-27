@@ -10,6 +10,8 @@
 - 仅展示的产品只在进程内提供 `display_events()`，窗口最多 5 秒、256 条并受 16 MiB 的编码大小约束。调用方可在空闲时调用 `expire_display()` 释放内存。此路径不创建任何行情文件或持久状态。缺少展示与落盘权限时返回 `Denied`。投影只把已获准落盘的事件转换为归档与查询索引，F6 等非展示计算由调用方另行检查 `derive_non_display`。
 - `report_quality(QualityReport)` 记录流的 `channel`、`instrument_id`、含端点的 UTC 纳秒区间、原因、恢复类别与计数，重复报告同一区间和相同内容时幂等。原因包括 `license_skip`、`rotation`、`source_rate_limit`、`disconnected`、`source_gap` 和 `storage_unavailable`。恢复类别为 `tick_backfilled`（已逐笔补齐）、`bar_backfilled`（仅 bar 补齐）、`book_restored_from_snapshot`（从新快照恢复当前簿）、`history_unrecoverable`（历史缺口不可补）。`outcome: null` 表示待恢复，`count: null` 表示数量未知。计数为恢复的条目数，或不可恢复区间内已知缺失的条目数。有落盘权限的产品将报告保存在本机。其余产品仅在内存中保存最多 256 条，`MarketIngress::quality()` 只返回收到后 5 秒内的记录，期间的重复报告沿用首次到期时间。写入时清理过期质量记录，空闲适配器可调用 `expire_display()` 释放这些记录的内存。
 
+`ibkr/nasdaq-totalview` 为仅展示产品。共享入口按产品拒绝开启本地记录、非展示派生或 Drive 备份的策略。深度适配器通过内存接口交付场所簿，无需实例化 WAL 入口或提供数据根。[Nasdaq TotalView 场所深度](integrations/ib.md#nasdaq-totalview-场所深度)
+
 ## WAL 格式与恢复边界
 
 WAL 根为 `<data-root>/finance-state/market-wal`。产品目录为 `<source>/<product>`，两部分都使用 F1 标识。对一个产品只有一个进程可持有 `writer.lock`。每次获得写锁并成功打开后递增持久化写者代际。WAL 本地位置从 1 开始按投递递增，同一产品内以 0 表示起点。写者代际与 F1 事件的 epoch 是独立坐标。

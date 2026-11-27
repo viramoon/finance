@@ -1,0 +1,207 @@
+use std::{
+    env,
+    path::{Path, PathBuf},
+    process::Command,
+    time::Duration,
+};
+
+use async_trait::async_trait;
+use finance_collector::{
+    market_ingress::{MarketIngress, ProductPolicy, PublishResult, recording_policy, wal_root},
+    market_wal::WalReader,
+};
+use finance_ib::{
+    depth::{
+        DEFAULT_DEPTH_ROWS, DepthError, DepthFocus, DepthLevel, DepthOperation, DepthPermissions,
+        DepthRequest, DepthSide, DepthSource, DepthState, DepthSubscription, DepthSymbol,
+        DepthUpdate,
+        permission::{PRODUCT, SOURCE},
+        run_depth,
+    },
+    market::{ConfirmedContract, ContractKind},
+};
+use finance_market_protocol::{Capability, Event, Instrument};
+use serde_json::Value;
+use tokio::sync::watch;
+
+const REPLAY_CHILD: &str = "FINANCE_TOTALVIEW_REPLAY_CHILD";
+const DISPLAY_TEST: &str = "totalview_displays_exact_rows_without_creating_wal";
+const CONTROL_SOURCE: &str = "fixture";
+const CONTROL_PRODUCT: &str = "perp-replay";
+const CONTROL_SNAPSHOT: usize = 9;
+const F1_EXAMPLES: &str = include_str!("../../../protocol/v1/examples.json");
+
+struct SyntheticDepth;
+
+#[async_trait]
+impl DepthSource for SyntheticDepth {
+    type Subscription = SyntheticLine;
+
+    async fn confirm_depth(&self, symbol: DepthSymbol) -> Result<ConfirmedContract, DepthError> {
+        Ok(ConfirmedContract {
+            con_id: 9,
+            symbol: symbol.as_str().into(),
+            primary_exchange: Some("NASDAQ".into()),
+            kind: ContractKind::Equity,
+            liquid_hours: Vec::new(),
+        })
+    }
+
+    async fn subscribe_depth(
+        &self,
+        request: &DepthRequest,
+    ) -> Result<Self::Subscription, DepthError> {
+        assert_eq!(request.contract().symbol, "QQQ");
+        assert_eq!(request.rows(), DEFAULT_DEPTH_ROWS);
+        // A fixed synthetic row. The size exceeds JS's exact integer range.
+        Ok(SyntheticLine(Some(DepthUpdate::Row {
+            side: DepthSide::Bid,
+            operation: DepthOperation::Insert,
+            position: 0,
+            level: Some(DepthLevel {
+                price: "123.4567".parse().unwrap(),
+                size: "9007199254740993.125".parse().unwrap(),
+            }),
+        })))
+    }
+}
+
+struct SyntheticLine(Option<DepthUpdate>);
+
+#[async_trait]
+impl DepthSubscription for SyntheticLine {
+    fn request_id(&self) -> i32 {
+        12
+    }
+
+    async fn next(&mut self) -> Result<Option<DepthUpdate>, DepthError> {
+        match self.0.take() {
+            Some(update) => Ok(Some(update)),
+            None => std::future::pending().await,
+        }
+    }
+
+    async fn cancel(&mut self) -> Result<(), DepthError> {
+        Ok(())
+    }
+}
+
+async fn replay_display(root: &Path) {
+    let (sender, receiver) = watch::channel(DepthFocus::new(&[], Some(DepthSymbol::Qqq)).unwrap());
+    let mut sender = Some(sender);
+    let permissions = DepthPermissions {
+        equity_l1_confirmed: true,
+        totalview_confirmed: true,
+        eds_confirmed: true,
+    };
+    let display = run_depth(
+        &SyntheticDepth,
+        receiver,
+        permissions,
+        DEFAULT_DEPTH_ROWS,
+        |frame| {
+            if frame.state == DepthState::Receiving {
+                assert_eq!(frame.venue(), "NASDAQ");
+                assert_eq!(frame.requested_rows, DEFAULT_DEPTH_ROWS);
+                assert_eq!(frame.returned_rows(), 1);
+                assert!(frame.asks.is_empty());
+                assert_eq!(frame.bids[0].size.as_str(), "9007199254740993.125");
+                assert_eq!(root.read_dir().unwrap().count(), 0, "display wrote a file");
+                drop(sender.take().expect("only one synthetic row"));
+            }
+        },
+    );
+    tokio::time::timeout(Duration::from_secs(3), display)
+        .await
+        .expect("synthetic display timed out")
+        .unwrap();
+    assert!(sender.is_none(), "display never received the synthetic row");
+    assert!(
+        recording_policy(root, &SOURCE.parse().unwrap(), &PRODUCT.parse().unwrap())
+            .unwrap()
+            .is_none()
+    );
+    assert!(WalReader::products(&wal_root(root)).unwrap().is_empty());
+    assert_eq!(root.read_dir().unwrap().count(), 0, "display left files");
+}
+
+fn record_control_event(root: &Path) {
+    let examples: Value = serde_json::from_str(F1_EXAMPLES).unwrap();
+    let event: Event =
+        serde_json::from_value(examples["events"][CONTROL_SNAPSHOT].clone()).unwrap();
+    let instrument: Instrument =
+        serde_json::from_value(examples["instruments"][4].clone()).unwrap();
+    let capability: Capability =
+        serde_json::from_value(examples["capabilities"][2].clone()).unwrap();
+    let mut ingress = MarketIngress::open(
+        root,
+        ProductPolicy {
+            source: event.source.clone(),
+            product: event.product.clone(),
+            license: event.license.clone(),
+            display_live: false,
+            record_local: true,
+            derive_non_display: false,
+            backup_personal_drive: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        ingress.publish(event, &instrument, &capability).unwrap(),
+        PublishResult::Staged(1)
+    );
+    assert_eq!(ingress.flush().unwrap(), Some(1));
+}
+
+#[test]
+fn totalview_displays_exact_rows_without_creating_wal() {
+    if env::var_os(REPLAY_CHILD).is_some() {
+        let root = PathBuf::from(env::var_os("FERTILE_DATA_ROOT").expect("isolated data root"));
+        assert_eq!(env::current_dir().unwrap(), root);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(replay_display(&root));
+        // A positive control in the same process and directory proves that the
+        // storage checks can observe a real F1 WAL when recording is allowed.
+        record_control_event(&root);
+        return;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let output = Command::new(env::current_exe().unwrap())
+        .args(["--exact", DISPLAY_TEST])
+        .env_clear()
+        .env(REPLAY_CHILD, "1")
+        .env("FERTILE_DATA_ROOT", &root)
+        .env("TMPDIR", &root)
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "isolated display replay failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let wal = wal_root(&root);
+    assert_eq!(
+        WalReader::products(&wal).unwrap(),
+        [(
+            CONTROL_SOURCE.parse().unwrap(),
+            CONTROL_PRODUCT.parse().unwrap()
+        )]
+    );
+    let reader = WalReader::open(&wal, CONTROL_SOURCE, CONTROL_PRODUCT).unwrap();
+    assert_eq!(reader.durable_position(), 1);
+    let records = reader.read_after(0, 2).unwrap();
+    assert_eq!(records.len(), 1);
+    let examples: Value = serde_json::from_str(F1_EXAMPLES).unwrap();
+    assert_eq!(
+        serde_json::to_value(&records[0].event).unwrap(),
+        examples["events"][CONTROL_SNAPSHOT]
+    );
+}

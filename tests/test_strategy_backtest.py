@@ -142,6 +142,37 @@ class StrategyBacktestTests(unittest.TestCase):
         self.assertEqual(rsi.quantize(Decimal("0.01")), Decimal("88.89"))
         self.assertIsNone(evaluate_indicator(bars[:2], "indicator.rsi_wilder@1.0.0", {"period": 2, "field": "close"}))
 
+    def test_scalar_evaluator_receives_identical_inputs_for_distinct_band_outputs(self):
+        dates, assets, universe = _input(["10.00", "12.00", "11.00"], [10] * 3)
+        plan = _plan(("Upper", "Lower"))
+        reference = "indicator.bollinger@1.0.0"
+        parameters = {"period": 2}
+        plan["bundle"]["spec"]["factors"] = {
+            "Upper": {"use": reference, "params": dict(parameters), "output": "upper"},
+            "Lower": {"use": reference, "params": dict(parameters), "output": "lower"},
+        }
+        calls = []
+
+        def indicator(bars, component, params):
+            calls.append((tuple(bars), component, dict(params)))
+            return None
+
+        run_config_strategy_backtest(
+            plan=plan, assets=assets, universe=universe,
+            start=dates[1], end=dates[-1], indicator_evaluator=indicator,
+        )
+        first_close = assets[0].bars[:2]
+        self.assertEqual([call for call in calls if call[0] == first_close], [
+            (first_close, reference, parameters),
+            (first_close, reference, parameters),
+        ])
+
+        with self.assertRaises(ResearchError) as error:
+            run_config_strategy_backtest(
+                plan=plan, assets=assets, universe=universe, start=dates[1], end=dates[-1],
+            )
+        self.assertEqual(error.exception.code, "unsupported_strategy_component")
+
     def test_transitive_factor_dependency_blocks_entry_until_available(self):
         dates, assets, universe = _input(["10.00"] * 3 + ["11.00"] * 3, [10] * 6)
         plan = _plan(("Sleeve",))
