@@ -23,7 +23,7 @@ FERTILE_PROFILE=cloudbox cargo run --locked -p finance-api
 | FINANCE_API_PORT | 1～65535，默认 8081 |
 | FERTILE_DATA_ROOT | 绝对数据根目录，默认 /home/box/fertile/data |
 
-未知 YAML 字段、未知 profile、非法 IP / 端口、相对数据根路径在启动时拒绝。配置不读取账户密钥。当前无认证，默认 loopback；部署方只在受控内网显式覆盖绑定地址，不能作为公网写操作入口。更丰富的查询、认证和受控交易接口由后续独立 issue 确定。
+未知 YAML 字段、未知 profile、非法 IP / 端口、相对数据根路径在启动时拒绝。配置不读取账户密钥。finance API 默认绑定 loopback。web 负责调用方授权和限流，部署方只在受控内网显式覆盖绑定地址。
 
 ## 接口与状态
 
@@ -45,7 +45,7 @@ Nasdaq TotalView 的页面焦点与场所深度由进程内 Rust 接口提供。
 
 POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /api/v1/backtests/{id} 查看执行进度与摘要，GET /api/v1/backtests 按 cursor 和 limit 翻页。提交使用同库事务完成幂等检查和容量检查。多个 worker 可独立领取并续租，租约是服务端状态。完整输入范围、超时和恢复见 [作业运维](backtest-jobs.md)。公网入口由 web 鉴权并限流。
 
-`finance-decision` 的信号与检查点保存在本地决策库，读写边界见 [实时决策接口](decision-process.md)。
+`finance-decision` 的信号与检查点保存在本地决策库。信号发布和分页见[第二批契约](#第二批策略回测与研究契约)，进程边界见[实时决策接口](decision-process.md)。
 
 ## 配置策略提交与结果
 
@@ -65,6 +65,46 @@ POST /api/v1/backtests 接收带 Idempotency-Key 的任务并返回 202。GET /a
 使用 `source: {"kind":"inline","format":"yaml","content":"<配置文件内容>"}` 可直接编译并登记。内联文件和相同已登记版本使用同一编译路径。同一键、相同区间和相同规范化配置哈希返回原作业 ID。使用同一键提交另一份有效配置或区间返回 409 `key_conflict`。指定未知登记版本返回 404 `strategy_version_not_found`，缺少已发布的本地回放快照返回 422 `no_data`。
 
 列表与详情以已登记版本和 `content_sha256` 表示配置作业请求。成功摘要保留通用作业字段，`instrument` 为 `PORTFOLIO`，并带有 `run_manifest` 与 `strategy_report`。前者锁定实际执行版本与回放数据，后者包含净值、仓位、成交、子账、冲突归因和覆盖。金额、价格、数量和权重以十进制字符串表示，回放时钟的 UTC 纳秒时间戳也以字符串传输。已有 `DemoStrategy` 和 `SmaCrossover` 请求、详情及历史摘要仍可读取。参见 [配置策略作业](backtest-jobs.md#配置策略作业)。
+
+## 第二批策略回测与研究契约
+
+路径使用 `/api/v1` 前缀。以下为新增操作，返回 `Cache-Control: private, no-store`。网关按会话授权，回测取消与策略登记需要写权限。
+
+| 请求 | 参数和行为 | OpenAPI 响应 schema |
+| --- | --- | --- |
+| `POST /strategies/validate` | 接收原有 `StrategyDocument` YAML/JSON 包装，编译预览。校验不写入注册表或队列。 | `StrategyPreview`（`RegisteredStrategy`、`CompiledPlan`） |
+| `GET /strategies` | 可选 `id`、`after`、`limit`。按 `id`、`version` 的文本顺序排序，`after` 使用上一页返回的 `id@version`。 | `StrategyVersionPage`（`RegisteredStrategy`） |
+| `GET /strategies/{id}/versions/{version}` | 选择已登记的精确版本，以固定输入元数据编译。不存在返回 `404 / strategy_version_not_found`。 | `StrategyPreview` |
+| `POST /backtests/{id}/cancel` | 空请求体。取消排队或运行中的回测，重复取消返回同一作业。已完成且未取消的作业返回 `409 / job_already_finished`，未知 ID 返回 `404 / job_not_found`。 | 既有 `Job` |
+| `GET /backtests/worker-status` | 读取队列和当前租约数，有效租约按 `as_of` UTC 判断。租约缺失或过期的运行作业计入 `unleased_running`。队列未初始化时 `queue_present` 为 false，计数为 0。 | `WorkerStatus` |
+| `GET /decisions/signals` | 分页读取获准发布的已提交目标。可选 `after`、`limit`。 | `DecisionSignalPage`（`DecisionAccess`、`DecisionSignal`、`SmaSignal`、`BundleSignal`） |
+| `GET /factors/{id}/evaluations/{evaluation_id}` | 必须指定 `version`，按因子 ID、版本、评价 ID 精确匹配同一个 F8 快照。无报告返回 `404 / factor_evaluation_not_found`。 | `FactorEvaluationDetail`（原有 `FactorEvaluationItem`，含报告和同行因子的许可） |
+
+策略和决策列表的 `limit` 默认 20，取值 1～100。带上其他筛选项并原样传回 `next_cursor` 以续页，值为 `null` 时结束。尚未建立策略注册表时列表为空。策略预览和选择返回同一个编译器生成的计划。等价 YAML 和 JSON 的规范化配置与 `content_sha256` 一致，`source_sha256` 标记各自的原始字节。版本选择使用首次登记的源码及输入元数据。原始配置限 256 KiB，编译错误使用既有 `ErrorBody` 的字段位置和行列。预览中的 `plan.bundle` 遵循代码导出的 [StrategyBundle v1 JSON Schema](../strategies/schema/strategy-bundle-v1.schema.json)。登记仍调用 `POST /strategies`，版本冲突由登记和入队返回。
+
+沿用 `POST /backtests`、`GET /backtests/by-key`、`GET /backtests` 和 `GET /backtests/{id}`。详情的 `summary` 承载成功结果，配置作业的 `run_manifest` 和 `strategy_report` 保留精确十进制字符串与现有 F7 字段。取消后的详情沿用原有状态枚举，`status` 为 `failed`，`error` 为 `job_cancelled`，`summary` 为 `null`。同一请求和幂等键重交会返回原 ID，重新运行须使用新键。取消和完成按 SQLite 事务先后决定终态。worker 状态查询反映队列与租约，进程存活由运维监控。
+
+### 决策信号发布与分页
+
+API 只读打开现有 `finance-state/decisions/decisions.sqlite3`。运维或已授权的回放提供方核对允许本地留存和非展示计算后，在同一目录原子发布普通文件 `read-v1.json`。下列为固定合成配置。部署时登记 `decisions` 或 `bundle_decisions` 表的 `plan_sha256`。配置策略使用信号行的完整计划哈希，检查点哈希另绑定指标求值器版本。SMA 的许可标识还须与信号行 `license` 一致。配置策略由发布方为全部输入核对共同授权并登记适用许可。
+
+```json
+{
+  "schema_version": 1,
+  "kind": "sma_crossover",
+  "plan_sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+  "access": {
+    "license": "fixture.synthetic",
+    "record_local": true,
+    "derive_non_display": true,
+    "redistribute": false
+  }
+}
+```
+
+`kind` 可用 `sma_crossover` 或 `strategy_bundle`。许可与计划哈希一同出现在响应中。记录按 SMA 的回放字节偏移，或配置策略的回放字节偏移、配方 ID 和标的 ID 升序排列。游标绑定发布计划。`replay_offset`、事件 `epoch`、`seq` 和各纳秒时钟为精确整数的字符串，`target_shares` 为十进制字符串。每行公开目标及其输入血缘字段，配置策略另保留可空的 `reason`。缺少发布文件、数据库或获准用途时返回 `404 / decision_not_published`。查询或游标非法返回 400，发布文件或数据库损坏返回 500。仅展示产品不得提供给离线回放、回测、因子或决策发布通道。
+
+本批新增 REST 操作。首批的 WS/SSE schema 和样本继续由原生成器校验。F9 的期权流核验、场所深度展示通道、GEX/0DTE 对外查询和历史期权链契约留待对应的后续批次。web 的代理、浏览器授权和策略页面由下游交付。
 
 ## 首批读契约
 

@@ -81,6 +81,8 @@ curl 'http://127.0.0.1:8081/api/v1/backtests?limit=20'
 
 队列和已完成的摘要存于数据根的 `finance-state/backtests/jobs.sqlite3`。SQLite 的唯一键与 IMMEDIATE 事务使并发提交、去重和容量检查不可分割。worker 使用启动它的源码构建 Python 环境执行 `python -m fertile_finance.backtest_job`。每次尝试在独立临时目录生成结果，worker 在同一事务内提交最终摘要和 `succeeded` 状态。失败保留 `failed` 或 `timed_out` 状态与错误代码。
 
+使用 `POST /api/v1/backtests/{id}/cancel` 取消排队或运行中的回测。取消事务保留作业 ID 与幂等键，终态用 `failed / job_cancelled` 表示。若完成事务先提交，取消返回冲突。运行中取消时，worker 检查终态后终止引擎进程组、回收临时目录并释放租约。worker 异常中断时，租约到期且执行锁已释放后由恢复流程清理。取消后的作业保留在列表中，重试原提交仍返回原作业 ID。使用 `GET /api/v1/backtests/worker-status` 核对排队、运行和租约计数。[HTTP 契约](api.md#第二批策略回测与研究契约)
+
 同一宿主的多个 worker 可共用本地 SQLite 队列。领取时在同一写事务内递增尝试号、置为 `running` 并建立租约。只有持有作业锁且尝试号匹配的 worker 才能续租或提交结果。引擎子进程及其为配置作业启动的指标子进程继承同一作业锁。在 Linux 上，指标子进程随引擎退出而终止，并持锁到自身退出。租约到期后，持锁者仍可完成同一次尝试。其他 worker 需等旧作业的执行进程全部释放该锁后才能恢复。共享数据根须位于支持 SQLite 和 `flock` 锁语义的本地文件系统。
 
 `FINANCE_WORKER_LEASE_SECONDS` 或 `--lease-seconds` 设租约时长，默认 15 秒，范围 1～3600 秒，按时长的三分之一续租。`FINANCE_WORKER_CONCURRENCY` 按进程配置，默认 1，范围 1～16。`FINANCE_JOB_TIMEOUT_SECONDS` 默认 600，范围 1～3600。`FINANCE_JOB_MEMORY_MB` 默认 8192，范围 128～65536，限制 Linux 执行进程的虚拟地址空间。超时时 worker 终止执行进程组。SIGTERM 后停止领取任务，继续持有在途租约至作业完成或超时。进程守护器的优雅退出宽限应覆盖单作业超时。

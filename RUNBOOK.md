@@ -67,6 +67,17 @@ cargo run --locked --offline -q -p finance-api -- export-read-stream /tmp/financ
 
 `FINANCE_PYTHON` 指向已构建 Nautilus 的 Python，`WAL_BIN` 指向刚构建的 `finance-market-wal`。联测在临时数据根用合成样本验证 Python 投影、因子发布和 Rust API 读取。生成器无需启动 API 或连接数据源。取用同一 finance 提交生成的 OpenAPI、WS/SSE schema 和合成样本供下游核对。[导出与下游更新顺序](docs/api.md#openapi-与契约)
 
+## 第二批策略回测与研究契约验收
+
+使用独立临时数据根运行以下测试。回测详情和取消都使用提交时返回的作业 ID。提交响应丢失时，以原 `Idempotency-Key` 调用 `GET /api/v1/backtests/by-key`。`job_cancelled` 是取消终态。重复取消返回同一终态，已完成作业返回 `409 / job_already_finished`。运行中取消时，worker 结束执行进程并清理临时文件，之后释放租约。异常中断后由恢复流程清理租约和临时文件。
+
+```sh
+cargo test --locked --offline -p finance-api --test bundle_jobs --test jobs --test decision_read --test factor_read --test read_contract --test read_stream
+PYTHONPATH=python "$FINANCE_PYTHON" -m unittest discover -s tests -p test_worker_leases.py -v
+```
+
+用 `GET /api/v1/backtests/worker-status` 核对队列和租约。出现缺失或过期的租约时，检查 worker 进程和本地锁，再按[回测作业恢复](docs/backtest-jobs.md#worker-运行与恢复)处置。发布决策信号前核对输入许可和计划哈希，在现有决策目录原子发布 `read-v1.json`。需要下线读取时撤下发布文件。出现 `decision_not_published` 时检查发布文件和数据库是否位于同一数据根。因子报告按因子版本和评价 ID 从 F8 快照定位。[查询参数、许可和发布格式](docs/api.md#第二批策略回测与研究契约)
+
 ## 离线因子研究验收
 
 在仓库根目录用含研究依赖的现有 Python 环境执行。定向测试在内存生成截面和收盘价，月频登记读取仓库内原报告并核对证据哈希。
