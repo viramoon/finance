@@ -2,16 +2,19 @@ use std::{
     collections::HashMap,
     error::Error,
     fmt,
+    future::Future,
     sync::{Arc, RwLock},
 };
 
+use async_trait::async_trait;
 use finance_ib::depth::{
-    DEFAULT_DEPTH_ROWS, DepthError, DepthFocus, DepthFrame, DepthPermissions, DepthSource,
-    DepthSymbol, run_depth,
+    DEFAULT_DEPTH_ROWS, DepthError, DepthFocus, DepthFrame, DepthPermissions, DepthRequest,
+    DepthSource, DepthSubscription, DepthSymbol, DepthUpdate, run_depth,
 };
+use finance_ib::market::ConfirmedContract;
 use tokio::sync::watch;
 
-use super::SubscriptionDemand;
+use super::{SubscriptionDemand, pacing::RequestPacing};
 
 /// Latest display frame for each symbol in the current session.
 #[derive(Clone, Default)]
@@ -36,6 +39,7 @@ impl DepthFrames {
 
 pub(super) async fn drive_depth(
     session: &impl DepthSource,
+    pacing: &RequestPacing,
     mut demand: watch::Receiver<SubscriptionDemand>,
     permissions: DepthPermissions,
     frames: &DepthFrames,
@@ -63,10 +67,14 @@ pub(super) async fn drive_depth(
             }
         }
     };
+    let source = PacedDepth {
+        inner: session,
+        pacing,
+    };
     let ((), result) = tokio::join!(
         forward,
         run_depth(
-            session,
+            &source,
             selected,
             permissions,
             DEFAULT_DEPTH_ROWS,
@@ -74,6 +82,69 @@ pub(super) async fn drive_depth(
         )
     );
     result
+}
+
+/// Apply the owner's write budget to F9c, including resets and checked cancellation.
+struct PacedDepth<'a, T> {
+    inner: T,
+    pacing: &'a RequestPacing,
+}
+
+impl RequestPacing {
+    fn depth_result<T>(&self, result: Result<T, DepthError>) -> Result<T, DepthError> {
+        if matches!(result, Err(DepthError::Pacing)) {
+            self.note_pacing();
+        }
+        result
+    }
+
+    async fn depth_request<T>(
+        &self,
+        request: impl Future<Output = Result<T, DepthError>>,
+    ) -> Result<T, DepthError> {
+        let (result, _) = self.slot().await.run(request).await;
+        self.depth_result(result)
+    }
+}
+
+#[async_trait]
+impl<'a, S: DepthSource> DepthSource for PacedDepth<'a, &S> {
+    type Subscription = PacedDepth<'a, S::Subscription>;
+
+    async fn confirm_depth(&self, symbol: DepthSymbol) -> Result<ConfirmedContract, DepthError> {
+        self.pacing
+            .depth_request(self.inner.confirm_depth(symbol))
+            .await
+    }
+
+    async fn subscribe_depth(
+        &self,
+        request: &DepthRequest,
+    ) -> Result<Self::Subscription, DepthError> {
+        let inner = self
+            .pacing
+            .depth_request(self.inner.subscribe_depth(request))
+            .await?;
+        Ok(PacedDepth {
+            inner,
+            pacing: self.pacing,
+        })
+    }
+}
+
+#[async_trait]
+impl<S: DepthSubscription> DepthSubscription for PacedDepth<'_, S> {
+    fn request_id(&self) -> i32 {
+        self.inner.request_id()
+    }
+
+    async fn next(&mut self) -> Result<Option<DepthUpdate>, DepthError> {
+        self.pacing.depth_result(self.inner.next().await)
+    }
+
+    async fn cancel(&mut self) -> Result<(), DepthError> {
+        self.pacing.depth_request(self.inner.cancel()).await
+    }
 }
 
 /// Independent depth quota. The depth adapter supplies eligible equity conIds

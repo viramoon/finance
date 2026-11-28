@@ -11,11 +11,11 @@ use finance_ib::market::{
     MarketDataSource, MarketDataType, MarketEvent, MarketNotice, MarketSubscription,
     OptionContract, OptionRight, QuoteField,
 };
-use tokio::{task::JoinHandle, time::advance};
+use tokio::{sync::oneshot, task::JoinHandle, time::advance};
 
 use super::*;
 use crate::line_budget::{
-    BudgetConfig, CoverageInterval, DepthFrames, LineHandle, LineMessage,
+    BudgetConfig, CoverageInterval, DepthFrames, LineHandle, LineMessage, SubscriptionDemandHandle,
     SubscriptionInstrumentRegistry, watchlist,
 };
 
@@ -51,6 +51,7 @@ struct GatewayState {
     current_session: usize,
     disconnect: Option<watch::Sender<bool>>,
     global_pacing: Option<watch::Sender<Option<Instant>>>,
+    depth_pacing: Option<oneshot::Sender<(DepthSymbol, Instant, usize)>>,
     failed_opens: usize,
     pace_on_failed_open: bool,
     fail_next_cancel: bool,
@@ -208,6 +209,15 @@ impl DepthSubscription for FakeDepth {
     }
 
     async fn next(&mut self) -> Result<Option<DepthUpdate>, DepthError> {
+        {
+            let mut state = self.gateway.state.lock().unwrap();
+            if let Some(notice) = state.depth_pacing.take() {
+                notice
+                    .send((self.symbol, Instant::now(), state.calls.len()))
+                    .unwrap();
+                return Err(DepthError::Pacing);
+            }
+        }
         pending().await
     }
 
@@ -564,6 +574,167 @@ async fn runtime_demand_reaches_line_and_depth_scheduling_across_reconnect() {
     task.await.unwrap().unwrap();
     assert!(frames.latest(DepthSymbol::Tsla).is_none());
     assert!(handle.current().is_none());
+}
+
+fn start_demand_owner(
+    scheduler: LineScheduler,
+    gateway: &Gateway,
+    depth: bool,
+) -> (
+    SubscriptionDemandHandle,
+    watch::Sender<bool>,
+    JoinHandle<Result<(), MarketError>>,
+) {
+    let (scheduler, demand) = scheduler.with_subscription_demand(depth.then(|| {
+        (
+            DepthFrames::default(),
+            DepthPermissions {
+                equity_l1_confirmed: true,
+                totalview_confirmed: true,
+                eds_confirmed: true,
+            },
+        )
+    }));
+    let (stop, stopped) = watch::channel(false);
+    let fake = gateway.clone();
+    let task = tokio::spawn(scheduler.run(move |pacing| fake.clone().open(pacing), stopped));
+    (demand, stop, task)
+}
+
+#[tokio::test(start_paused = true)]
+async fn demand_focus_and_option_rotation_share_spacing_and_extended_global_cooldown() {
+    let config = BudgetConfig {
+        rotation_dwell: Duration::from_secs(1),
+        pacing_cooldown: Duration::from_secs(2),
+        ..compact_config()
+    };
+    let step = config.request_interval;
+    let cooldown = config.pacing_cooldown;
+    let gateway = Gateway::new(2, &config);
+    let scheduler = LineScheduler::new(config, vec![watchlist().remove(0)]).unwrap();
+    let (demand, stop, task) = start_demand_owner(scheduler, &gateway, true);
+    let focus = |symbol: &str| {
+        SubscriptionInstrumentRegistry::default()
+            .validate(Vec::new(), Some(symbol.parse().unwrap()))
+            .unwrap()
+    };
+    demand.replace(focus("NVDA.NASDAQ")).unwrap();
+    let rotation = option_key(FIRST_OPTION);
+    until(30, step, || {
+        gateway.count(1, Operation::DepthOpen(DepthSymbol::Nvda)) == 1
+            && gateway.count(1, Operation::Subscribe(rotation)) == 1
+    })
+    .await;
+
+    let prior = gateway.calls().len();
+    gateway.global_pacing();
+    demand.replace(focus("TSLA.NASDAQ")).unwrap();
+    tick(cooldown / 2).await;
+    assert_eq!(gateway.calls().len(), prior, "focus wrote during cooldown");
+    let extended = gateway.global_pacing() + cooldown;
+    tick(cooldown - step).await;
+    assert_eq!(
+        gateway.calls().len(),
+        prior,
+        "a second notice extended cooldown"
+    );
+
+    until(20, step, || {
+        gateway.count(1, Operation::DepthOpen(DepthSymbol::Tsla)) == 1
+            && gateway.count(1, Operation::Cancel(rotation)) >= 1
+    })
+    .await;
+    let calls = gateway.calls();
+    assert!(calls[prior..].iter().all(|call| call.time >= extended));
+    assert_eq!(
+        gateway.count(1, Operation::DepthCancel(DepthSymbol::Nvda)),
+        1
+    );
+    assert_eq!(gateway.count(1, Operation::Close), 0);
+    // The trace includes L1 and depth confirmations as well as subscribe and cancel.
+    check_request_spacing(&gateway, step);
+    stop.send(true).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn depth_stream_pacing_delays_its_cancel_and_pending_line_requests() {
+    let config = BudgetConfig {
+        pacing_cooldown: Duration::from_secs(2),
+        ..compact_config()
+    };
+    let step = config.request_interval;
+    let cooldown = config.pacing_cooldown;
+    let gateway = Gateway::new(2, &config);
+    let (notice, received) = oneshot::channel();
+    gateway.state.lock().unwrap().depth_pacing = Some(notice);
+    let scheduler = LineScheduler::new(config, vec![watchlist().remove(0)]).unwrap();
+    let (_demand, stop, task) = start_demand_owner(scheduler, &gateway, true);
+    let (symbol, at, before) = tokio::time::timeout(20 * step, received)
+        .await
+        .unwrap()
+        .unwrap();
+    tick(cooldown - step).await;
+    assert_eq!(gateway.calls().len(), before);
+    until(20, step, || {
+        gateway.count(1, Operation::DepthCancel(symbol)) == 1
+            && gateway.count(1, Operation::Subscribe(option_key(FIRST_OPTION))) == 1
+    })
+    .await;
+    let calls = gateway.calls();
+    assert!(
+        calls[before..]
+            .iter()
+            .all(|call| call.time >= at + cooldown)
+    );
+    assert_eq!(gateway.count(1, Operation::Close), 0);
+    check_request_spacing(&gateway, step);
+    stop.send(true).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn demanded_stock_with_short_retry_yields_to_first_confirmation_and_option_chain() {
+    let config = BudgetConfig {
+        account_lines: 6,
+        stock_lines: 2,
+        request_interval: Duration::from_millis(250),
+        reconnect_initial: Duration::from_millis(100),
+        reconnect_max: Duration::from_millis(100),
+        ..compact_config()
+    };
+    let step = config.request_interval;
+    let gateway = Gateway::new(1, &config);
+    {
+        let mut state = gateway.state.lock().unwrap();
+        state.first_equity_timeouts = usize::MAX;
+        state.option_underlying = Some(2);
+    }
+    // Put SPY first in the base queue so the first QQQ timeout proves demand priority.
+    let stocks = watchlist().into_iter().take(2).rev().collect();
+    let scheduler = LineScheduler::new(config, stocks).unwrap();
+    let lines = scheduler.handle();
+    let (demand, stop, task) = start_demand_owner(scheduler, &gateway, false);
+    demand
+        .replace(
+            SubscriptionInstrumentRegistry::default()
+                .validate(vec!["QQQ.NASDAQ".parse().unwrap()], None)
+                .unwrap(),
+        )
+        .unwrap();
+    until(5, step, || {
+        gateway.count(1, Operation::Subscribe(stock_key(2))) == 1
+    })
+    .await;
+    assert_eq!(gateway.count(1, Operation::Confirm), 2);
+    until(20, step, || lines.status().observed_options == 1).await;
+    assert!(gateway.count(1, Operation::Confirm) > 2);
+    assert_eq!(gateway.count(1, Operation::Subscribe(stock_key(1))), 0);
+    assert_eq!(gateway.count(1, Operation::Close), 0);
+    assert!(!lines.status().discovery_complete);
+    check_request_spacing(&gateway, step);
+    stop.send(true).unwrap();
+    task.await.unwrap().unwrap();
 }
 
 #[tokio::test(start_paused = true)]

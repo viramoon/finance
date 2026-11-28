@@ -3,6 +3,7 @@
 mod coverage;
 mod demand;
 mod depth;
+mod pacing;
 mod policy;
 mod session;
 mod worker;
@@ -254,10 +255,10 @@ impl LineScheduler {
             selection: Selection::default(),
             discovery_complete: false,
             generation: 0,
-            cooldown: None,
         };
         Ok(Self {
             shared: Arc::new(Shared {
+                pacing: pacing::RequestPacing::new(&config),
                 config,
                 updates,
                 changed: Notify::new(),
@@ -289,6 +290,7 @@ impl LineScheduler {
 
 struct Shared {
     config: BudgetConfig,
+    pacing: pacing::RequestPacing,
     updates: broadcast::Sender<LineUpdate>,
     changed: Notify,
     state: Mutex<State>,
@@ -317,7 +319,6 @@ struct State {
     selection: Selection,
     discovery_complete: bool,
     generation: u64,
-    cooldown: Option<Instant>,
 }
 
 impl State {

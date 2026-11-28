@@ -1,6 +1,6 @@
 # 面向 web 的 HTTP API
 
-finance-api 是独立的 Rust / axum 进程；web 通过 HTTP 调用，frontend 只调用 web。当前不启动 Nautilus、trader、collector 或 IBKR，也不在 HTTP 请求中执行回测。服务部署唯一来源仍为 fertile deploy/，本仓库 service.yaml 记录组件接口。
+finance-api 是独立的 Rust / axum 进程。web 通过 HTTP 调用，frontend 只调用 web。默认关闭 IBKR 连接。部署显式配置 `api.subscription_owner` 后，API 在同一进程运行 paper 只读行情所有者。API 启动无需 Nautilus、trader 或独立 collector，回测作业由 worker 执行。服务部署由 fertile deploy/ 管理，本仓库 service.yaml 记录组件接口。[行情订阅需求](#行情订阅需求)
 
 用于接口测试和文档的行情样本须来自已登记的合成 fixture。API 的 PR 作业以 PR 基分支 SHA 的硬规则检查 Git 对象，样本来源和 SHA-256 由候选树的清单提供。防护启用前已发布分支的合成样本也须通过该检查。将实际 API 响应、运行日志和数据库留在工作树之外，目录和样本准入方式见 [数据入仓防护](data-guard.md)。
 
@@ -259,7 +259,7 @@ api:
 
 `client_id` 必须为正整数，且与 collector、probe、trader 及同一 Gateway 上运行的客户端不同。只有同时核实股票 L1、TotalView-OpenView 和 EDS 权限才填 `nasdaq_totalview_license`。省略该字段时，只运行 L1 和 OPRA 调度，合法 focus 仍可随需求提交，`depth_budget.access` 为 `null`。
 
-启用后，API 在同一进程运行 F9b 行数调度器，复用 finance-ib 的 paper 账户校验、重连与只读会话。自选优先影响已配置股票的待确认顺序，以及它们的期权发现与轮换。九只基础股票及各池额度仍按 F9b 配置分配。此 IBKR 所有者接收已登记的加密标的 ID，公共加密采集按自身 profile 运行。启用 TotalView 时，同一 paper 会话运行 F9c 深度循环，固定 QQQ 与 AAPL，动态更新第三个名额。断线清除现有深度帧，重连使用最后一次收到的需求。
+启用后，API 在同一进程运行 F9b 行数调度器，复用 finance-ib 的 paper 账户校验、重连与只读会话。自选股票优先获得首次确认，其期权发现和轮换也可优先。确认超时的股票退到重试队尾，其余股票先完成首次尝试。九只基础股票及各池额度仍按 F9b 配置分配。此 IBKR 所有者接收已登记的加密标的 ID，公共加密采集按自身 profile 运行。启用 TotalView 时，同一 paper 会话运行 F9c 深度循环，固定 QQQ 与 AAPL，动态更新第三个名额。深度与 L1、OPRA 共用请求间隔和节流冷却，冷却期间提交的 focus 会在恢复后调度。断线清除现有深度帧，重连使用最后一次收到的需求。
 
 嵌入 API 的接入方可用 `LineScheduler::with_subscription_demand` 创建同一调度接收端，并通过 `MarketReadSources.subscription_demand` 和 `subscription_registry` 注入句柄及完整注册表。需求通道可合并连续更新，所有者按最新快照处理。所有者退出后，API 报告 `disabled`。需求随进程消失，重启后由 web 重送。
 

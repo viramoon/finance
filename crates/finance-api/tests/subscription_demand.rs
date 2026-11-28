@@ -165,6 +165,47 @@ async fn configured_paper_owner_attaches_the_api_and_closes_demand_on_stop() {
     assert_eq!(get(&app, DEMAND, StatusCode::OK).await["state"], "disabled");
 }
 
+#[test]
+fn api_guide_documents_the_opt_in_and_its_profile_enables_the_paper_owner() {
+    use finance_api::config::Settings;
+
+    let guide = include_str!("../../../docs/api.md");
+    let (overview, _) = guide.split_once("\n## ").unwrap();
+    assert!(overview.contains("`api.subscription_owner`"));
+    assert!(overview.contains("(#行情订阅需求)"));
+    let (_, section) = guide.split_once("\n## 行情订阅需求\n").unwrap();
+    let (_, yaml) = section.split_once("```yaml\n").unwrap();
+    let (profile, _) = yaml.split_once("```\n").unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("base.yaml"),
+        include_str!("../../../config/base.yaml"),
+    )
+    .unwrap();
+    let overlay = dir.path().join("cloudbox.yaml");
+    std::fs::write(&overlay, "{}").unwrap();
+    assert!(
+        Settings::load(dir.path(), &Default::default())
+            .unwrap()
+            .api
+            .subscription_owner
+            .is_none()
+    );
+    std::fs::write(overlay, profile).unwrap();
+    let config = Settings::load(dir.path(), &Default::default())
+        .unwrap()
+        .api
+        .subscription_owner;
+    let mut sources = MarketReadSources::default();
+    let owner = PaperSubscriptionOwner::attach(&mut sources, config, || {
+        finance_ib::IbConfig::from_layers(dir.path(), "cloudbox", |_| None)
+    })
+    .unwrap();
+    assert!(owner.is_some());
+    assert!(sources.subscription_demand.unwrap().current().is_some());
+}
+
 #[cfg(all(
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
