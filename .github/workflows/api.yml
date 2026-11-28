@@ -46,7 +46,8 @@ jobs:
           cmp "$RUNNER_TEMP/finance.openapi.json" "$RUNNER_TEMP/finance.second.json"
           cargo run --locked -q -p finance-api -- export-read-stream "$RUNNER_TEMP/finance-read-stream"
           cargo run --locked -q -p finance-api -- export-read-stream "$RUNNER_TEMP/finance-read-stream-second"
-          for name in market-ws.schema.json market-status-sse.schema.json read-stream-examples.json; do
+          for name in market-ws.schema.json market-status-sse.schema.json read-stream-examples.json \
+            option-flow-ws.schema.json option-flow-sse.schema.json option-flow-stream-examples.json; do
             cmp "$RUNNER_TEMP/finance-read-stream/$name" "$RUNNER_TEMP/finance-read-stream-second/$name"
             cmp "$RUNNER_TEMP/finance-read-stream/$name" "protocol/v1/$name"
           done

@@ -139,6 +139,18 @@ cargo run --locked --offline -q -p finance-market-protocol --bin export-market-p
 
 首批交付消息格式和编码。实时订阅、过期游标重置、SSE 保留窗和 `Last-Event-ID` 的续接由传输集成方实现。WS 游标按 F1 分区解释，SSE 事件 ID 按发布流解释。web 应在握手、订阅及重连时重新授权，并遵循产品的展示、留存和导出许可。[首批 REST 查询](api.md#首批读契约)
 
+## 期权流观察的 WS 与 SSE 消息
+
+F16 的 WS 文本消息使用 `{event, id?, data}`。对于 SSE，schema 的同名属性对应 SSE 的 `event`、`id` 和 JSON `data` 字段。各消息在 `data.schema_version` 声明 `"1.0"`，通过 `event` 区分观察、流状态和恢复指示。
+
+| `event` | `id` | `data` 中的业务字段 |
+| --- | --- | --- |
+| `observation` | 实例和合约内的不透明续传游标。 | `seq` 为 `U64Text`，`access` 含来源、产品、许可和用途标记。`observation` 沿用 REST 的 `clue`、`budget` 和可空 `coverage`，价、量、乘数和金额沿用 `DecimalText`。 |
+| `status` | `live` 时携带当前订阅起点，`disabled` 时省略。 | `con_id` 和 `state`，状态为 `live` 或 `disabled`。 |
+| `reset_required` | 省略。 | `con_id`、`reason: "cursor_unavailable"` 和 `snapshot: "/api/v1/options/flow/snapshot"`。 |
+
+`finance-api export-read-stream DIRECTORY` 生成 [WS schema](../protocol/v1/option-flow-ws.schema.json)、[SSE schema](../protocol/v1/option-flow-sse.schema.json) 和 [固定合成样本](../protocol/v1/option-flow-stream-examples.json)。样本覆盖实时观察、重复重放、乱序帧、观测时间回退、游标过期、停用和大整数边界。更新仓库产物时用同一命令指向 `protocol/v1`，同步样本来源和摘要。消费方从同一 finance 提交取得 schema、样本和 OpenAPI。[续传与恢复](api.md#期权流观察推送与续传) · [样本来源](../.data-guard/sources.json)
+
 ## 解码与错误定位
 
 Rust 使用 `finance_market_protocol::decode_json::<T>(input)`，其中 `T` 为 `Instrument`、`Capability` 或 `Event`。通过错误的 `path()` 和 `kind().as_str()` 读取诊断。Python 使用 `fertile_finance.market_protocol` 的同名类型及 `from_json(input)`，通过 `ProtocolError.path` 和 `ProtocolError.kind` 读取诊断。Python 的 `Kind` 枚举包含 v1.0 消息种类和 2.0 复用的控制消息种类。永续观测使用 `ContextKind`，v3.0 期权历史证据使用 `OptionHistoryKind`。
