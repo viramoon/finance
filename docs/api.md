@@ -238,7 +238,7 @@ web 负责管理员鉴权、保存自选和串行转发完整快照，finance �
 | 字段 | 约定 |
 | --- | --- |
 | `watchlist` | 完整 F1 标的 ID 的集合，示例为 `["SPY.ARCA","BTC-USD-PERP.HYPERLIQUID"]`。省略或 `[]` 清除追加自选。按完整 ID 去重、排序。 |
-| `depth_focus` | 一个有资格使用 Nasdaq TotalView 的完整 F1 标的 ID，示例为 `"AAPL.NASDAQ"`。省略或 `null` 清除页面 focus。SPY 仅支持 L1；固定深度名额由所有者管理。 |
+| `depth_focus` | 一个有资格使用 Nasdaq TotalView 的完整 F1 标的 ID，示例为 `"AAPL.NASDAQ"`。省略或 `null` 清除页面 focus。SPY 仅支持 L1。固定深度名额由所有者管理。 |
 
 `{}` 清除全部追加需求。参数按独立于活动订阅和预算的完整注册表校验，未采集的登记标的仍可加入自选。默认注册表包含 F9b 的九只美股及 BTC、ETH、SOL 的 Hyperliquid 永续、Binance 现货与永续的 F1 标识。接入方可以按部署提供完整 F1 ID 注册表替换默认值。focus 同时受 F9c 的八个 Nasdaq 标的限制，保留场所区分。非法格式、未知标的、无深度资格、重复或未知 JSON 字段（含作业和凭据）返回 `400 / subscription_demand_invalid`，整份需求不生效。响应包含固定错误信息。
 
@@ -246,7 +246,7 @@ GET 和合法 PUT 返回 200。未接入或已移除接收端时为 `state: disa
 
 `budget` 复用原行数接口的实际使用量、额度、调度状态和 OPRA 展示策略，未接入对应读源时为 `null`。`depth_budget` 的 `pinned_slots` 与 `page_focus_slots` 分别为 2 和 1，`access` 是已接入的 TotalView 私有展示策略，未接入时为 `null`。产品权限确认及簿新鲜度见 `GET /api/v1/market/book`。需求响应不带价量、金额或流序号。预算、期权链和覆盖继续使用原有 GET 路径和响应格式。
 
-行情接入方用 `SubscriptionDemandHandle::channel()` 创建通道，通过 `MarketReadSources.subscription_demand` 和 `subscription_registry` 接入 `router_with_market_reads`。本机所有者持有接收端，使用 `borrow_and_update()` 读取最新快照，并按已有节流、权限及额度处理自选与 `depth_focus()`。后者可传给 `DepthFocus::with_followed`，沿用固定名额。需求通道可合并尚未读取的连续更新；所有者应协调到最新快照。IBKR 侧沿用经验证的 paper 只读会话，许可仍由所有者配置。通道随进程消失，接入方重启后由 web 重送当前快照。独立 `finance-api` 启动入口默认无需求接收端。
+行情接入方用 `SubscriptionDemandHandle::channel()` 创建通道，通过 `MarketReadSources.subscription_demand` 和 `subscription_registry` 接入 `router_with_market_reads`。本机所有者持有接收端，使用 `borrow_and_update()` 读取最新快照，并按已有节流、权限及额度处理自选与 `depth_focus()`。后者可传给 `DepthFocus::with_followed`，沿用固定名额。需求通道可合并尚未读取的连续更新，所有者按最新快照处理。关闭需求接收时释放接收端。IBKR 侧沿用经验证的 paper 只读会话，许可由所有者配置。通道随进程消失，接入方重启后由 web 重送当前快照。独立 `finance-api` 启动入口默认无需求接收端。
 
 ## 示例批任务
 

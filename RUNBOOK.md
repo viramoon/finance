@@ -121,7 +121,7 @@ cargo test --locked --offline -p finance-collector option_flow
 cargo test --locked --offline -p finance-api --test subscription_demand --test market_options
 ```
 
-验收使用进程内路由、合成标的 ID 和未启动的调度器。获准启用后，检查行情所有者是否向 `router_with_market_reads` 注入完整标的注册表及 `SubscriptionDemandHandle`，并持有且消费对应的接收端。所有者重启后，由 web 重发已保存的自选和 focus。遇到 `400 / subscription_demand_invalid`，检查完整的 F1 ID、深度资格和 JSON 字段；出现 `enabled` 后仍需根据预算和场所簿状态判断实际覆盖。[请求格式、状态和所有者接入](docs/api.md#行情订阅需求)
+验收使用进程内路由、合成标的 ID 和未启动的调度器。获准启用后，检查行情所有者是否向 `router_with_market_reads` 注入完整标的注册表及 `SubscriptionDemandHandle`，并持有且消费对应的接收端。所有者重启后，由 web 重发已保存的自选和 focus。遇到 `400 / subscription_demand_invalid`，检查完整的 F1 ID、深度资格和 JSON 字段。出现 `enabled` 后，通过预算和场所簿状态判断实际覆盖。[请求格式、状态和所有者接入](docs/api.md#行情订阅需求)
 
 ## 离线因子研究验收
 
