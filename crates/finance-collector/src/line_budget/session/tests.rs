@@ -11,6 +11,13 @@ use finance_ib::market::{
     MarketDataSource, MarketDataType, MarketEvent, MarketNotice, MarketSubscription,
     OptionContract, OptionRight, QuoteField,
 };
+use ibapi::{
+    Client,
+    contracts::{Contract, SecurityType},
+    market_data::realtime::ExactMarketDepth,
+    replay::{MarketReplay, MarketWrite},
+    subscriptions::Subscription,
+};
 use tokio::{sync::oneshot, task::JoinHandle, time::advance};
 
 use super::*;
@@ -52,6 +59,7 @@ struct GatewayState {
     disconnect: Option<watch::Sender<bool>>,
     global_pacing: Option<watch::Sender<Option<Instant>>>,
     depth_pacing: Option<oneshot::Sender<(DepthSymbol, Instant, usize)>>,
+    depth_client: Option<Arc<Client>>,
     failed_opens: usize,
     pace_on_failed_open: bool,
     fail_next_cancel: bool,
@@ -165,6 +173,13 @@ impl Session for FakeSession {
     }
 
     async fn close(&self) {
+        let client = self.gateway.state.lock().unwrap().depth_client.take();
+        if let Some(client) = client {
+            // With paused time, ready SDK Drop tasks run before this timer. This
+            // reproduces a second executor thread sending before close takes effect.
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            client.disconnect().await;
+        }
         let mut state = self.gateway.state.lock().unwrap();
         state.record(self.session, Operation::Close);
         state.active.clear();
@@ -177,6 +192,7 @@ struct FakeDepth {
     gateway: Gateway,
     session: usize,
     symbol: DepthSymbol,
+    subscription: Option<Subscription<ExactMarketDepth>>,
 }
 
 #[async_trait]
@@ -189,6 +205,25 @@ impl DepthSource for FakeSession {
 
     async fn subscribe_depth(&self, request: &DepthRequest) -> Result<FakeDepth, DepthError> {
         let symbol = request.contract().symbol.parse().unwrap();
+        let client = self.gateway.state.lock().unwrap().depth_client.clone();
+        let subscription = if let Some(client) = client {
+            let contract = Contract {
+                contract_id: request.contract().con_id,
+                security_type: SecurityType::Stock,
+                exchange: "ISLAND".into(),
+                currency: "USD".into(),
+                ..Contract::default()
+            };
+            Some(
+                client
+                    .market_depth(&contract, request.rows().try_into().unwrap())
+                    .subscribe_exact()
+                    .await
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
         self.gateway
             .state
             .lock()
@@ -198,6 +233,7 @@ impl DepthSource for FakeSession {
             gateway: self.gateway.clone(),
             session: self.session,
             symbol,
+            subscription,
         })
     }
 }
@@ -222,6 +258,9 @@ impl DepthSubscription for FakeDepth {
     }
 
     async fn cancel(&mut self) -> Result<(), DepthError> {
+        if let Some(subscription) = self.subscription.take() {
+            subscription.try_cancel().await.unwrap();
+        }
         self.gateway
             .state
             .lock()
@@ -599,6 +638,115 @@ fn start_demand_owner(
     let fake = gateway.clone();
     let task = tokio::spawn(scheduler.run(move |pacing| fake.clone().open(pacing), stopped));
     (demand, stop, task)
+}
+
+async fn verify_depth_teardown_during_cooldown(disconnect: bool) {
+    let config = compact_config();
+    let step = config.request_interval;
+    let cooldown = config.pacing_cooldown;
+    let gateway = Gateway::new(0, &config);
+    // The synthetic contracts use the real SDK subscription, Drop and message
+    // bus over in-memory IO. No broker address or account is involved.
+    let (replay, client) = MarketReplay::open().unwrap();
+    gateway.state.lock().unwrap().depth_client = Some(Arc::new(client));
+    let scheduler = LineScheduler::new(config, vec![watchlist().remove(0)]).unwrap();
+    let (demand, stop, task) = start_demand_owner(scheduler, &gateway, true);
+    let focus = |symbol: &str| {
+        SubscriptionInstrumentRegistry::default()
+            .validate(Vec::new(), Some(symbol.parse().unwrap()))
+            .unwrap()
+    };
+    demand.replace(focus("NVDA.NASDAQ")).unwrap();
+    until(20, step, || {
+        gateway.count(1, Operation::DepthOpen(DepthSymbol::Nvda)) == 1
+    })
+    .await;
+    let opened = replay.writes();
+    assert_eq!(opened.len(), 3);
+    for (packet, id) in opened.iter().zip([1, 3, 5]) {
+        let MarketWrite::SubscribeDepth {
+            con_id,
+            exchange,
+            smart_depth,
+            ..
+        } = packet
+        else {
+            panic!("unexpected depth request: {packet:?}");
+        };
+        assert_eq!(
+            (*con_id, exchange.as_deref(), *smart_depth),
+            (Some(id), Some("ISLAND"), false)
+        );
+    }
+    let (held_write, deadline) = if disconnect {
+        // The old page cancel is already on the wire but its write has not returned.
+        let hold = replay.hold_next_write();
+        demand.replace(focus("TSLA.NASDAQ")).unwrap();
+        until(8, step, || {
+            matches!(
+                replay.writes().last(),
+                Some(MarketWrite::CancelDepth { .. })
+            )
+        })
+        .await;
+        assert_eq!(replay.writes().len(), 4);
+        (Some(hold), gateway.global_pacing() + cooldown)
+    } else {
+        let deadline = gateway.global_pacing() + cooldown;
+        demand.replace(focus("TSLA.NASDAQ")).unwrap();
+        (None, deadline)
+    };
+    let before = replay.writes();
+    tick(step).await;
+    assert_eq!(replay.writes(), before);
+
+    let stop_after_reconnect = if disconnect {
+        // A terminal farm notice can invalidate an otherwise writable connection.
+        gateway.disconnect(0);
+        until(4, step, || gateway.count(1, Operation::Close) == 1).await;
+        Some(stop)
+    } else {
+        // finance-api signals shutdown by dropping this sender.
+        drop(stop);
+        until(4, step, || task.is_finished()).await;
+        None
+    };
+    assert!(
+        Instant::now() < deadline,
+        "session teardown waited for cooldown"
+    );
+    assert!(replay.is_closed());
+    if let Some(hold) = held_write {
+        assert!(hold.send(()).is_err(), "old write survived session close");
+    }
+    assert_eq!(gateway.count(1, Operation::Close), 1);
+    assert_eq!(gateway.count(2, Operation::Open), 0);
+    tick(deadline - Instant::now() - step).await;
+    assert_eq!(gateway.count(2, Operation::Open), 0);
+    if let Some(stop) = stop_after_reconnect {
+        until(20, step, || {
+            gateway.count(2, Operation::DepthOpen(DepthSymbol::Tsla)) == 1
+        })
+        .await;
+        stop.send(true).unwrap();
+    }
+    task.await.unwrap().unwrap();
+    tick(cooldown).await; // Flush any SDK cancellation still queued after teardown.
+    assert_eq!(
+        replay.writes(),
+        before,
+        "SDK Drop wrote an unpaced depth cancel"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn stop_during_focus_cooldown_closes_the_session_before_sdk_depth_drop() {
+    verify_depth_teardown_during_cooldown(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn disconnect_during_focus_cooldown_retires_parked_sdk_write_before_reconnect() {
+    verify_depth_teardown_during_cooldown(true).await;
 }
 
 #[tokio::test(start_paused = true)]

@@ -112,25 +112,33 @@ impl LineScheduler {
                     let online_since = Instant::now();
                     let mut online = Online::new(&self);
                     self.shared.state.lock().expect("line state").phase = SchedulerPhase::Online;
-                    let result = tokio::select! {
-                        biased;
-                        _ = stop_requested(&mut stop) => Ok(()),
-                        error = session.disconnected() => Err(error),
-                        result = self.depth_session(&session) => result,
-                        result = online.drive(&session) => result,
+                    let result = {
+                        // A live SDK subscription sends a best-effort cancel on Drop.
+                        // Keep both drivers (including pending IO) until close gates all writes.
+                        let mut depth = std::pin::pin!(self.depth_session(&session));
+                        let mut lines = std::pin::pin!(online.drive(&session));
+                        let result = tokio::select! {
+                            biased;
+                            _ = stop_requested(&mut stop) => Ok(()),
+                            error = session.disconnected() => Err(error),
+                            result = &mut depth => result,
+                            result = &mut lines => result,
+                        };
+                        if let Some((frames, _)) = &self.depth {
+                            frames.clear();
+                        }
+                        let live = {
+                            let mut state = self.shared.state.lock().expect("line state");
+                            state.phase = SchedulerPhase::Reconnecting;
+                            state.discovery_complete = false;
+                            state.live.keys().copied().collect::<Vec<_>>()
+                        };
+                        for key in live {
+                            self.shared.closed(key);
+                        }
+                        session.close().await;
+                        result
                     };
-                    if let Some((frames, _)) = &self.depth {
-                        frames.clear();
-                    }
-                    {
-                        let mut state = self.shared.state.lock().expect("line state");
-                        state.phase = SchedulerPhase::Reconnecting;
-                        state.discovery_complete = false;
-                    }
-                    for &key in online.active.keys() {
-                        self.shared.closed(key);
-                    }
-                    session.close().await;
                     for worker in online.active.values_mut() {
                         worker.abort().await;
                     }

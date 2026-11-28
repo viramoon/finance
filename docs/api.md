@@ -261,7 +261,7 @@ api:
 
 启用后，API 在同一进程运行 F9b 行数调度器，复用 finance-ib 的 paper 账户校验、重连与只读会话。自选股票优先获得首次确认，其期权发现和轮换也可优先。确认超时的股票退到重试队尾，其余股票先完成首次尝试。九只基础股票及各池额度仍按 F9b 配置分配。此 IBKR 所有者接收已登记的加密标的 ID，公共加密采集按自身 profile 运行。启用 TotalView 时，同一 paper 会话运行 F9c 深度循环，固定 QQQ 与 AAPL，动态更新第三个名额。深度与 L1、OPRA 共用请求间隔和节流冷却，冷却期间提交的 focus 会在恢复后调度。断线清除现有深度帧，重连使用最后一次收到的需求。
 
-嵌入 API 的接入方可用 `LineScheduler::with_subscription_demand` 创建同一调度接收端，并通过 `MarketReadSources.subscription_demand` 和 `subscription_registry` 注入句柄及完整注册表。需求通道可合并连续更新，所有者按最新快照处理。所有者退出后，API 报告 `disabled`。需求随进程消失，重启后由 web 重送。
+嵌入 API 的接入方可用 `LineScheduler::with_subscription_demand` 创建同一调度接收端，并通过 `MarketReadSources.subscription_demand` 和 `subscription_registry` 注入句柄及完整注册表。需求通道可合并连续更新，所有者按最新快照处理。所有者停止时先关闭 paper 连接，再释放含页面 focus 在内的活动订阅。所有者退出后，API 报告 `disabled`。需求随进程消失，重启后由 web 重送。
 
 ## 示例批任务
 

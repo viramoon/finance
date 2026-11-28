@@ -122,7 +122,7 @@ cargo test --locked --offline -p finance-api --test subscription_demand --test m
 cargo test --locked --offline -p finance-collector --lib line_budget::session::tests
 ```
 
-验收使用进程内路由和合成 paper 会话。在 Linux x86_64 或 aarch64 上，关闭态回归会检测 `socket` 或 `connect` 调用。仅在已经核实 paper 只读账户及产品权限的部署中配置 `api.subscription_owner`。给所有者分配独占的 IB client ID，核对预算阶段和场所簿数据状态。API 退出会结束此 paper 会话。所有者进程重启后，由 web 重发已保存的自选和 focus。遇到 `400 / subscription_demand_invalid`，检查完整的 F1 ID、深度资格和 JSON 字段。出现 `enabled` 后，通过预算和场所簿状态判断实际覆盖。[配置与接入](docs/api.md#行情订阅需求)
+验收使用进程内路由和合成 paper 会话。在 Linux x86_64 或 aarch64 上，关闭态回归会检测 `socket` 或 `connect` 调用。调度测试用 SDK 内存回放核对冷却中停止或断线后的实际写入。仅在已经核实 paper 只读账户及产品权限的部署中配置 `api.subscription_owner`。给所有者分配独占的 IB client ID，核对预算阶段和场所簿数据状态。API 退出时先关闭 paper 连接，再释放活动订阅。所有者进程重启后，由 web 重发已保存的自选和 focus。遇到 `400 / subscription_demand_invalid`，检查完整的 F1 ID、深度资格和 JSON 字段。出现 `enabled` 后，通过预算和场所簿状态判断实际覆盖。[配置与接入](docs/api.md#行情订阅需求)
 
 ## 离线因子研究验收
 
