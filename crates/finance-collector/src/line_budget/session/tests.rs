@@ -5,7 +5,7 @@ use std::{
 
 use chrono::{NaiveDate, TimeDelta, Utc};
 use finance_ib::depth::{
-    DepthPermissions, DepthRequest, DepthSubscription, DepthSymbol, DepthUpdate,
+    DepthPermissions, DepthRequest, DepthState, DepthSubscription, DepthSymbol, DepthUpdate,
 };
 use finance_ib::market::{
     MarketDataSource, MarketDataType, MarketEvent, MarketNotice, MarketSubscription,
@@ -60,6 +60,7 @@ struct GatewayState {
     global_pacing: Option<watch::Sender<Option<Instant>>>,
     depth_pacing: Option<oneshot::Sender<(DepthSymbol, Instant, usize)>>,
     depth_client: Option<Arc<Client>>,
+    depth_confirmations: Vec<DepthSymbol>,
     failed_opens: usize,
     pace_on_failed_open: bool,
     fail_next_cancel: bool,
@@ -200,6 +201,12 @@ impl DepthSource for FakeSession {
     type Subscription = FakeDepth;
 
     async fn confirm_depth(&self, symbol: DepthSymbol) -> Result<ConfirmedContract, DepthError> {
+        self.gateway
+            .state
+            .lock()
+            .unwrap()
+            .depth_confirmations
+            .push(symbol);
         Ok(self.confirm(&symbol.contract_query()).await?)
     }
 
@@ -747,6 +754,137 @@ async fn stop_during_focus_cooldown_closes_the_session_before_sdk_depth_drop() {
 #[tokio::test(start_paused = true)]
 async fn disconnect_during_focus_cooldown_retires_parked_sdk_write_before_reconnect() {
     verify_depth_teardown_during_cooldown(true).await;
+}
+
+#[derive(Clone, Copy)]
+enum PendingDepthWrite {
+    Cancel,
+    Confirm,
+    Subscribe,
+}
+
+async fn supersede_depth_focus(pending: PendingDepthWrite, replacement: Option<DepthSymbol>) {
+    // Fixed watchlist IDs and virtual time drive the same owner channel as GET/PUT.
+    let config = compact_config();
+    let step = config.request_interval;
+    let cooldown = config.pacing_cooldown;
+    let gateway = Gateway::new(0, &config);
+    let scheduler = LineScheduler::new(config, vec![watchlist().remove(0)]).unwrap();
+    let frames = DepthFrames::default();
+    let (scheduler, demand) = scheduler.with_subscription_demand(Some((
+        frames.clone(),
+        DepthPermissions {
+            equity_l1_confirmed: true,
+            totalview_confirmed: true,
+            eds_confirmed: true,
+        },
+    )));
+    let registry = SubscriptionInstrumentRegistry::default();
+    let select = |symbol: Option<DepthSymbol>| {
+        let id = symbol.map(|symbol| format!("{}.NASDAQ", symbol.as_str()).parse().unwrap());
+        let snapshot = registry.validate(Vec::new(), id).unwrap();
+        assert_eq!(demand.replace(snapshot).unwrap().depth_focus(), symbol);
+        assert_eq!(demand.current().unwrap().depth_focus(), symbol);
+    };
+    let confirmations = |symbol| {
+        gateway
+            .state
+            .lock()
+            .unwrap()
+            .depth_confirmations
+            .iter()
+            .filter(|&&s| s == symbol)
+            .count()
+    };
+    select(Some(DepthSymbol::Nvda));
+    let (stop, stopped) = watch::channel(false);
+    let fake = gateway.clone();
+    let task = tokio::spawn(scheduler.run(move |pacing| fake.clone().open(pacing), stopped));
+    until(24, step, || {
+        gateway.count(1, Operation::DepthOpen(DepthSymbol::Nvda)) == 1
+    })
+    .await;
+
+    if matches!(pending, PendingDepthWrite::Cancel) {
+        gateway.global_pacing();
+    }
+    select(Some(DepthSymbol::Tsla));
+    let old_cancel = Operation::DepthCancel(DepthSymbol::Nvda);
+    until(20, step, || match pending {
+        PendingDepthWrite::Cancel => frames
+            .latest(DepthSymbol::Nvda)
+            .is_some_and(|frame| frame.state == DepthState::Inactive),
+        PendingDepthWrite::Confirm => gateway.count(1, old_cancel) == 1,
+        PendingDepthWrite::Subscribe => confirmations(DepthSymbol::Tsla) == 1,
+    })
+    .await;
+    assert_eq!(
+        gateway.count(1, old_cancel),
+        usize::from(!matches!(pending, PendingDepthWrite::Cancel))
+    );
+    let confirmed_before = usize::from(matches!(pending, PendingDepthWrite::Subscribe));
+    assert_eq!(confirmations(DepthSymbol::Tsla), confirmed_before);
+    assert_eq!(gateway.count(1, Operation::DepthOpen(DepthSymbol::Tsla)), 0);
+    let before = gateway.calls().len();
+    gateway.global_pacing();
+    select(replacement);
+    tick(cooldown - step).await;
+    assert_eq!(
+        gateway.calls().len(),
+        before,
+        "request sent during cooldown"
+    );
+    // Let the scheduler run past the cooldown and several shared write slots.
+    for _ in 0..24 {
+        tick(step).await;
+    }
+    assert_eq!(gateway.count(1, old_cancel), 1);
+    assert_eq!(
+        confirmations(DepthSymbol::Tsla),
+        confirmed_before,
+        "confirmed superseded focus"
+    );
+    assert_eq!(
+        gateway.count(1, Operation::DepthOpen(DepthSymbol::Tsla)),
+        0,
+        "opened superseded focus"
+    );
+    assert_eq!(
+        gateway.count(1, Operation::DepthCancel(DepthSymbol::Tsla)),
+        0
+    );
+    assert!(
+        frames
+            .latest(DepthSymbol::Tsla)
+            .is_none_or(|frame| frame.state == DepthState::Inactive)
+    );
+    if let Some(latest) = replacement {
+        assert_eq!(confirmations(latest), 1);
+        assert_eq!(gateway.count(1, Operation::DepthOpen(latest)), 1);
+    }
+    for pin in [DepthSymbol::Qqq, DepthSymbol::Aapl] {
+        assert_eq!(gateway.count(1, Operation::DepthOpen(pin)), 1);
+        assert_eq!(gateway.count(1, Operation::DepthCancel(pin)), 0);
+    }
+    assert_eq!(gateway.count(1, Operation::Close), 0);
+    check_request_spacing(&gateway, step);
+    stop.send(true).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn superseded_focus_cleared_while_old_depth_cancel_waits_for_cooldown() {
+    supersede_depth_focus(PendingDepthWrite::Cancel, None).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn superseded_focus_replaced_while_depth_confirmation_waits_for_a_slot() {
+    supersede_depth_focus(PendingDepthWrite::Confirm, Some(DepthSymbol::Meta)).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn superseded_focus_replaced_after_confirmation_before_depth_subscribe() {
+    supersede_depth_focus(PendingDepthWrite::Subscribe, Some(DepthSymbol::Msft)).await;
 }
 
 #[tokio::test(start_paused = true)]

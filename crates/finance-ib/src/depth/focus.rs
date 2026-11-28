@@ -38,6 +38,10 @@ impl DepthFocus {
             .filter(|symbol| !self.pinned.contains(&Some(*symbol)));
         self.pinned.into_iter().chain([followed]).flatten()
     }
+
+    fn contains(self, symbol: DepthSymbol) -> bool {
+        self.followed == Some(symbol) || self.pinned.contains(&Some(symbol))
+    }
 }
 
 impl Default for DepthFocus {
@@ -47,6 +51,21 @@ impl Default for DepthFocus {
             followed: None,
         }
     }
+}
+
+/// A watch value from which the depth owner reads its pinned and followed symbols.
+pub trait DepthSelection: Send + Sync {
+    fn selection(&self) -> DepthFocus;
+}
+
+impl DepthSelection for DepthFocus {
+    fn selection(&self) -> DepthFocus {
+        *self
+    }
+}
+
+fn selected(focus: &watch::Receiver<impl DepthSelection>, symbol: DepthSymbol) -> bool {
+    focus.has_changed().is_ok() && focus.borrow().selection().contains(symbol)
 }
 
 struct Active<S> {
@@ -94,11 +113,16 @@ impl<S: DepthSubscription> Line<S> {
     async fn subscribe(
         &mut self,
         source: &impl DepthSource<Subscription = S>,
+        focus: &watch::Receiver<impl DepthSelection>,
         request: DepthRequest,
         publish: &mut impl FnMut(DepthFrame),
     ) -> Result<(), DepthError> {
-        match source.subscribe_depth(&request).await {
-            Ok(subscription) => {
+        let symbol = self.frame.symbol;
+        match source
+            .allocate_if_selected(|| selected(focus, symbol), source.subscribe_depth(&request))
+            .await
+        {
+            Ok(Some(subscription)) => {
                 self.frame.state = DepthState::Awaiting;
                 self.frame.request_id = Some(subscription.request_id());
                 self.active = Some(Active {
@@ -108,6 +132,7 @@ impl<S: DepthSubscription> Line<S> {
                 publish(self.frame.clone());
                 Ok(())
             }
+            Ok(None) => Ok(()),
             Err(error @ (DepthError::Timeout | DepthError::Transport)) => {
                 // A failed write may have reached the Gateway. Stop this
                 // session owner rather than risk allocating another line.
@@ -134,6 +159,7 @@ impl<S: DepthSubscription> Line<S> {
     async fn start(
         &mut self,
         source: &impl DepthSource<Subscription = S>,
+        focus: &watch::Receiver<impl DepthSelection>,
         publish: &mut impl FnMut(DepthFrame),
     ) -> Result<(), DepthError> {
         publish(self.frame.clone());
@@ -141,12 +167,15 @@ impl<S: DepthSubscription> Line<S> {
             return Ok(());
         }
         let symbol = self.frame.symbol;
+        let rows = self.frame.requested_rows;
         let request = source
-            .confirm_depth(symbol)
-            .await
-            .and_then(|contract| DepthRequest::new(symbol, contract, self.frame.requested_rows));
+            .allocate_if_selected(|| selected(focus, symbol), async {
+                DepthRequest::new(symbol, source.confirm_depth(symbol).await?, rows)
+            })
+            .await;
         match request {
-            Ok(request) => self.subscribe(source, request, publish).await,
+            Ok(Some(request)) => self.subscribe(source, focus, request, publish).await,
+            Ok(None) => Ok(()),
             Err(error) => self.fail(error, publish).await,
         }
     }
@@ -164,7 +193,7 @@ impl<S: DepthSubscription> Line<S> {
     async fn reset(
         &mut self,
         source: &impl DepthSource<Subscription = S>,
-        focus: &watch::Receiver<DepthFocus>,
+        focus: &watch::Receiver<impl DepthSelection>,
         publish: &mut impl FnMut(DepthFrame),
     ) -> Result<(), DepthError> {
         self.clear(DepthState::Reset, publish);
@@ -176,12 +205,7 @@ impl<S: DepthSubscription> Line<S> {
             return Ok(());
         };
         cancel(&mut subscription).await?;
-        if focus.has_changed().is_err()
-            || !focus
-                .borrow()
-                .desired()
-                .any(|symbol| symbol == self.frame.symbol)
-        {
+        if !selected(focus, self.frame.symbol) {
             return Ok(());
         }
         if self.recovering {
@@ -189,14 +213,15 @@ impl<S: DepthSubscription> Line<S> {
             // for a new selection or session instead of reopening in a loop.
             return self.fail(DepthError::InvalidCallback, publish).await;
         }
-        self.recovering = true;
-        self.subscribe(source, request, publish).await
+        self.subscribe(source, focus, request, publish).await?;
+        self.recovering = self.active.is_some();
+        Ok(())
     }
 
     async fn update(
         &mut self,
         source: &impl DepthSource<Subscription = S>,
-        focus: &watch::Receiver<DepthFocus>,
+        focus: &watch::Receiver<impl DepthSelection>,
         result: Result<Option<DepthUpdate>, DepthError>,
         publish: &mut impl FnMut(DepthFrame),
     ) -> Result<(), DepthError> {
@@ -282,31 +307,37 @@ async fn next_update<S: DepthSubscription>(
 async fn reconcile<S: DepthSource>(
     source: &S,
     lines: &mut [Option<Line<S::Subscription>>; MAX_DEPTH_SUBSCRIPTIONS],
-    focus: DepthFocus,
+    focus: &mut watch::Receiver<impl DepthSelection>,
     permissions: DepthPermissions,
     requested_rows: u32,
     publish: &mut impl FnMut(DepthFrame),
 ) -> Result<(), DepthError> {
+    let desired = focus.borrow_and_update().selection();
     for line in lines.iter_mut() {
         if line
             .as_ref()
-            .is_some_and(|line| !focus.desired().any(|symbol| symbol == line.frame.symbol))
+            .is_some_and(|line| !desired.contains(line.frame.symbol))
         {
             let mut removed = line.take().expect("existing line");
             removed.clear(DepthState::Inactive, publish);
             removed.cancel().await?;
         }
     }
-    for symbol in focus.desired() {
+    for symbol in desired.desired() {
+        if !selected(focus, symbol) {
+            continue;
+        }
         if let Some(line) = lines
             .iter_mut()
             .flatten()
             .find(|line| line.frame.symbol == symbol)
         {
-            if line.frame.state == DepthState::Reset {
-                // Focus can move away and back while a reset cancel is in flight.
+            if line.active.is_none()
+                && matches!(line.frame.state, DepthState::Reset | DepthState::Awaiting)
+            {
+                // The symbol can be reselected after a reset or skipped allocation.
                 line.frame.state = DepthState::Awaiting;
-                line.start(source, publish).await?;
+                line.start(source, focus, publish).await?;
             }
             continue;
         }
@@ -315,7 +346,7 @@ async fn reconcile<S: DepthSource>(
             .find(|line| line.is_none())
             .expect("focus bounded by slot count");
         let line = slot.insert(Line::new(symbol, permissions, requested_rows));
-        line.start(source, publish).await?;
+        line.start(source, focus, publish).await?;
     }
     Ok(())
 }
@@ -332,7 +363,7 @@ enum Work {
 /// before starting a replacement session. Use sender closure for shutdown.
 pub async fn run_depth<S: DepthSource>(
     source: &S,
-    mut focus: watch::Receiver<DepthFocus>,
+    mut focus: watch::Receiver<impl DepthSelection>,
     permissions: DepthPermissions,
     requested_rows: u32,
     mut publish: impl FnMut(DepthFrame),
@@ -346,11 +377,10 @@ pub async fn run_depth<S: DepthSource>(
         let result = match work {
             Work::FocusChanged if focus.has_changed().is_err() => break Ok(()),
             Work::FocusChanged => {
-                let desired = *focus.borrow_and_update();
                 reconcile(
                     source,
                     &mut lines,
-                    desired,
+                    &mut focus,
                     permissions,
                     requested_rows,
                     &mut publish,

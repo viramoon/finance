@@ -67,10 +67,28 @@ pub(super) struct RequestSlot<'a> {
 impl RequestSlot<'_> {
     /// Reserve the slot even if the session ends during IO. On completion start
     /// the interval from the response, as for the original L1 scheduler.
-    pub async fn run<F: Future>(mut self, request: F) -> (F::Output, Instant) {
+    pub async fn run<F: Future>(self, request: F) -> (F::Output, Instant) {
         // Ranking a large chain can take time after acquiring a slot.
         // Honor notices received during selection before polling the write.
         self.pacing.wait_until(*self.next).await;
+        self.write(request).await
+    }
+
+    /// Recheck demand after the last pacing wait. A skipped write uses no interval.
+    pub async fn run_if<F: Future>(
+        self,
+        selected: impl FnOnce() -> bool,
+        request: F,
+    ) -> Option<F::Output> {
+        self.pacing.wait_until(*self.next).await;
+        if selected() {
+            Some(self.write(request).await.0)
+        } else {
+            None
+        }
+    }
+
+    async fn write<F: Future>(mut self, request: F) -> (F::Output, Instant) {
         *self.next = Instant::now() + self.pacing.interval;
         let result = request.await;
         *self.next = Instant::now() + self.pacing.interval;

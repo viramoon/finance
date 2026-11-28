@@ -9,7 +9,7 @@ use std::{
 use async_trait::async_trait;
 use finance_ib::depth::{
     DEFAULT_DEPTH_ROWS, DepthError, DepthFocus, DepthFrame, DepthPermissions, DepthRequest,
-    DepthSource, DepthSubscription, DepthSymbol, DepthUpdate, run_depth,
+    DepthSelection, DepthSource, DepthSubscription, DepthSymbol, DepthUpdate, run_depth,
 };
 use finance_ib::market::ConfirmedContract;
 use tokio::sync::watch;
@@ -37,51 +37,27 @@ impl DepthFrames {
     }
 }
 
+impl DepthSelection for SubscriptionDemand {
+    fn selection(&self) -> DepthFocus {
+        DepthFocus::default().with_followed(self.depth_focus())
+    }
+}
+
 pub(super) async fn drive_depth(
     session: &impl DepthSource,
     pacing: &RequestPacing,
-    mut demand: watch::Receiver<SubscriptionDemand>,
+    demand: watch::Receiver<SubscriptionDemand>,
     permissions: DepthPermissions,
     frames: &DepthFrames,
 ) -> Result<(), DepthError> {
-    let pinned = DepthFocus::default();
-    let (focus, selected) =
-        watch::channel(pinned.with_followed(demand.borrow_and_update().depth_focus()));
-    let forward = async move {
-        loop {
-            tokio::select! {
-                _ = focus.closed() => break,
-                update = demand.changed() => {
-                    if update.is_err() {
-                        break;
-                    }
-                    let next = pinned.with_followed(demand.borrow_and_update().depth_focus());
-                    focus.send_if_modified(|current| {
-                        if *current == next {
-                            return false;
-                        }
-                        *current = next;
-                        true
-                    });
-                }
-            }
-        }
-    };
     let source = PacedDepth {
         inner: session,
         pacing,
     };
-    let ((), result) = tokio::join!(
-        forward,
-        run_depth(
-            &source,
-            selected,
-            permissions,
-            DEFAULT_DEPTH_ROWS,
-            |frame| frames.publish(frame)
-        )
-    );
-    result
+    run_depth(&source, demand, permissions, DEFAULT_DEPTH_ROWS, |frame| {
+        frames.publish(frame)
+    })
+    .await
 }
 
 /// Apply the owner's write budget to F9c, including resets and checked cancellation.
@@ -97,34 +73,30 @@ impl RequestPacing {
         }
         result
     }
-
-    async fn depth_request<T>(
-        &self,
-        request: impl Future<Output = Result<T, DepthError>>,
-    ) -> Result<T, DepthError> {
-        let (result, _) = self.slot().await.run(request).await;
-        self.depth_result(result)
-    }
 }
 
 #[async_trait]
 impl<'a, S: DepthSource> DepthSource for PacedDepth<'a, &S> {
     type Subscription = PacedDepth<'a, S::Subscription>;
 
+    async fn allocate_if_selected<T: Send>(
+        &self,
+        selected: impl FnOnce() -> bool + Send,
+        request: impl Future<Output = Result<T, DepthError>> + Send,
+    ) -> Result<Option<T>, DepthError> {
+        let result = self.pacing.slot().await.run_if(selected, request).await;
+        self.pacing.depth_result(result.transpose())
+    }
+
     async fn confirm_depth(&self, symbol: DepthSymbol) -> Result<ConfirmedContract, DepthError> {
-        self.pacing
-            .depth_request(self.inner.confirm_depth(symbol))
-            .await
+        self.inner.confirm_depth(symbol).await
     }
 
     async fn subscribe_depth(
         &self,
         request: &DepthRequest,
     ) -> Result<Self::Subscription, DepthError> {
-        let inner = self
-            .pacing
-            .depth_request(self.inner.subscribe_depth(request))
-            .await?;
+        let inner = self.inner.subscribe_depth(request).await?;
         Ok(PacedDepth {
             inner,
             pacing: self.pacing,
@@ -143,7 +115,8 @@ impl<S: DepthSubscription> DepthSubscription for PacedDepth<'_, S> {
     }
 
     async fn cancel(&mut self) -> Result<(), DepthError> {
-        self.pacing.depth_request(self.inner.cancel()).await
+        let (result, _) = self.pacing.slot().await.run(self.inner.cancel()).await;
+        self.pacing.depth_result(result)
     }
 }
 

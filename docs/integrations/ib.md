@@ -81,7 +81,7 @@ F9a 的行情和报告驻于会话内存，私有脚本只输出摘要。共享�
 
 ### 深度请求与焦点
 
-`finance_ib::depth::run_depth` 接收 `DepthSource`、`DepthFocus` 的 watch 接收端、`DepthPermissions`、每侧请求档数和内存发布回调。调用方通过 `ConnectionManager::open_market` 获得已验证的 `PaperMarket`，每个会话由一个行情所有者运行该循环。每侧请求档数接受 1 至 50，`DEFAULT_DEPTH_ROWS` 为 5。`DepthFocus::default()` 固定 QQQ 和 AAPL，初始页面焦点为空。`DepthFocus::new` 接受至多两个固定标的和一个页面标的，`with_followed` 只调整页面标的。页面与固定标的重合时共享同一个订阅，两者变化时先取消已移出的订阅，再使用空出的名额。最大并发为三，使用基础额度。停用时关闭焦点发送端并等待循环取消订阅。
+`finance_ib::depth::run_depth` 接收 `DepthSource`、实现 `DepthSelection` 的 watch 接收端（可直接使用 `DepthFocus` 或调度器的需求快照）、`DepthPermissions`、每侧请求档数和内存发布回调。调用方通过 `ConnectionManager::open_market` 获得已验证的 `PaperMarket`，每个会话由一个行情所有者运行该循环。每侧请求档数接受 1 至 50，`DEFAULT_DEPTH_ROWS` 为 5。`DepthFocus::default()` 固定 QQQ 和 AAPL，初始页面焦点为空。`DepthFocus::new` 接受至多两个固定标的和一个页面标的，`with_followed` 只调整页面标的。页面与固定标的重合时共享同一个订阅，两者变化时先取消已移出的订阅，再使用空出的名额。最大并发为三，使用基础额度。停用时关闭焦点发送端并等待循环取消订阅。
 
 `DepthFrame` 提供标的、`NASDAQ` 场所、已接收的买卖行、数据状态与接收时间。展示标签可用 `AAPL · Nasdaq 场所深度 · 已返回 N 档`，其中 `N` 取 `returned_rows()`，即当前买卖两侧实际行数的较大值。逐侧展示时使用各自实际行数。IBKR 深度是按位置传输的，多个位置可以有相同价格，因此档数按返回位置计。`is_stale()` 使用本地最近一次深度观察和调用方的时限计算陈旧。场所依据请求路由确定，独立于做市商标识。
 
