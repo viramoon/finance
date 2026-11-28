@@ -138,6 +138,7 @@ processes:
       binance_profile: /api/v1/market/binance/status
       venue_depth: /api/v1/market/book
       subscription_budget: /api/v1/market/subscriptions
+      subscription_demand_status: /api/v1/market/subscriptions/demand
       option_subscription_coverage: /api/v1/market/subscriptions/coverage
       option_chain: /api/v1/options/chain
       option_exposure: /api/v1/options/exposure
@@ -175,6 +176,13 @@ processes:
       cache_control: private, no-store
       openapi_export: cargo run --locked -q -p finance-api -- export-openapi
       stream_schema_export: cargo run --locked -q -p finance-api -- export-read-stream DIRECTORY
+    subscription_demand:
+      replace: 'PUT /api/v1/market/subscriptions/demand'
+      default_response: '200 state=disabled'
+      access: web 管理员转发，finance 仅向受信内网提供
+      owner_input: finance_collector::line_budget::SubscriptionDemandHandle
+      storage: memory_only
+      documentation: docs/api.md#行情订阅需求
     health:
       live_path: /healthz/live
       ready_path: /healthz/ready

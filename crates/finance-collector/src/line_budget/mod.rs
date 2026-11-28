@@ -1,12 +1,14 @@
 //! Shared, read-only IBKR L1 subscriptions and option-chain rotation.
 
 mod coverage;
+mod demand;
 mod depth;
 mod policy;
 mod session;
 mod worker;
 
 pub use coverage::{CoverageInterval, CoverageReport};
+pub use demand::{SubscriptionDemand, SubscriptionDemandHandle, SubscriptionInstrumentRegistry};
 pub use depth::{DepthAllocation, DepthBudget, DepthBudgetError};
 pub use policy::{BudgetConfig, BudgetConfigError, watchlist};
 

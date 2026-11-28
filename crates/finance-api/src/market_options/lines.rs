@@ -1,4 +1,6 @@
-use super::{OPRA, ReadSources, failed, invalid, parse, unavailable};
+use std::sync::Arc;
+
+use super::{Licensed, OPRA, ReadSources, failed, invalid, parse, unavailable};
 use crate::{ApiError, ErrorBody};
 use axum::{
     Json,
@@ -193,14 +195,9 @@ pub(crate) struct SubscriptionBudget {
     discovery_complete: bool,
 }
 
-#[utoipa::path(
-    get, path = "/api/v1/market/subscriptions",
-    responses((status = 200, body = SubscriptionBudget), (status = 503, body = ErrorBody))
-)]
-pub(crate) async fn subscriptions(
-    Extension(sources): ReadSources,
-) -> Result<Json<SubscriptionBudget>, ApiError> {
-    let lines = sources.option_lines.as_ref().ok_or_else(unavailable)?;
+pub(super) fn subscription_budget(
+    lines: &Licensed<Arc<dyn OptionLineSource>>,
+) -> SubscriptionBudget {
     let BudgetStatus {
         phase,
         as_of,
@@ -213,7 +210,7 @@ pub(crate) async fn subscriptions(
         observed_options,
         discovery_complete,
     } = lines.source.status();
-    Ok(Json(SubscriptionBudget {
+    SubscriptionBudget {
         access: lines.access(OPRA),
         phase: match phase {
             SchedulerPhase::Starting => LineSchedulerPhase::Starting,
@@ -230,7 +227,18 @@ pub(crate) async fn subscriptions(
         confirmed_options,
         observed_options,
         discovery_complete,
-    }))
+    }
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/market/subscriptions",
+    responses((status = 200, body = SubscriptionBudget), (status = 503, body = ErrorBody))
+)]
+pub(crate) async fn subscriptions(
+    Extension(sources): ReadSources,
+) -> Result<Json<SubscriptionBudget>, ApiError> {
+    let lines = sources.option_lines.as_ref().ok_or_else(unavailable)?;
+    Ok(Json(subscription_budget(lines)))
 }
 
 #[derive(Deserialize, IntoParams)]

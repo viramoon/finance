@@ -259,6 +259,8 @@ fn router_with_read_sources(
         market_options::depth::book,
         market_options::lines::subscriptions,
         market_options::lines::coverage,
+        market_options::demand::get_subscription_demand,
+        market_options::demand::put_subscription_demand,
         market_options::lines::chain,
         market_options::analytics::exposure,
         market_options::analytics::history,

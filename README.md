@@ -20,6 +20,8 @@ F3 的投影重放校验和 Python 最新事件查询同步读取单个 Parquet 
 
 finance-api 提供 v1 行情 WAL、投影、水位、缺口及因子研究只读查询，并从代码导出 REST OpenAPI 和版本化 WS/SSE 消息契约。第三批覆盖主图 K 线、指标、Binance profile 状态以及期权链、订阅预算、Nasdaq 场所簿、期权敞口和历史窗口。IBKR 查询由获准的共享行情所有者接入，独立 API 未接入时返回 503。[第三批读契约](docs/api.md#第三批读契约)
 
+web 可通过 `GET` 和 `PUT /api/v1/market/subscriptions/demand` 读取或替换管理员的追加自选与页面深度 focus。独立 API 默认返回 `disabled`。启用后，需求由本机行情所有者按已授权用途和预算处理。[行情订阅需求](docs/api.md#行情订阅需求)
+
 第二批生产者契约覆盖配置策略校验与版本选择、离线回测与取消、worker 租约状态、获准发布的决策信号以及因子报告直达查询。[第二批契约](docs/api.md#第二批策略回测与研究契约)
 
 finance 提供 `GET /api/v1/backtests?visibility=legacy`，供 web 匿名回测列表按公开的 `DemoStrategy` 和 `SmaCrossover` 作业分页。省略参数时读取完整队列。[回测列表分页](docs/api.md#回测列表分页)

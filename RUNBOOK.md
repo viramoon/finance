@@ -113,6 +113,16 @@ cargo test --locked --offline -p finance-collector option_flow
 
 已获本地记录许可的 `ibkr/opra-history` 核验报告可用 `durable_through` 对照同一数据根和产品的 F3 水位。仅展示模式从进程内读取，核验水位为空。按[接口导出流程](docs/api.md#openapi-与契约)取用同一提交生成的 OpenAPI 和已有的流产物。[第四批接口与权限](docs/api.md#第四批期权流读契约)
 
+## 行情订阅需求验收
+
+`GET /api/v1/market/subscriptions/demand` 查看状态。`PUT` 同一路径提交完整快照，JSON `{}` 清除全部追加需求。独立 API 默认对有效请求返回 `200` 和 `state: disabled`，忽略该次需求，零公网请求。已有 `GET /api/v1/market/subscriptions` 继续查询实际行数。
+
+```sh
+cargo test --locked --offline -p finance-api --test subscription_demand --test market_options
+```
+
+验收使用进程内路由、合成标的 ID 和未启动的调度器。获准启用后，检查行情所有者是否向 `router_with_market_reads` 注入完整标的注册表及 `SubscriptionDemandHandle`，并持有且消费对应的接收端。所有者重启后，由 web 重发已保存的自选和 focus。遇到 `400 / subscription_demand_invalid`，检查完整的 F1 ID、深度资格和 JSON 字段；出现 `enabled` 后仍需根据预算和场所簿状态判断实际覆盖。[请求格式、状态和所有者接入](docs/api.md#行情订阅需求)
+
 ## 离线因子研究验收
 
 在仓库根目录用含研究依赖的现有 Python 环境执行。定向测试在内存生成截面和收盘价，月频登记读取仓库内原报告并核对证据哈希。

@@ -32,6 +32,8 @@
 
 `LineHandle::status()` 返回 `as_of`、连接阶段、账户预算、预留、各池使用量、已确认候选数和保留窗口内实际观察到的候选数。`option_contracts()` 返回当前已确认的合约。只有当 `discovery_complete` 为真时，才可把 `confirmed_options` 当作本轮配置范围的已确认合约分母。正在发现、确认失败或重连时，候选数可能只是已确认的子集，且可暂留上一轮确认的合约。候选列表和两个计数在所有连接阶段按查询时刻的美东日期排除过期合约，旧合约的覆盖记录仍按原键查询。新会话只订阅在该会话重新确认的合约。任一候选分母都以当前配置和 IB 返回的合约为边界。
 
+所有者可用 `SubscriptionDemandHandle::channel()` 从 HTTP 接收经完整标的注册表校验的额外自选及页面深度 focus。接收端读取最近的完整快照，沿用本地预算、节流和产品许可，零追加需求时仍保留基础分配。深度 focus 可转换成 `DepthSymbol` 并更新 `DepthFocus::with_followed`。[行情订阅需求和接入](../api.md#行情订阅需求)
+
 `LineHandle::coverage(key, start, end)` 查询半开 UTC 区间 `[start, end)`。输入须满足 `start < end <= as_of`，`as_of` 可从 `status()` 取得。返回 `last_observed_at` 和三类区间。
 
 | 字段 | 含义 |
