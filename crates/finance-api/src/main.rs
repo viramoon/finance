@@ -1,6 +1,8 @@
 use finance_api::{
-    ApiDoc, AppState, config::Settings, market_options::MarketReadSources, read_stream,
-    router_with_market_reads,
+    ApiDoc, AppState,
+    config::Settings,
+    market_options::{MarketReadSources, PaperSubscriptionOwner},
+    read_stream, router_with_market_reads,
 };
 use finance_market_protocol::{
     SchemaVersion,
@@ -90,6 +92,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 research_root,
             },
             MarketReadSources::default(),
+            None,
             true,
         )
         .await;
@@ -122,6 +125,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let binance_config = std::env::var_os("FINANCE_BINANCE_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|| dir.join("binance").join(format!("{profile}.yaml")));
+    let mut sources = MarketReadSources {
+        binance_config: Some(binance_config),
+        ..Default::default()
+    };
+    let owner =
+        PaperSubscriptionOwner::attach(&mut sources, settings.api.subscription_owner, || {
+            finance_ib::IbConfig::from_layers(&dir, profile, |name| std::env::var(name).ok())
+        })?;
     let listener =
         tokio::net::TcpListener::bind((settings.api.bind_host, settings.api.port)).await?;
     serve(
@@ -130,10 +141,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             data_root: settings.paths.data_root,
             research_root: settings.paths.research_root,
         },
-        MarketReadSources {
-            binance_config: Some(binance_config),
-            ..Default::default()
-        },
+        sources,
+        owner,
         false,
     )
     .await
@@ -143,6 +152,7 @@ async fn serve(
     listener: tokio::net::TcpListener,
     state: AppState,
     sources: MarketReadSources,
+    owner: Option<PaperSubscriptionOwner>,
     isolated: bool,
 ) -> Result<(), Box<dyn Error>> {
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -152,13 +162,26 @@ async fn serve(
     } else {
         eprintln!("finance-api listening on {}", listener.local_addr()?);
     }
-    axum::serve(listener, router_with_market_reads(state, sources))
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let owner = owner.map(|owner| {
+        tokio::spawn(async move {
+            if let Err(error) = owner.run(shutdown).await {
+                eprintln!("paper subscription owner stopped: {error}");
+            }
+        })
+    });
+    let result = axum::serve(listener, router_with_market_reads(state, sources))
         .with_graceful_shutdown(async move {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {},
                 _ = terminate.recv() => {},
             }
         })
-        .await?;
+        .await;
+    drop(stop);
+    if let Some(owner) = owner {
+        owner.await?;
+    }
+    result?;
     Ok(())
 }

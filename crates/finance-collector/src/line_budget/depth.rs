@@ -1,4 +1,80 @@
-use std::{error::Error, fmt};
+use std::{
+    collections::HashMap,
+    error::Error,
+    fmt,
+    sync::{Arc, RwLock},
+};
+
+use finance_ib::depth::{
+    DEFAULT_DEPTH_ROWS, DepthError, DepthFocus, DepthFrame, DepthPermissions, DepthSource,
+    DepthSymbol, run_depth,
+};
+use tokio::sync::watch;
+
+use super::SubscriptionDemand;
+
+/// Latest display frame for each symbol in the current session.
+#[derive(Clone, Default)]
+pub struct DepthFrames(Arc<RwLock<HashMap<DepthSymbol, DepthFrame>>>);
+
+impl DepthFrames {
+    pub fn publish(&self, frame: DepthFrame) {
+        self.0
+            .write()
+            .expect("depth frames")
+            .insert(frame.symbol, frame);
+    }
+
+    pub fn latest(&self, symbol: DepthSymbol) -> Option<DepthFrame> {
+        self.0.read().expect("depth frames").get(&symbol).cloned()
+    }
+
+    pub(super) fn clear(&self) {
+        self.0.write().expect("depth frames").clear();
+    }
+}
+
+pub(super) async fn drive_depth(
+    session: &impl DepthSource,
+    mut demand: watch::Receiver<SubscriptionDemand>,
+    permissions: DepthPermissions,
+    frames: &DepthFrames,
+) -> Result<(), DepthError> {
+    let pinned = DepthFocus::default();
+    let (focus, selected) =
+        watch::channel(pinned.with_followed(demand.borrow_and_update().depth_focus()));
+    let forward = async move {
+        loop {
+            tokio::select! {
+                _ = focus.closed() => break,
+                update = demand.changed() => {
+                    if update.is_err() {
+                        break;
+                    }
+                    let next = pinned.with_followed(demand.borrow_and_update().depth_focus());
+                    focus.send_if_modified(|current| {
+                        if *current == next {
+                            return false;
+                        }
+                        *current = next;
+                        true
+                    });
+                }
+            }
+        }
+    };
+    let ((), result) = tokio::join!(
+        forward,
+        run_depth(
+            session,
+            selected,
+            permissions,
+            DEFAULT_DEPTH_ROWS,
+            |frame| frames.publish(frame)
+        )
+    );
+    result
+}
 
 /// Independent depth quota. The depth adapter supplies eligible equity conIds
 /// and applies the resulting allocation to its venue subscriptions.

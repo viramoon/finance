@@ -7,7 +7,8 @@ use axum::{
 };
 use finance_api::{
     ApiDoc, AppState,
-    market_options::{DepthFrames, Licensed, MarketReadSources},
+    config::SubscriptionOwnerConfig,
+    market_options::{DepthFrames, Licensed, MarketReadSources, PaperSubscriptionOwner},
     router_with_market_reads,
 };
 use finance_collector::line_budget::{
@@ -119,6 +120,193 @@ async fn default_and_detached_owner_return_disabled_without_retaining_demand() {
     assert_eq!(get(&detached_app, DEMAND, StatusCode::OK).await, disabled);
     assert_eq!(put(&detached_app, "{}", StatusCode::OK).await, disabled);
     assert_eq!(root.path().read_dir().unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn configured_paper_owner_attaches_the_api_and_closes_demand_on_stop() {
+    let root = tempfile::tempdir().unwrap();
+    let config = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config");
+    let mut sources = MarketReadSources::default();
+    let owner = PaperSubscriptionOwner::attach(
+        &mut sources,
+        Some(SubscriptionOwnerConfig {
+            client_id: 830,
+            equity_l1_confirmed: true,
+            opra_license: "fixture.opra".parse().unwrap(),
+            nasdaq_totalview_license: Some("fixture.totalview".parse().unwrap()),
+        }),
+        || {
+            finance_ib::IbConfig::from_layers(&config, "cloudbox", |name| {
+                (name == "IB_GATEWAY_ADDRESS").then(|| "127.0.0.1:1".to_owned())
+            })
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let app = app(&root, sources);
+    let accepted = put(
+        &app,
+        r#"{"watchlist":["SPY.ARCA"],"depth_focus":"NVDA.NASDAQ"}"#,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(accepted["state"], "enabled");
+    assert_eq!(accepted["demand"]["watchlist"], json!(["SPY.ARCA"]));
+    assert_eq!(accepted["demand"]["depth_focus"], "NVDA.NASDAQ");
+    assert_eq!(accepted["budget"]["access"]["license"], "fixture.opra");
+    assert_eq!(
+        accepted["depth_budget"]["access"]["license"],
+        "fixture.totalview"
+    );
+    // Pre-cancel the actual runtime so this test can exercise its lifetime
+    // without giving it a chance to create a transport.
+    let (_stop, stopped) = tokio::sync::watch::channel(true);
+    owner.run(stopped).await.unwrap();
+    assert_eq!(get(&app, DEMAND, StatusCode::OK).await["state"], "disabled");
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn disabled_runtime_makes_no_socket_or_connect_syscall() {
+    use std::{os::unix::process::ExitStatusExt, process::Command};
+
+    const CHILD: &str = "FINANCE_F15_SOCKET_TEST_CHILD";
+    if let Ok(mode) = std::env::var(CHILD) {
+        deny_network_syscalls();
+        if mode == "probe" {
+            // The filter kills this subprocess before bind or connect.
+            let _ = std::net::TcpListener::bind("127.0.0.1:0");
+            panic!("socket syscall escaped the filter");
+        }
+        let config = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config");
+        let settings = finance_api::config::Settings::load(&config, &Default::default()).unwrap();
+        assert!(
+            PaperSubscriptionOwner::attach(
+                &mut MarketReadSources::default(),
+                settings.api.subscription_owner,
+                || panic!("a disabled runtime loaded IB settings"),
+            )
+            .unwrap()
+            .is_none()
+        );
+        default_and_detached_owner_return_disabled_without_retaining_demand();
+        return;
+    }
+    let run = |mode| {
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "disabled_runtime_makes_no_socket_or_connect_syscall",
+            ])
+            .env(CHILD, mode)
+            .output()
+            .unwrap()
+    };
+    let probe = run("probe");
+    const SIGSYS: i32 = 31;
+    assert_eq!(probe.status.signal(), Some(SIGSYS), "{probe:?}");
+    let disabled = run("disabled");
+    assert!(disabled.status.success(), "{disabled:?}");
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn deny_network_syscalls() {
+    use rustix::process::{Resource, Rlimit, setrlimit};
+
+    #[repr(C)]
+    struct Instruction {
+        code: u16,
+        on_true: u8,
+        on_false: u8,
+        value: u32,
+    }
+    #[repr(C)]
+    struct Program {
+        len: u16,
+        instructions: *const Instruction,
+    }
+    unsafe extern "C" {
+        fn prctl(option: i32, ...) -> i32;
+    }
+    // Linux seccomp_data starts with the syscall number and uses classic BPF.
+    #[cfg(target_arch = "x86_64")]
+    const SOCKET_CONNECT: (u32, u32) = (41, 42);
+    #[cfg(target_arch = "aarch64")]
+    const SOCKET_CONNECT: (u32, u32) = (198, 203);
+    const LOAD_WORD: u16 = 0x20;
+    const JUMP_IF_EQUAL: u16 = 0x15;
+    const RETURN_CONSTANT: u16 = 0x06;
+    const KILL_PROCESS: u32 = 0x8000_0000;
+    const ALLOW: u32 = 0x7fff_0000;
+    const PR_SET_NO_NEW_PRIVS: i32 = 38;
+    const PR_SET_SECCOMP: i32 = 22;
+    const SECCOMP_MODE_FILTER: usize = 2;
+    const NEXT: u8 = 0;
+    const SKIP: u8 = 1;
+    let jump_if_syscall = |value, on_true, on_false| Instruction {
+        code: JUMP_IF_EQUAL,
+        on_true,
+        on_false,
+        value,
+    };
+    let return_action = |value| Instruction {
+        code: RETURN_CONSTANT,
+        on_true: NEXT,
+        on_false: NEXT,
+        value,
+    };
+    let instructions = [
+        Instruction {
+            code: LOAD_WORD,
+            on_true: NEXT,
+            on_false: NEXT,
+            value: 0,
+        },
+        jump_if_syscall(SOCKET_CONNECT.0, SKIP, NEXT),
+        jump_if_syscall(SOCKET_CONNECT.1, NEXT, SKIP),
+        return_action(KILL_PROCESS),
+        return_action(ALLOW),
+    ];
+    let program = Program {
+        len: instructions.len().try_into().unwrap(),
+        instructions: instructions.as_ptr(),
+    };
+    setrlimit(
+        Resource::Core,
+        Rlimit {
+            current: Some(0),
+            maximum: Some(0),
+        },
+    )
+    .unwrap();
+    // SAFETY: The scalar prctl arguments have the Linux ABI word size.
+    // The kernel copies the live repr(C) filter during the second call.
+    unsafe {
+        assert_eq!(
+            prctl(PR_SET_NO_NEW_PRIVS, 1_usize, 0_usize, 0_usize, 0_usize),
+            0,
+            "{}",
+            std::io::Error::last_os_error()
+        );
+        assert_eq!(
+            prctl(
+                PR_SET_SECCOMP,
+                SECCOMP_MODE_FILTER,
+                &program as *const Program,
+                0_usize,
+                0_usize
+            ),
+            0,
+            "{}",
+            std::io::Error::last_os_error()
+        );
+    }
 }
 
 #[tokio::test]

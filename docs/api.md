@@ -201,7 +201,7 @@ IBKR 响应的 `access` 是 API 的显示用途许可，来源为 `ibkr`，产�
 
 ### 行情所有者接入
 
-独立 `finance-api` 进程提供本地 bars、Binance profile 和 F3 记录查询。IBKR 查询需由拥有已验证 paper 只读会话、确认产品展示许可的一方将数据接入 `router_with_market_reads` 的 `MarketReadSources`。
+独立 `finance-api` 进程提供本地 bars、Binance profile 和 F3 记录查询。期权链、预算、覆盖和深度可由 [paper 行情所有者](#行情订阅需求)提供。嵌入 API 的已授权接入方也可以通过 `router_with_market_reads` 提供 `MarketReadSources`。
 
 - 期权链和预算接入现有 `LineHandle`（实现 `OptionLineSource`），GET 不分配行情行。
 - 场所深度将 `run_depth` 的显示回调交给 `DepthFrames::publish`，包括 reset、inactive 和冷启动空簿。
@@ -246,7 +246,22 @@ GET 和合法 PUT 返回 200。未接入或已移除接收端时为 `state: disa
 
 `budget` 复用原行数接口的实际使用量、额度、调度状态和 OPRA 展示策略，未接入对应读源时为 `null`。`depth_budget` 的 `pinned_slots` 与 `page_focus_slots` 分别为 2 和 1，`access` 是已接入的 TotalView 私有展示策略，未接入时为 `null`。产品权限确认及簿新鲜度见 `GET /api/v1/market/book`。需求响应不带价量、金额或流序号。预算、期权链和覆盖继续使用原有 GET 路径和响应格式。
 
-行情接入方用 `SubscriptionDemandHandle::channel()` 创建通道，通过 `MarketReadSources.subscription_demand` 和 `subscription_registry` 接入 `router_with_market_reads`。本机所有者持有接收端，使用 `borrow_and_update()` 读取最新快照，并按已有节流、权限及额度处理自选与 `depth_focus()`。后者可传给 `DepthFocus::with_followed`，沿用固定名额。需求通道可合并尚未读取的连续更新，所有者按最新快照处理。关闭需求接收时释放接收端。IBKR 侧沿用经验证的 paper 只读会话，许可由所有者配置。通道随进程消失，接入方重启后由 web 重送当前快照。独立 `finance-api` 启动入口默认无需求接收端。
+缺省或设置 `api.subscription_owner: null` 时，独立 `finance-api` 不加载 IB 连接设置。已核实纸账户、只读 API 及 L1、OPRA 展示许可的部署可在现有 API profile 中配置以下字段。示例中的许可标识和 client ID 由部署方确定。
+
+```yaml
+api:
+  subscription_owner:
+    client_id: 94
+    equity_l1_confirmed: true
+    opra_license: approved-opra-example
+    nasdaq_totalview_license: approved-totalview-example
+```
+
+`client_id` 必须为正整数，且与 collector、probe、trader 及同一 Gateway 上运行的客户端不同。只有同时核实股票 L1、TotalView-OpenView 和 EDS 权限才填 `nasdaq_totalview_license`。省略该字段时，只运行 L1 和 OPRA 调度，合法 focus 仍可随需求提交，`depth_budget.access` 为 `null`。
+
+启用后，API 在同一进程运行 F9b 行数调度器，复用 finance-ib 的 paper 账户校验、重连与只读会话。自选优先影响已配置股票的待确认顺序，以及它们的期权发现与轮换。九只基础股票及各池额度仍按 F9b 配置分配。此 IBKR 所有者接收已登记的加密标的 ID，公共加密采集按自身 profile 运行。启用 TotalView 时，同一 paper 会话运行 F9c 深度循环，固定 QQQ 与 AAPL，动态更新第三个名额。断线清除现有深度帧，重连使用最后一次收到的需求。
+
+嵌入 API 的接入方可用 `LineScheduler::with_subscription_demand` 创建同一调度接收端，并通过 `MarketReadSources.subscription_demand` 和 `subscription_registry` 注入句柄及完整注册表。需求通道可合并连续更新，所有者按最新快照处理。所有者退出后，API 报告 `disabled`。需求随进程消失，重启后由 web 重送。
 
 ## 示例批任务
 

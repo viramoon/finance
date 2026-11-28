@@ -181,6 +181,8 @@ processes:
       default_response: '200 state=disabled'
       access: web 管理员转发，finance 仅向受信内网提供
       owner_input: finance_collector::line_budget::SubscriptionDemandHandle
+      owner_config: api.subscription_owner # 缺省关闭。配置时使用独占 paper client ID
+      owner_session: 同一 API 进程内的 paper 只读行情会话，随 API 停止
       storage: memory_only
       documentation: docs/api.md#行情订阅需求
     health:

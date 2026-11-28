@@ -1,3 +1,4 @@
+use finance_market_protocol::Token;
 use serde::Deserialize;
 use serde_yaml::Value;
 use std::{
@@ -13,7 +14,7 @@ use std::{
 pub struct Settings {
     pub api: Api,
     pub paths: Paths,
-    /// IB configuration belongs to the separate collector / probe processes.
+    /// Parsed by finance-ib if its paper market owner is enabled.
     #[serde(rename = "ib", default)]
     pub _ib: Option<serde_yaml::Mapping>,
 }
@@ -22,6 +23,16 @@ pub struct Settings {
 pub struct Api {
     pub bind_host: IpAddr,
     pub port: u16,
+    pub subscription_owner: Option<SubscriptionOwnerConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubscriptionOwnerConfig {
+    pub client_id: i32,
+    pub equity_l1_confirmed: bool,
+    pub opra_license: Token,
+    pub nasdaq_totalview_license: Option<Token>,
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

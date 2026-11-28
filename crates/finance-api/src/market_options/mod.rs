@@ -5,6 +5,7 @@ pub(crate) mod demand;
 pub(crate) mod depth;
 pub(crate) mod flow;
 pub(crate) mod lines;
+mod owner;
 
 use analytics::{exposure, history};
 use depth::book;
@@ -17,6 +18,7 @@ pub use flow::{
     OptionFlowWindow,
 };
 pub use lines::OptionLineSource;
+pub use owner::PaperSubscriptionOwner;
 
 use crate::{ApiError, AppState, error};
 use axum::{

@@ -95,6 +95,17 @@ impl SubscriptionDemand {
     pub fn depth_focus(&self) -> Option<DepthSymbol> {
         self.depth_focus.as_ref().and_then(depth_symbol)
     }
+
+    pub(super) fn wants_equity(&self, symbol: &str, exchange: &str) -> bool {
+        let venue = if exchange == "ISLAND" {
+            VENUE
+        } else {
+            exchange
+        };
+        self.watchlist
+            .iter()
+            .any(|id| id.as_str().rsplit_once('.') == Some((symbol, venue)))
+    }
 }
 
 /// The HTTP side of the local owner's latest-value channel.
