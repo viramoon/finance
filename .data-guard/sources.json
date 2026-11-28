@@ -91,6 +91,12 @@
       "seed": "fixed",
       "source": "以 crates/finance-market-protocol/fixtures/examples.input.json 为固定输入，由 export-market-protocol 校验并导出。"
     },
+    "protocol/v1/option-flow-stream-examples.json": {
+      "sha256": "ccaa760e1b7f854a9a612df0053d4660f73592839bb5100241a84b3d77399450",
+      "generator": "crates/finance-api/src/option_flow_stream/wire.rs",
+      "seed": "fixed",
+      "source": "以虚构合约 ID、固定 UTC 偏移、合成许可及手写十进制值生成。运行 cargo run --locked --offline -q -p finance-api -- export-read-stream OUTPUT_DIRECTORY，覆盖续传重复、乱序、游标过期、禁用状态和 u64 边界。"
+    },
     "protocol/v1/read-stream-examples.json": {
       "sha256": "a215f16bca7d0e70610ff589177dc732c1094fd6c7a8a43e00c2f8951ab04fbb",
       "generator": "crates/finance-api/src/read_stream.rs",

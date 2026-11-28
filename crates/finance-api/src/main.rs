@@ -1,6 +1,6 @@
 use finance_api::{
-    ApiDoc, AppState, config::Settings, market_options::MarketReadSources, read_stream,
-    router_with_market_reads,
+    ApiDoc, AppState, config::Settings, market_options::MarketReadSources, option_flow_stream,
+    read_stream, router_with_market_reads,
 };
 use finance_market_protocol::{
     SchemaVersion,
@@ -152,12 +152,16 @@ async fn serve(
     } else {
         eprintln!("finance-api listening on {}", listener.local_addr()?);
     }
-    axum::serve(listener, router_with_market_reads(state, sources))
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let router =
+        option_flow_stream::with_shutdown(router_with_market_reads(state, sources), shutdown);
+    axum::serve(listener, router)
         .with_graceful_shutdown(async move {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {},
                 _ = terminate.recv() => {},
             }
+            stop.send_replace(true);
         })
         .await?;
     Ok(())

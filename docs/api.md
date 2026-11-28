@@ -224,7 +224,23 @@ IBKR 响应的 `access` 是 API 的显示用途许可，来源为 `ibkr`，产�
 
 共享行情所有者通过 `MarketReadSources.flow_observations` 和 `flow_verifications` 提供本地快照查询及当前许可。查询只读取结果。未接入源返回 `503 / market_read_source_unavailable`，无符合条件的快照、报告或展示许可返回 `404 / market_read_not_found`，非法参数返回 `400 / market_read_query_invalid`。所有者返回的键、窗口、许可或水位冲突时返回 `500 / market_read_failed`。每次观察查询先校验整个快照再分页。任一记录冲突时，同一快照的所有分页请求均返回 `500`，包括超出记录范围的请求。合法观察快照可返回空页。授权所有者负责快照生命周期，独立 API 进程默认无这些数据源。[领域接口和生产者规则](option-flow.md)
 
-第四批导出新增 REST schema。WS/SSE 继续发布[首批流契约](market-protocol.md#首批读契约的-ws-与-sse-消息)。期权流主动推送与续传、页面焦点写接口、集成连通性测试入口及共享行情所有者部署接线仍待后续契约或集成。web 接入按产品鉴权与限流，浏览器页面由 frontend 交付。
+第四批导出新增 REST schema。共享行情所有者部署接线、页面焦点写接口和集成连通性测试入口仍待后续交付。web 接入按产品鉴权与限流，浏览器页面由 frontend 交付。[期权流推送与续传](#期权流观察推送与续传)
+
+## 期权流观察推送与续传
+
+三条 finance 私有读路由共享同一实例的观察缓冲区，响应使用 `Cache-Control: private, no-store`。web 在每次订阅、快照查询和重连时校验会话及 OPRA 展示授权，并对连接和请求限流。代理 SSE 时逐帧转发并保留 `Last-Event-ID`。
+
+| 请求 | 参数及行为 |
+| --- | --- |
+| `GET /api/v1/options/flow/ws` | WebSocket 升级。`con_id` 为正整数，可选 `cursor` 为上次确认的事件 ID。应用层只接收服务端消息，客户端发送应用数据会关闭连接。 |
+| `GET /api/v1/options/flow/sse` | `text/event-stream`，同样要求 `con_id`。使用非空 `Last-Event-ID` 续传，缺省或为空时使用可选 `cursor` 查询参数。查询参数可用于从 REST 快照建立新的 EventSource。 |
+| `GET /api/v1/options/flow/snapshot` | `con_id`、RFC3339 `start`、`end`。返回 `cursor` 和 `snapshot`，后者沿用 `OptionFlowObservationPage`，包含缓冲区内接收时间位于 `[start, end)` 的全部匹配项，`next_offset` 为 `null`。空结果也有游标。 |
+
+无游标的新订阅从当前发布位置开始，并在 `status` 的 `id` 中收到该位置。有效游标从其后一条匹配的观察开始重放，然后继续接收新观察。仍在保留窗内的交付按发布顺序排列。100 条观察的保留窗由同一实例的所有合约共用，序号可因合约筛选而跳跃，观察接收时间也可能比上一条更早。客户端保留 `id` 原文，按事件 `id` 去重，应用观察后保存游标。重连时只接收当前连接的帧，避免延迟到达的旧帧回退游标。交付序号只在该实例内可比，使用十进制字符串或无损整数处理。SSE 约每 15 秒发送保活注释，WS 发送控制 ping。
+
+过期、跨实例、跨合约或无法定位的游标会触发 `reset_required` 并关闭流。慢读者的未交付位置被淘汰时也会重置。客户端收到重置时主动关闭旧连接，使用同一 `con_id` 和页面所需时窗读取 REST 快照，以快照替换本地视图，再原样传回新 `cursor` 建立连接。EventSource 客户端调用 `close()` 结束带旧游标的自动重连。快照与游标在同一发布位置取得，随后发布的观察可从该游标续传。服务重启会清空进程内保留窗并使旧游标失效。
+
+非法查询参数或含糊的续传请求返回 `400 / market_read_query_invalid`。默认独立 API 没有注册观察源，WS 和 SSE 发送 `status` 的 `disabled` 并保持空闲，快照返回 `503 / market_read_source_unavailable`。`live` 表示进程已接入发布器，行情可用性和覆盖以观察内容为准。推送订阅和快照只读内存，采集连接由共享行情所有者管理。历史核验状态和证据水位继续由 F10d 的已完成报告提供。[消息格式与合成样本](market-protocol.md#期权流观察的-ws-与-sse-消息) · [源接入](option-flow.md#推送接入)
 
 ## 示例批任务
 
@@ -243,7 +259,7 @@ cargo run --locked --offline -q -p finance-api -- export-openapi > /tmp/finance.
 cargo run --locked --offline -q -p finance-api -- export-read-stream /tmp/finance-read-stream
 ```
 
-utoipa 从 handler 注解和实际响应类型导出。流生成器使用 F1 v1.0 行情事件和已有的行情状态 DTO。导出不依赖部署数据根、账户或网络。Finance API CI 比较两次导出的字节，并将流产物与 `protocol/v1/` 中的文件逐一比对，成功后上传 `finance-openapi` 和 `finance-read-stream-v1` artifact。兼容测试用旧客户端类型检查现有字段，流样本来自已登记的固定合成输入。[WS/SSE 消息契约](market-protocol.md#首批读契约的-ws-与-sse-消息)
+utoipa 从 handler 注解和实际响应类型导出。流生成器使用 F1 v1.0 行情事件、行情状态类型和期权流观察的消息类型。导出仅使用代码和固定合成输入。Finance API CI 比较两次导出的字节，并将流产物与 `protocol/v1/` 中的文件逐一比对，成功后上传 `finance-openapi` 和 `finance-read-stream-v1` artifact。兼容测试用旧客户端类型检查已有字段。[首批 WS/SSE 消息](market-protocol.md#首批读契约的-ws-与-sse-消息) · [期权流 WS/SSE 消息](market-protocol.md#期权流观察的-ws-与-sse-消息)
 
 finance 合并后，web 先固定 `openapi/finance.commit` 的完整 SHA，从同一提交更新快照与客户端，并扩充 web 自己的契约。frontend 随后固定 `openapi/web.commit` 并生成客户端。fertile 最后更新已合并的子仓 gitlink 和集成快照 `contracts/finance.openapi.json`，并验证契约链。生成物由相应生成流程更新，破坏性接口变更需要兼容迁移计划。[fertile contracts](https://github.com/viramoon/fertile/tree/main/contracts)
 

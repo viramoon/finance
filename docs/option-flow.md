@@ -31,3 +31,9 @@ F9e 为已确认的 SMART USD 美股期权提供进程内接口。观察结果�
 历史原始数据分别以 `option-history-trades`、`option-history-quotes` 流发布，按 F3 写者代次重置。本地结果确认时返回持久水位。每次重新查询取得独立的批次证据，页内重叠去重范围限本次查询。若记录失败，按 F3 恢复查看已确认前缀后重试。选择性传入 F9b 覆盖时，仅在已知常规交易时段且 TRADES 请求完成的未观察区间记录 `tick_backfilled`。计数是该区间收到的原始交易流记录数，包括保留的供应商标记。查询和覆盖采用半开区间，转换为 F3 质量报告时将结束时间减一纳秒，使报告的含端点区间指向相同范围。条件码和报价均进入投影供追溯。
 
 历史原始证据使用 [v3 事件契约](../protocol/v3/event.schema.json)，可由已有 [F3 读取 API](api.md#首批读契约)读取获准发布的记录。`ObservedFlow` 携带观察产品许可，`HistoricalFlow` 携带历史产品许可、原始时窗和 F3 水位。接入方可通过 `router_with_market_reads` 将已取得的结果提供给[第四批读契约](api.md#第四批期权流读契约)，分别用 `OptionFlowSource` 绑定两类产品当前有效的许可。接入方在调用历史核验前校验私有授权。F9d 的 GEX 与 F9e 相互独立。运行时沿用现有行情会话与数据根。
+
+## 推送接入
+
+共享行情所有者用获准私有展示的 `ibkr/opra` 策略创建 `finance_api::option_flow_stream::OptionFlowStream`，把同一个实例交给 `MarketReadSources.flow_stream` 和 F9e 的观察消费循环。消费循环对 `LiveOptionFlow::next` 返回的线索调用 `publish(ObservedFlow)`。发布器接收与绑定策略完全一致的观察，并校验合约及覆盖键。WS、SSE 和恢复快照共用这一进程内缓冲区。创建订阅仅注册读取进度，采集和连接仍由已有的 paper 只读行情所有者管理。[推送与快照接口](api.md#期权流观察推送与续传)
+
+接入方以同一策略管理发布器的生命周期。许可变更时停用旧发布器和相关下游连接，以新策略创建实例并重建读视图。嵌入路由的服务可调用 `finance_api::option_flow_stream::with_shutdown(router, receiver)`，把自身的 `watch::Receiver<bool>` 接到流路由。信号变为 `true` 时结束 WS 和 SSE。历史核验仍通过 F10d 查询已完成报告，报告保留独立的 `ibkr/opra-history` 许可与 F3 水位。[第四批读契约](api.md#第四批期权流读契约)

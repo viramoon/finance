@@ -144,6 +144,10 @@ processes:
       option_history: /api/v1/options/history
       option_flow_observations: /api/v1/options/flow/observations
       option_flow_verification: /api/v1/options/flow/verification
+      option_flow_snapshot: /api/v1/options/flow/snapshot
+    stream_routes:
+      option_flow_ws: /api/v1/options/flow/ws
+      option_flow_sse: /api/v1/options/flow/sse
     bars_query_projection: "${FERTILE_DATA_ROOT}/finance-state/bars/v1"
     read_contract:
       version: v1
@@ -171,7 +175,16 @@ processes:
       local_state_paths: 数据根以下的目录和文件禁止使用符号链接
       binance_profile_env: FINANCE_BINANCE_CONFIG # 默认 config/binance/<profile>.yaml
       ibkr_read_source: 内存中的获准 paper 行情所有者，通过 router_with_market_reads 接入
-      ibkr_without_source: 503 market_read_source_unavailable
+      ibkr_without_source: 503 market_read_source_unavailable # REST 查询
+      option_flow_stream:
+        version: "1.0"
+        source: MarketReadSources.flow_stream
+        default_status: disabled
+        retained_observations: 100
+        retention: 进程内，所有合约共用
+        resume: WS cursor，SSE Last-Event-ID 或 cursor
+        reset: reset_required 后关闭连接，通过快照查询获取新游标
+        documentation: docs/api.md#期权流观察推送与续传
       cache_control: private, no-store
       openapi_export: cargo run --locked -q -p finance-api -- export-openapi
       stream_schema_export: cargo run --locked -q -p finance-api -- export-read-stream DIRECTORY

@@ -6,11 +6,13 @@ publish = false
 default-run = "finance-api"
 
 [dependencies]
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 chrono = { version = "0.4", features = ["serde"] }
 finance-collector = { path = "../finance-collector" }
 finance-ib = { path = "../finance-ib" }
 finance-market-protocol = { path = "../finance-market-protocol" }
+futures-util = { version = "0.3", default-features = false }
+getrandom = "0.4"
 num-bigint-dig = { version = "0.8.6", default-features = false, features = ["u64_digit"] }
 num-integer = "0.1.47"
 num-traits = "0.2"
@@ -22,7 +24,7 @@ serde_json = { version = "1", features = ["arbitrary_precision"] }
 serde_yaml = "0.9"
 sha2 = "0.10"
 rustix = { version = "1.1", features = ["fs"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "fs", "signal"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "fs", "signal", "sync", "time"] }
 unsafe-libyaml = "0.2"
 utoipa = { version = "5", features = ["chrono"] }
 
@@ -30,6 +32,7 @@ utoipa = { version = "5", features = ["chrono"] }
 rustix = { version = "1.1", features = ["process"] }
 
 [dev-dependencies]
-futures-util = { version = "0.3", default-features = false }
 tempfile = "3"
+tokio = { version = "1", features = ["io-util"] }
+tokio-tungstenite = "0.29"
 tower = { version = "0.5", features = ["util"] }
