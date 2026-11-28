@@ -1,6 +1,6 @@
 # 面向 web 的 HTTP API
 
-finance-api 是独立的 Rust / axum 进程；web 通过 HTTP 调用，frontend 只调用 web。当前不启动 Nautilus、trader、collector 或 IBKR，也不在 HTTP 请求中执行回测。服务部署唯一来源仍为 fertile deploy/，本仓库 service.yaml 记录组件接口。
+finance-api 是独立的 Rust / axum 进程。web 通过 HTTP 调用，frontend 只调用 web。默认关闭 IBKR 连接。部署显式配置 `api.subscription_owner` 后，API 在同一进程运行 paper 只读行情所有者。API 启动无需 Nautilus、trader 或独立 collector，回测作业由 worker 执行。服务部署由 fertile deploy/ 管理，本仓库 service.yaml 记录组件接口。[行情订阅需求](#行情订阅需求)
 
 用于接口测试和文档的行情样本须来自已登记的合成 fixture。API 的 PR 作业以 PR 基分支 SHA 的硬规则检查 Git 对象，样本来源和 SHA-256 由候选树的清单提供。防护启用前已发布分支的合成样本也须通过该检查。将实际 API 响应、运行日志和数据库留在工作树之外，目录和样本准入方式见 [数据入仓防护](data-guard.md)。
 
@@ -201,13 +201,13 @@ IBKR 响应的 `access` 是 API 的显示用途许可，来源为 `ibkr`，产�
 
 ### 行情所有者接入
 
-独立 `finance-api` 进程提供本地 bars、Binance profile 和 F3 记录查询。IBKR 查询需由拥有已验证 paper 只读会话、确认产品展示许可的一方将数据接入 `router_with_market_reads` 的 `MarketReadSources`。
+独立 `finance-api` 进程提供本地 bars、Binance profile 和 F3 记录查询。期权链、预算、覆盖和深度可由 [paper 行情所有者](#行情订阅需求)提供。嵌入 API 的已授权接入方也可以通过 `router_with_market_reads` 提供 `MarketReadSources`。
 
 - 期权链和预算接入现有 `LineHandle`（实现 `OptionLineSource`），GET 不分配行情行。
 - 场所深度将 `run_depth` 的显示回调交给 `DepthFrames::publish`，包括 reset、inactive 和冷启动空簿。
 - 敞口由 `ExposureSource` 查找估值快照、时序阈值和可选价格网格，计算走 F9d 的 `evaluate`。历史由 `HistorySource` 查找 F12 的 `ContractHistory` 结果。两个查找接口读取内存，由所有者提供生命周期与留存策略。
 
-数据源未接入时返回 `503 / market_read_source_unavailable`。数据源已接入但深度、估值或历史窗口不可用时返回 `404 / market_read_not_found`。查询参数无效返回 `400 / market_read_query_invalid`。覆盖键、估值快照键或历史标的和窗口与请求不匹配，链快照时钟无法转换为美东日期，或估值计算失败时，返回 `500 / market_read_failed` 和固定消息 `Could not read market data`，省略底层详情。IBKR 响应和敞口计算结果只在进程内与授权的私有请求中使用。页面焦点写接口和行情所有者的部署接线留待后续集成。本批复用 F1/F3 数据通道与既有 WS/SSE 导出。
+数据源未接入时返回 `503 / market_read_source_unavailable`。数据源已接入但深度、估值或历史窗口不可用时返回 `404 / market_read_not_found`。查询参数无效返回 `400 / market_read_query_invalid`。覆盖键、估值快照键或历史标的和窗口与请求不匹配，链快照时钟无法转换为美东日期，或估值计算失败时，返回 `500 / market_read_failed` 和固定消息 `Could not read market data`，省略底层详情。IBKR 响应和敞口计算结果只在进程内与授权的私有请求中使用。页面焦点经[行情订阅需求](#行情订阅需求)提交。本批复用 F1/F3 数据通道与既有 WS/SSE 导出。
 
 ## 第四批期权流读契约
 
@@ -224,7 +224,7 @@ IBKR 响应的 `access` 是 API 的显示用途许可，来源为 `ibkr`，产�
 
 共享行情所有者通过 `MarketReadSources.flow_observations` 和 `flow_verifications` 提供本地快照查询及当前许可。查询只读取结果。未接入源返回 `503 / market_read_source_unavailable`，无符合条件的快照、报告或展示许可返回 `404 / market_read_not_found`，非法参数返回 `400 / market_read_query_invalid`。所有者返回的键、窗口、许可或水位冲突时返回 `500 / market_read_failed`。每次观察查询先校验整个快照再分页。任一记录冲突时，同一快照的所有分页请求均返回 `500`，包括超出记录范围的请求。合法观察快照可返回空页。授权所有者负责快照生命周期，独立 API 进程默认无这些数据源。[领域接口和生产者规则](option-flow.md)
 
-第四批导出新增 REST schema。共享行情所有者部署接线、页面焦点写接口和集成连通性测试入口仍待后续交付。web 接入按产品鉴权与限流，浏览器页面由 frontend 交付。[期权流推送与续传](#期权流观察推送与续传)
+第四批导出新增 REST schema。自选和页面焦点通过行情订阅需求接口提交。期权流推送使用单独接入的观察发布器。web 接入按产品鉴权与限流，浏览器页面由 frontend 交付。[期权流推送与续传](#期权流观察推送与续传)
 
 ## 期权流观察推送与续传
 
@@ -241,6 +241,43 @@ IBKR 响应的 `access` 是 API 的显示用途许可，来源为 `ibkr`，产�
 过期、跨实例、跨合约或无法定位的游标会触发 `reset_required` 并关闭流。慢读者的未交付位置被淘汰时也会重置。客户端收到重置时主动关闭旧连接，使用同一 `con_id` 和页面所需时窗读取 REST 快照，以快照替换本地视图，再原样传回新 `cursor` 建立连接。EventSource 客户端调用 `close()` 结束带旧游标的自动重连。快照与游标在同一发布位置取得，随后发布的观察可从该游标续传。服务重启会清空进程内保留窗并使旧游标失效。
 
 非法查询参数或含糊的续传请求返回 `400 / market_read_query_invalid`。默认独立 API 没有注册观察源，WS 和 SSE 发送 `status` 的 `disabled` 并保持空闲，快照返回 `503 / market_read_source_unavailable`。`live` 表示进程已接入发布器，行情可用性和覆盖以观察内容为准。推送订阅和快照只读内存，采集连接由共享行情所有者管理。历史核验状态和证据水位继续由 F10d 的已完成报告提供。[消息格式与合成样本](market-protocol.md#期权流观察的-ws-与-sse-消息) · [源接入](option-flow.md#推送接入)
+
+## 行情订阅需求
+
+| 请求 | 行为 |
+| --- | --- |
+| `GET /api/v1/market/subscriptions/demand` | 返回所有者当前已接收的需求及已有的额度和展示许可。 |
+| `PUT /api/v1/market/subscriptions/demand` | 以 `application/json` 对象提交管理员当前自选和页面深度，整体替换上一次需求。 |
+
+web 负责管理员鉴权、保存自选和串行转发完整快照，finance 仅接受受信内网调用。成功和错误响应均使用 `Cache-Control: private, no-store`。请求只接受下列字段。
+
+| 字段 | 约定 |
+| --- | --- |
+| `watchlist` | 完整 F1 标的 ID 的集合，示例为 `["SPY.ARCA","BTC-USD-PERP.HYPERLIQUID"]`。省略或 `[]` 清除追加自选。按完整 ID 去重、排序。 |
+| `depth_focus` | 一个有资格使用 Nasdaq TotalView 的完整 F1 标的 ID，示例为 `"AAPL.NASDAQ"`。省略或 `null` 清除页面 focus。SPY 仅支持 L1。固定深度名额由所有者管理。 |
+
+`{}` 清除全部追加需求。参数按独立于活动订阅和预算的完整注册表校验，未采集的登记标的仍可加入自选。默认注册表包含 F9b 的九只美股及 BTC、ETH、SOL 的 Hyperliquid 永续、Binance 现货与永续的 F1 标识。接入方可以按部署提供完整 F1 ID 注册表替换默认值。focus 同时受 F9c 的八个 Nasdaq 标的限制，保留场所区分。非法格式、未知标的、无深度资格、重复或未知 JSON 字段（含作业和凭据）返回 `400 / subscription_demand_invalid`，整份需求不生效。响应包含固定错误信息。
+
+GET 和合法 PUT 返回 200。未接入或已移除接收端时为 `state: disabled`，`demand` 返回空自选及空 focus，PUT 不留存需求或启动网络请求。接入时为 `state: enabled`，`demand` 是最近接收的内存快照，表示需求已交给所有者。重复提交等价集合不会再次通知所有者。并发提交按快照整体替换，以最后一次写入为准。
+
+`budget` 复用原行数接口的实际使用量、额度、调度状态和 OPRA 展示策略，未接入对应读源时为 `null`。`depth_budget` 的 `pinned_slots` 与 `page_focus_slots` 分别为 2 和 1，`access` 是已接入的 TotalView 私有展示策略，未接入时为 `null`。产品权限确认及簿新鲜度见 `GET /api/v1/market/book`。需求响应不带价量、金额或流序号。预算、期权链和覆盖继续使用原有 GET 路径和响应格式。
+
+缺省或设置 `api.subscription_owner: null` 时，独立 `finance-api` 不加载 IB 连接设置。已核实纸账户、只读 API 及 L1、OPRA 展示许可的部署可在现有 API profile 中配置以下字段。示例中的许可标识和 client ID 由部署方确定。
+
+```yaml
+api:
+  subscription_owner:
+    client_id: 94
+    equity_l1_confirmed: true
+    opra_license: approved-opra-example
+    nasdaq_totalview_license: approved-totalview-example
+```
+
+`client_id` 必须为正整数，且与 collector、probe、trader 及同一 Gateway 上运行的客户端不同。只有同时核实股票 L1、TotalView-OpenView 和 EDS 权限才填 `nasdaq_totalview_license`。省略该字段时，只运行 L1 和 OPRA 调度，合法 focus 仍可随需求提交，`depth_budget.access` 为 `null`。
+
+启用后，API 在同一进程运行 F9b 行数调度器，复用 finance-ib 的 paper 账户校验、重连与只读会话。自选股票优先获得首次确认，其期权发现和轮换也可优先。确认超时的股票退到重试队尾，其余股票先完成首次尝试。九只基础股票及各池额度仍按 F9b 配置分配。此 IBKR 所有者接收已登记的加密标的 ID，公共加密采集按自身 profile 运行。启用 TotalView 时，同一 paper 会话运行 F9c 深度循环，固定 QQQ 与 AAPL，动态更新第三个名额。深度与 L1、OPRA 共用请求间隔和节流冷却。深度所有者在取得每个合约确认、订阅或重订阅的时隙后复查最新需求。等待期间清空 focus 会释放页面名额，连续替换时只为最新选择发起后续请求。已发出的请求等到结果返回，再按最新需求处理。断线清除现有深度帧，重连使用最后一次收到的需求。
+
+嵌入 API 的接入方可用 `LineScheduler::with_subscription_demand` 创建同一调度接收端，并通过 `MarketReadSources.subscription_demand` 和 `subscription_registry` 注入句柄及完整注册表。需求通道可合并连续更新，所有者按最新快照处理。所有者停止时先关闭 paper 连接，再释放含页面 focus 在内的活动订阅。所有者退出后，API 报告 `disabled`。需求随进程消失，重启后由 web 重送。
 
 ## 示例批任务
 

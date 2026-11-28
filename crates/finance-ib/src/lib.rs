@@ -172,7 +172,8 @@ impl Session for PaperPeer {
                     return format!("IB connectivity notice {}", notice.code);
                 }
                 if market::market_notice_kind(&notice) == market::MarketNotice::Pacing {
-                    self.market_pacing.send_replace(Some(Instant::now()));
+                    self.market_pacing
+                        .send_modify(|last| *last = Some(Instant::now()));
                 }
             }
             "IB notice stream ended".into()

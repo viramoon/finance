@@ -1,13 +1,15 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    future::Future,
+    future::{Future, pending},
     time::Duration,
 };
 
 use async_trait::async_trait;
+use finance_ib::depth::{DepthError, DepthSource};
 use finance_ib::market::{
-    ConfirmedContract, ContractKind, ContractQuery, MarketError, MarketRequest, OptionChainSource,
-    OptionSeries, PaperMarket, Product, RequestKey, RequestParameters, option_market_date,
+    ConfirmedContract, ContractKind, ContractQuery, MarketDataSource, MarketError, MarketRequest,
+    OptionChainSource, OptionSeries, PaperMarket, Product, RequestKey, RequestParameters,
+    option_market_date,
 };
 use finance_ib::{ConnectionManager, IbTransport};
 use tokio::{
@@ -16,7 +18,8 @@ use tokio::{
 };
 
 use super::{
-    LinePool, LineScheduler, SchedulerPhase,
+    LinePool, LineScheduler, SchedulerPhase, SubscriptionDemand,
+    depth::drive_depth,
     policy::{DEFAULT_PACING_COOLDOWN, rank_options},
     unexpired,
     worker::{Feed, Worker},
@@ -26,7 +29,7 @@ use super::{
 mod tests;
 
 #[async_trait]
-trait Session: OptionChainSource {
+trait Session: OptionChainSource + DepthSource {
     async fn disconnected(&self) -> MarketError;
     async fn close(&self);
 }
@@ -92,40 +95,50 @@ impl LineScheduler {
     ) -> Result<(), MarketError>
     where
         S: Session,
-        S::Subscription: 'static,
+        <S as MarketDataSource>::Subscription: 'static,
         F: Future<Output = Result<S, MarketError>>,
         Open: FnMut(watch::Sender<Option<Instant>>) -> F,
     {
         let config = &self.shared.config;
         let mut backoff = config.reconnect_initial;
-        let mut next_request = Instant::now();
-        // A failed open can receive a notice before a session is returned.
-        let (pacing_sender, mut pacing) = watch::channel(None);
+        let pacing = &self.shared.pacing;
         let outcome = loop {
             let error = match tokio::select! {
                 biased;
                 _ = stop_requested(&mut stop) => break Ok(()),
-                result = open(pacing_sender.clone()) => result,
+                result = open(pacing.notices.clone()) => result,
             } {
                 Ok(session) => {
                     let online_since = Instant::now();
                     let mut online = Online::new(&self);
                     self.shared.state.lock().expect("line state").phase = SchedulerPhase::Online;
-                    let result = tokio::select! {
-                        biased;
-                        _ = stop_requested(&mut stop) => Ok(()),
-                        error = session.disconnected() => Err(error),
-                        result = online.drive(&session, &mut next_request, &mut pacing) => result,
+                    let result = {
+                        // A live SDK subscription sends a best-effort cancel on Drop.
+                        // Keep both drivers (including pending IO) until close gates all writes.
+                        let mut depth = std::pin::pin!(self.depth_session(&session));
+                        let mut lines = std::pin::pin!(online.drive(&session));
+                        let result = tokio::select! {
+                            biased;
+                            _ = stop_requested(&mut stop) => Ok(()),
+                            error = session.disconnected() => Err(error),
+                            result = &mut depth => result,
+                            result = &mut lines => result,
+                        };
+                        if let Some((frames, _)) = &self.depth {
+                            frames.clear();
+                        }
+                        let live = {
+                            let mut state = self.shared.state.lock().expect("line state");
+                            state.phase = SchedulerPhase::Reconnecting;
+                            state.discovery_complete = false;
+                            state.live.keys().copied().collect::<Vec<_>>()
+                        };
+                        for key in live {
+                            self.shared.closed(key);
+                        }
+                        session.close().await;
+                        result
                     };
-                    {
-                        let mut state = self.shared.state.lock().expect("line state");
-                        state.phase = SchedulerPhase::Reconnecting;
-                        state.discovery_complete = false;
-                    }
-                    for &key in online.active.keys() {
-                        self.shared.closed(key);
-                    }
-                    session.close().await;
                     for worker in online.active.values_mut() {
                         worker.abort().await;
                     }
@@ -145,16 +158,9 @@ impl LineScheduler {
             }
             let now = Instant::now();
             if error == MarketError::Pacing {
-                next_request = next_request.max(now + config.pacing_cooldown);
+                pacing.note_pacing();
             }
-            if let Some(received) = *pacing.borrow() {
-                next_request = next_request.max(received + config.pacing_cooldown);
-            }
-            {
-                let mut state = self.shared.state.lock().expect("line state");
-                state.phase = SchedulerPhase::Reconnecting;
-                next_request = next_request.max(state.cooldown.unwrap_or(now));
-            }
+            self.shared.state.lock().expect("line state").phase = SchedulerPhase::Reconnecting;
             // The SDK can discard global notices when it fails before returning a peer.
             let retry_delay = if error == MarketError::HandshakeFailed {
                 backoff
@@ -163,17 +169,36 @@ impl LineScheduler {
             } else {
                 backoff
             };
-            let retry_at = (now + retry_delay).max(next_request);
+            let retry_at = pacing.reconnect_at(now + retry_delay).await;
             tracing::warn!(%error, wait_ms = retry_at.duration_since(now).as_millis() as u64, "IB L1 session recovering");
             tokio::select! {
                 biased;
                 _ = stop_requested(&mut stop) => break Ok(()),
-                _ = sleep_until(retry_at) => {}
+                _ = pacing.wait_until(retry_at) => {}
             }
             backoff = backoff.saturating_mul(2).min(config.reconnect_max);
         };
         self.shared.state.lock().expect("line state").phase = SchedulerPhase::Stopped;
         outcome
+    }
+
+    async fn depth_session(&self, session: &impl DepthSource) -> Result<(), MarketError> {
+        let (Some((frames, permissions)), Some(demand)) = (&self.depth, &self.demand) else {
+            return pending().await;
+        };
+        drive_depth(
+            session,
+            &self.shared.pacing,
+            demand.clone(),
+            *permissions,
+            frames,
+        )
+        .await
+        .map_err(|error| match error {
+            DepthError::Pacing => MarketError::Pacing,
+            // End the shared session before reopening an ambiguous allocation.
+            _ => MarketError::Disconnected,
+        })
     }
 }
 
@@ -222,6 +247,7 @@ struct Online<'a> {
     refresh: Instant,
     prefer_discovery: bool,
     expiry_check: Instant,
+    demand: SubscriptionDemand,
 }
 
 impl<'a> Online<'a> {
@@ -257,6 +283,7 @@ impl<'a> Online<'a> {
             refresh: Instant::now(),
             prefer_discovery: true,
             expiry_check: Instant::now(),
+            demand: SubscriptionDemand::default(),
         }
     }
 
@@ -267,19 +294,17 @@ impl<'a> Online<'a> {
             .min()
     }
 
-    async fn drive<S: Session>(
-        &mut self,
-        session: &S,
-        next_request: &mut Instant,
-        pacing: &mut watch::Receiver<Option<Instant>>,
-    ) -> Result<(), MarketError>
+    async fn drive<S: Session>(&mut self, session: &S) -> Result<(), MarketError>
     where
-        S::Subscription: 'static,
+        <S as MarketDataSource>::Subscription: 'static,
     {
         let shared = &self.owner.shared;
         let config = &shared.config;
+        let mut demand = self.owner.demand.clone();
+        if let Some(updates) = &mut demand {
+            self.demand = updates.borrow_and_update().clone();
+        }
         loop {
-            let now = Instant::now();
             if self
                 .active
                 .values()
@@ -287,55 +312,51 @@ impl<'a> Online<'a> {
             {
                 return Err(MarketError::Disconnected);
             }
-            if let Some(cooldown) = shared.state.lock().expect("line state").cooldown {
-                *next_request = (*next_request).max(cooldown);
+            let slot = tokio::select! {
+                biased;
+                _ = shared.changed.notified() => continue,
+                slot = shared.pacing.slot() => slot,
+            };
+            if let Some(updates) = &mut demand
+                && updates.has_changed().unwrap_or(false)
+            {
+                self.demand = updates.borrow_and_update().clone();
             }
-            let action = self.action(now)?;
-            if let Some(received) = *pacing.borrow_and_update() {
-                *next_request = (*next_request).max(received + config.pacing_cooldown);
+            if let Some(action) = self.action(Instant::now())? {
+                let (result, next) = slot.run(self.execute(session, action)).await;
+                match result {
+                    Err(MarketError::Pacing) => shared.pacing.note_pacing(),
+                    other => other?,
+                }
+                // Re-evaluate line priorities at the next request interval. Depth can
+                // queue its next operation while this driver has no write to issue.
+                tokio::select! {
+                    _ = sleep_until(next) => {},
+                    _ = shared.changed.notified() => {},
+                }
+                continue;
             }
-            if let Some(action) = action {
-                if now >= *next_request {
-                    *next_request = now + config.request_interval;
-                    // Complete in-flight IO before observing a new pacing deadline.
-                    let result = self.execute(session, action).await;
-                    *next_request = Instant::now() + config.request_interval;
-                    match result {
-                        Err(MarketError::Pacing) => {
-                            *next_request =
-                                (*next_request).max(Instant::now() + config.pacing_cooldown);
-                        }
-                        other => other?,
-                    }
-                    continue;
-                }
-                tokio::select! {
-                    _ = pacing.changed() => {},
-                    _ = shared.changed.notified() => {},
-                    _ = sleep_until(*next_request) => {},
-                }
-            } else {
-                let next_dwell = {
-                    let state = shared.state.lock().expect("line state");
-                    self.active
-                        .iter()
-                        .filter_map(|(key, worker)| {
-                            let line = state.live.get(key)?;
-                            (line.pool == LinePool::Rotation)
-                                .then_some(worker.started + config.rotation_dwell)
-                        })
-                        .min()
-                };
-                let deadline = next_dwell
-                    .unwrap_or(self.refresh)
-                    .min(self.refresh)
-                    .min(self.expiry_check);
-                let deadline = deadline.min(self.next_stock_retry().unwrap_or(deadline));
-                tokio::select! {
-                    _ = pacing.changed() => {},
-                    _ = shared.changed.notified() => {},
-                    _ = sleep_until(deadline) => {},
-                }
+            drop(slot);
+            let next_dwell = {
+                let state = shared.state.lock().expect("line state");
+                self.active
+                    .iter()
+                    .filter_map(|(key, worker)| {
+                        let line = state.live.get(key)?;
+                        (line.pool == LinePool::Rotation)
+                            .then_some(worker.started + config.rotation_dwell)
+                    })
+                    .min()
+            };
+            let deadline = next_dwell
+                .unwrap_or(self.refresh)
+                .min(self.refresh)
+                .min(self.expiry_check);
+            let deadline = deadline.min(self.next_stock_retry().unwrap_or(deadline));
+            tokio::select! {
+                _ = shared.changed.notified() => {},
+                _ = demand_changed(&mut demand) => {},
+                _ = sleep_until(deadline) => {},
             }
         }
     }
@@ -391,7 +412,22 @@ impl<'a> Online<'a> {
         let ready_stock = self
             .watchlist
             .iter()
-            .position(|stock| stock.retry_at.is_none_or(|retry_at| retry_at <= now));
+            .enumerate()
+            .filter(|(_, stock)| stock.retry_at.is_none_or(|retry_at| retry_at <= now))
+            .min_by_key(|(_, stock)| match (&stock.query, stock.retry_at) {
+                // All first confirmations precede retries. Equal retry priority
+                // keeps the queue order established on timeout even with demand.
+                (_, Some(_)) => 2,
+                (
+                    ContractQuery::Equity {
+                        symbol,
+                        primary_exchange,
+                    },
+                    None,
+                ) if self.demand.wants_equity(symbol, primary_exchange) => 0,
+                _ => 1,
+            })
+            .map(|(index, _)| index);
         // A short retry can be due at the next paced request. After a timeout,
         // give other work a turn while keeping first confirmations a priority.
         if let Some(index) = ready_stock
@@ -407,7 +443,12 @@ impl<'a> Online<'a> {
 
         if self.discovery.is_empty() && now >= self.refresh {
             let mut equities = self.stocks.clone();
-            equities.sort_by_key(|stock| Some(stock.con_id) != state.selection.focus);
+            equities.sort_by_key(|stock| {
+                (
+                    Some(stock.con_id) != state.selection.focus,
+                    !self.wanted_stock(stock),
+                )
+            });
             self.discovery
                 .extend(equities.into_iter().map(Discover::Definitions));
             self.seen.clear();
@@ -432,7 +473,7 @@ impl<'a> Online<'a> {
             return Ok(discovery);
         }
         if count < config.rotation_lines {
-            let ranked = rank_options(
+            let mut ranked = rank_options(
                 state
                     .options
                     .values()
@@ -447,6 +488,23 @@ impl<'a> Online<'a> {
                 &state.spots,
                 today,
             );
+            if !self.demand.watchlist().is_empty() {
+                let wanted: HashSet<_> = self
+                    .stocks
+                    .iter()
+                    .filter(|stock| self.wanted_stock(stock))
+                    .map(|stock| stock.con_id)
+                    .collect();
+                ranked.sort_by_key(|contract| {
+                    let ContractKind::Option(option) = &contract.kind else {
+                        unreachable!("ranked options")
+                    };
+                    (
+                        Some(option.underlying_con_id) != state.selection.focus,
+                        !wanted.contains(&option.underlying_con_id),
+                    )
+                });
+            }
             if let Some((contract, new_sweep)) = self.next_option(ranked) {
                 return Ok(Some(Action::Start(contract, LinePool::Rotation, new_sweep)));
             }
@@ -479,9 +537,16 @@ impl<'a> Online<'a> {
         !self.discovery_failed && !self.stock_confirmation_failed && self.watchlist.is_empty()
     }
 
+    fn wanted_stock(&self, contract: &ConfirmedContract) -> bool {
+        contract
+            .primary_exchange
+            .as_ref()
+            .is_some_and(|venue| self.demand.wants_equity(&contract.symbol, venue))
+    }
+
     async fn execute<S: Session>(&mut self, session: &S, action: Action) -> Result<(), MarketError>
     where
-        S::Subscription: 'static,
+        <S as MarketDataSource>::Subscription: 'static,
     {
         let shared = &self.owner.shared;
         self.defer_stock_retry = false;
@@ -564,8 +629,10 @@ impl<'a> Online<'a> {
                     self.suppressed.insert(key);
                 }
                 // Any failed or ambiguous cancel invalidates the entire allocation.
-                let result = worker.cancel().await;
-                if result.is_err() {
+                if let Err(error) = worker.cancel().await {
+                    if error == MarketError::Pacing {
+                        shared.pacing.note_pacing();
+                    }
                     return Err(MarketError::Disconnected);
                 }
                 self.active.remove(&key);
@@ -633,6 +700,18 @@ impl<'a> Online<'a> {
         }
         Ok(())
     }
+}
+
+async fn demand_changed(receiver: &mut Option<watch::Receiver<SubscriptionDemand>>) {
+    if let Some(updates) = receiver {
+        if updates.changed().await.is_ok() {
+            // `changed` marks the update seen. Leave it pending for the drive loop.
+            updates.mark_changed();
+            return;
+        }
+        *receiver = None;
+    }
+    pending::<()>().await;
 }
 
 fn stock_key(con_id: i32) -> RequestKey {

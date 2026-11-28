@@ -598,6 +598,53 @@ async fn uncertain_subscribe_failure_stops_the_session_before_another_line_opens
 }
 
 #[tokio::test]
+async fn superseded_focus_waits_for_in_flight_cancel_and_only_opens_the_latest_symbol() {
+    let replay = Replay::default();
+    let defaults = DepthFocus::default();
+    let original = DepthSymbol::Nvda;
+    let (focus, receiver) = watch::channel(defaults.with_followed(Some(original)));
+    let (sender, mut frames) = mpsc::unbounded_channel();
+    let (result, ()) = tokio::join!(run_replay(&replay, receiver, ALLOWED, 5, sender), async {
+        let old_id = opened(&mut frames, original).await;
+        let (finish_cancel, gate) = oneshot::channel();
+        replay.data.lock().unwrap().cancel_gate = Some((original, gate));
+        focus.send_replace(defaults.with_followed(Some(DepthSymbol::Tsla)));
+        frame(&mut frames, original, |frame| {
+            frame.state == DepthState::Inactive
+        })
+        .await;
+        assert!(
+            replay
+                .trace
+                .lock()
+                .unwrap()
+                .contains(&Trace::Cancel(original, old_id))
+        );
+
+        focus.send_replace(defaults.with_followed(Some(DepthSymbol::Meta)));
+        tokio::task::yield_now().await;
+        assert!(
+            !replay
+                .trace
+                .lock()
+                .unwrap()
+                .contains(&Trace::Confirm(DepthSymbol::Meta))
+        );
+        finish_cancel
+            .send(())
+            .expect("checked cancellation must finish");
+        opened(&mut frames, DepthSymbol::Meta).await;
+        drop(focus);
+    });
+    assert_eq!(result, Ok(()));
+    let trace = replay.trace.lock().unwrap();
+    assert!(!trace.iter().any(|event| matches!(
+        event,
+        Trace::Confirm(DepthSymbol::Tsla) | Trace::Open(DepthSymbol::Tsla, _)
+    )));
+}
+
+#[tokio::test]
 async fn focus_switch_during_a_reset_cancel_does_not_reopen_the_old_symbol() {
     let replay = Replay::default();
     let symbol = DepthSymbol::Nvda;

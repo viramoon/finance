@@ -13,7 +13,7 @@ use serde::Serialize;
 use crate::market::{ConfirmedContract, ContractKind, ContractQuery, MarketDataType, MarketError};
 
 pub use crate::market::PaperDepthSubscription;
-pub use focus::{DepthFocus, run_depth};
+pub use focus::{DepthFocus, DepthSelection, run_depth};
 pub use permission::DepthPermissions;
 
 pub const VENUE: &str = "NASDAQ";
@@ -169,6 +169,24 @@ impl From<MarketError> for DepthError {
 #[async_trait]
 pub trait DepthSource: Send + Sync {
     type Subscription: DepthSubscription;
+
+    /// Dispatch a confirmation or subscription only if still selected at its write slot.
+    /// Paced owners wait for the slot before evaluating the predicate.
+    /// `Ok(None)` means the request was never started.
+    async fn allocate_if_selected<T: Send>(
+        &self,
+        selected: impl FnOnce() -> bool + Send,
+        request: impl Future<Output = Result<T, DepthError>> + Send,
+    ) -> Result<Option<T>, DepthError>
+    where
+        Self: Sized,
+    {
+        if selected() {
+            request.await.map(Some)
+        } else {
+            Ok(None)
+        }
+    }
 
     async fn confirm_depth(&self, symbol: DepthSymbol) -> Result<ConfirmedContract, DepthError>;
 

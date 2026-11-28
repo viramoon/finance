@@ -108,7 +108,7 @@ async fn read_line<S: MarketSubscription>(
                 shared.event(key, &observation, event)
             }
             Err(MarketError::Pacing) => {
-                shared.note_pacing();
+                shared.pacing.note_pacing();
                 Feed::Throttled
             }
             Err(MarketError::NotEntitled) => Feed::Denied,
@@ -132,11 +132,6 @@ async fn read_line<S: MarketSubscription>(
 }
 
 impl Shared {
-    fn note_pacing(&self) {
-        self.state.lock().expect("line state").cooldown =
-            Some(Instant::now() + self.config.pacing_cooldown);
-    }
-
     fn publish(&self, key: RequestKey, generation: u64, message: LineMessage) {
         let _ = self.updates.send(LineUpdate {
             key,
@@ -216,7 +211,7 @@ impl Shared {
                 Feed::Denied
             }
             MarketEvent::Notice(MarketNotice::Pacing) => {
-                state.cooldown = Some(Instant::now() + self.config.pacing_cooldown);
+                self.pacing.note_pacing();
                 Feed::Throttled
             }
             _ if evidence.open_interest_received && evidence.greeks_received => Feed::Sampled,

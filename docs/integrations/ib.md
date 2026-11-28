@@ -81,13 +81,13 @@ F9a 的行情和报告驻于会话内存，私有脚本只输出摘要。共享�
 
 ### 深度请求与焦点
 
-`finance_ib::depth::run_depth` 接收 `DepthSource`、`DepthFocus` 的 watch 接收端、`DepthPermissions`、每侧请求档数和内存发布回调。调用方通过 `ConnectionManager::open_market` 获得已验证的 `PaperMarket`，每个会话由一个行情所有者运行该循环。每侧请求档数接受 1 至 50，`DEFAULT_DEPTH_ROWS` 为 5。`DepthFocus::default()` 固定 QQQ 和 AAPL，初始页面焦点为空。`DepthFocus::new` 接受至多两个固定标的和一个页面标的，`with_followed` 只调整页面标的。页面与固定标的重合时共享同一个订阅，两者变化时先取消已移出的订阅，再使用空出的名额。最大并发为三，使用基础额度。停用时关闭焦点发送端并等待循环取消订阅。
+`finance_ib::depth::run_depth` 接收 `DepthSource`、实现 `DepthSelection` 的 watch 接收端（可直接使用 `DepthFocus` 或调度器的需求快照）、`DepthPermissions`、每侧请求档数和内存发布回调。调用方通过 `ConnectionManager::open_market` 获得已验证的 `PaperMarket`，每个会话由一个行情所有者运行该循环。每侧请求档数接受 1 至 50，`DEFAULT_DEPTH_ROWS` 为 5。`DepthFocus::default()` 固定 QQQ 和 AAPL，初始页面焦点为空。`DepthFocus::new` 接受至多两个固定标的和一个页面标的，`with_followed` 只调整页面标的。页面与固定标的重合时共享同一个订阅，两者变化时先取消已移出的订阅，再使用空出的名额。最大并发为三，使用基础额度。停用时关闭焦点发送端并等待循环取消订阅。
 
 `DepthFrame` 提供标的、`NASDAQ` 场所、已接收的买卖行、数据状态与接收时间。展示标签可用 `AAPL · Nasdaq 场所深度 · 已返回 N 档`，其中 `N` 取 `returned_rows()`，即当前买卖两侧实际行数的较大值。逐侧展示时使用各自实际行数。IBKR 深度是按位置传输的，多个位置可以有相同价格，因此档数按返回位置计。`is_stale()` 使用本地最近一次深度观察和调用方的时限计算陈旧。场所依据请求路由确定，独立于做市商标识。
 
 源端 insert、update、delete 分别按该买卖侧的返回位置插入、替换或删除。数量沿用 Protobuf 的原始十进制字符串，价格在 IBKR 的 binary64 边界转换一次，进入 `DecimalText` 时保留可往返的十进制表示。Gateway 的 316（深度暂停）、317（重置）、本地队列溢出或其他回调失同步都会先发布空簿，再取消旧请求并尝试重订一次。重订后、收到首条有效更新前再次重置时，该标的保持空簿并报告 `Failed(InvalidCallback)`。调用方可在重新选择标的或建立新会话后重试。会话失效后，由所有者在新 paper 会话完成账户与合约核验，再恢复焦点。`DepthState` 分别表示权限待确认、等首笔、正在接收、清簿、退出焦点和失败。失败原因区分供应商无权限、额度已满、竞争会话、限频和连接故障。[SDK 补丁决策](../adr/ADR-0038-ibapi-market-data.md#f9c-的-nasdaq-场所深度扩展)
 
-深度只用于获准的私有会话内存展示。`ibkr/nasdaq-totalview` 产品禁止本地记录、非展示派生与个人 Drive 备份，项目禁用再分发。`open_market` 在检测到 SDK 原始报文记录已启用时拒绝打开会话。统一的 IBKR 行情所有者可复用会话及 F9b 的深度名额，将最新场所簿接入第三批 HTTP 查询。页面焦点写接口由后续集成提供。[WAL 产品许可](../market-wal.md#生产者与许可) · [第三批读契约](../api.md#第三批读契约)
+深度只用于获准的私有会话内存展示。`ibkr/nasdaq-totalview` 产品禁止本地记录、非展示派生与个人 Drive 备份，项目禁用再分发。`open_market` 在检测到 SDK 原始报文记录已启用时拒绝打开会话。启用 API 内的 paper 行情所有者及 TotalView 后，所有者在同一会话应用页面 focus 并发布最新场所簿。[WAL 产品许可](../market-wal.md#生产者与许可) · [行情订阅需求](../api.md#行情订阅需求)
 
 ## 采集模式与数据目录
 

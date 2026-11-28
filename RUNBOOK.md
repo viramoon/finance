@@ -125,6 +125,18 @@ cargo run --locked --offline -q -p finance-api -- export-read-stream /tmp/financ
 
 收到 `reset_required` 时终止旧连接，按同一合约和所需时窗读取恢复快照，用快照游标重连。重启或保留窗淘汰会使旧游标失效。若重连后再次收到重置，从新快照重试。核对 web 已转发续传游标且未缓存响应或缓冲 SSE。独立 API 收到 SIGTERM 或 SIGINT 时结束 WS 和 SSE 连接。日志和联测记录仅保留状态及脱敏错误。[接口和续传规则](docs/api.md#期权流观察推送与续传)
 
+## 行情订阅需求验收
+
+`GET /api/v1/market/subscriptions/demand` 查看状态。`PUT` 同一路径提交完整快照，JSON `{}` 清除全部追加需求。独立 API 默认对有效请求返回 `200` 和 `state: disabled`，忽略该次需求，零公网请求。已有 `GET /api/v1/market/subscriptions` 继续查询实际行数。
+
+```sh
+cargo test --locked --offline -p finance-api --test subscription_demand --test market_options
+cargo test --locked --offline -p finance-collector --lib line_budget::session::tests
+cargo test --locked --offline -p finance-ib --lib depth::focus::tests
+```
+
+验收使用进程内路由和合成 paper 会话。在 Linux x86_64 或 aarch64 上，关闭态回归会检测 `socket` 或 `connect` 调用。调度测试用虚拟时钟在旧订阅待取消、新 focus 待确认和待开流时分别更新需求，核对已被替换的请求次数和两个固定席位。SDK 内存回放核对冷却中停止或断线后的实际写入。仅在已经核实 paper 只读账户及产品权限的部署中配置 `api.subscription_owner`。给所有者分配独占的 IB client ID，核对预算阶段和场所簿数据状态。API 退出时先关闭 paper 连接，再释放活动订阅。所有者进程重启后，由 web 重发已保存的自选和 focus。遇到 `400 / subscription_demand_invalid`，检查完整的 F1 ID、深度资格和 JSON 字段。出现 `enabled` 后，通过预算和场所簿状态判断实际覆盖。[配置与接入](docs/api.md#行情订阅需求)
+
 ## 离线因子研究验收
 
 在仓库根目录用含研究依赖的现有 Python 环境执行。定向测试在内存生成截面和收盘价，月频登记读取仓库内原报告并核对证据哈希。

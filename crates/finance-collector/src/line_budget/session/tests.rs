@@ -4,14 +4,27 @@ use std::{
 };
 
 use chrono::{NaiveDate, TimeDelta, Utc};
+use finance_ib::depth::{
+    DepthPermissions, DepthRequest, DepthState, DepthSubscription, DepthSymbol, DepthUpdate,
+};
 use finance_ib::market::{
     MarketDataSource, MarketDataType, MarketEvent, MarketNotice, MarketSubscription,
     OptionContract, OptionRight, QuoteField,
 };
-use tokio::{task::JoinHandle, time::advance};
+use ibapi::{
+    Client,
+    contracts::{Contract, SecurityType},
+    market_data::realtime::ExactMarketDepth,
+    replay::{MarketReplay, MarketWrite},
+    subscriptions::Subscription,
+};
+use tokio::{sync::oneshot, task::JoinHandle, time::advance};
 
 use super::*;
-use crate::line_budget::{BudgetConfig, CoverageInterval, LineHandle, LineMessage, watchlist};
+use crate::line_budget::{
+    BudgetConfig, CoverageInterval, DepthFrames, LineHandle, LineMessage, SubscriptionDemandHandle,
+    SubscriptionInstrumentRegistry, watchlist,
+};
 
 const FIRST_OPTION: i32 = 10_000;
 
@@ -24,6 +37,8 @@ enum Operation {
     Subscribe(RequestKey),
     Cancel(RequestKey),
     FailedCancel(RequestKey),
+    DepthOpen(DepthSymbol),
+    DepthCancel(DepthSymbol),
     Close,
 }
 
@@ -43,6 +58,9 @@ struct GatewayState {
     current_session: usize,
     disconnect: Option<watch::Sender<bool>>,
     global_pacing: Option<watch::Sender<Option<Instant>>>,
+    depth_pacing: Option<oneshot::Sender<(DepthSymbol, Instant, usize)>>,
+    depth_client: Option<Arc<Client>>,
+    depth_confirmations: Vec<DepthSymbol>,
     failed_opens: usize,
     pace_on_failed_open: bool,
     fail_next_cancel: bool,
@@ -156,11 +174,106 @@ impl Session for FakeSession {
     }
 
     async fn close(&self) {
+        let client = self.gateway.state.lock().unwrap().depth_client.take();
+        if let Some(client) = client {
+            // With paused time, ready SDK Drop tasks run before this timer. This
+            // reproduces a second executor thread sending before close takes effect.
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            client.disconnect().await;
+        }
         let mut state = self.gateway.state.lock().unwrap();
         state.record(self.session, Operation::Close);
         state.active.clear();
         state.disconnect = None;
         state.global_pacing = None;
+    }
+}
+
+struct FakeDepth {
+    gateway: Gateway,
+    session: usize,
+    symbol: DepthSymbol,
+    subscription: Option<Subscription<ExactMarketDepth>>,
+}
+
+#[async_trait]
+impl DepthSource for FakeSession {
+    type Subscription = FakeDepth;
+
+    async fn confirm_depth(&self, symbol: DepthSymbol) -> Result<ConfirmedContract, DepthError> {
+        self.gateway
+            .state
+            .lock()
+            .unwrap()
+            .depth_confirmations
+            .push(symbol);
+        Ok(self.confirm(&symbol.contract_query()).await?)
+    }
+
+    async fn subscribe_depth(&self, request: &DepthRequest) -> Result<FakeDepth, DepthError> {
+        let symbol = request.contract().symbol.parse().unwrap();
+        let client = self.gateway.state.lock().unwrap().depth_client.clone();
+        let subscription = if let Some(client) = client {
+            let contract = Contract {
+                contract_id: request.contract().con_id,
+                security_type: SecurityType::Stock,
+                exchange: "ISLAND".into(),
+                currency: "USD".into(),
+                ..Contract::default()
+            };
+            Some(
+                client
+                    .market_depth(&contract, request.rows().try_into().unwrap())
+                    .subscribe_exact()
+                    .await
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        self.gateway
+            .state
+            .lock()
+            .unwrap()
+            .record(self.session, Operation::DepthOpen(symbol));
+        Ok(FakeDepth {
+            gateway: self.gateway.clone(),
+            session: self.session,
+            symbol,
+            subscription,
+        })
+    }
+}
+
+#[async_trait]
+impl DepthSubscription for FakeDepth {
+    fn request_id(&self) -> i32 {
+        1
+    }
+
+    async fn next(&mut self) -> Result<Option<DepthUpdate>, DepthError> {
+        {
+            let mut state = self.gateway.state.lock().unwrap();
+            if let Some(notice) = state.depth_pacing.take() {
+                notice
+                    .send((self.symbol, Instant::now(), state.calls.len()))
+                    .unwrap();
+                return Err(DepthError::Pacing);
+            }
+        }
+        pending().await
+    }
+
+    async fn cancel(&mut self) -> Result<(), DepthError> {
+        if let Some(subscription) = self.subscription.take() {
+            subscription.try_cancel().await.unwrap();
+        }
+        self.gateway
+            .state
+            .lock()
+            .unwrap()
+            .record(self.session, Operation::DepthCancel(self.symbol));
+        Ok(())
     }
 }
 
@@ -410,6 +523,504 @@ fn compact_config() -> BudgetConfig {
         reserve_lines: 2,
         ..BudgetConfig::default()
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn runtime_demand_reaches_line_and_depth_scheduling_across_reconnect() {
+    // Fixed in-memory paper-session replay. No broker client is opened.
+    let config = BudgetConfig {
+        account_lines: 6,
+        stock_lines: 2,
+        ..compact_config()
+    };
+    let step = config.request_interval;
+    let gateway = Gateway::new(0, &config);
+    let frames = DepthFrames::default();
+    let (scheduler, handle) = LineScheduler::new(config, watchlist().into_iter().take(2).collect())
+        .unwrap()
+        .with_subscription_demand(Some((
+            frames.clone(),
+            DepthPermissions {
+                equity_l1_confirmed: true,
+                totalview_confirmed: true,
+                eds_confirmed: true,
+            },
+        )));
+    let registry = SubscriptionInstrumentRegistry::default();
+    let demand = |focus: Option<&str>| {
+        registry
+            .validate(
+                vec!["SPY.ARCA".parse().unwrap()],
+                focus.map(|id| id.parse().unwrap()),
+            )
+            .unwrap()
+    };
+    handle.replace(demand(Some("NVDA.NASDAQ"))).unwrap();
+    let (stop, stopped) = watch::channel(false);
+    let fake = gateway.clone();
+    let task = tokio::spawn(scheduler.run(move |pacing| fake.clone().open(pacing), stopped));
+
+    until(20, step, || {
+        gateway.count(1, Operation::Subscribe(stock_key(1))) == 1
+    })
+    .await;
+    let first_stock = gateway
+        .calls()
+        .iter()
+        .find_map(|call| match call.operation {
+            Operation::Subscribe(key) if key.product == Product::EquityL1 => Some(key),
+            _ => None,
+        });
+    assert_eq!(
+        first_stock,
+        Some(stock_key(2)),
+        "requested SPY must be scheduled before QQQ"
+    );
+    assert_eq!(gateway.count(1, Operation::DepthOpen(DepthSymbol::Nvda)), 1);
+
+    handle.replace(demand(Some("TSLA.NASDAQ"))).unwrap();
+    until(20, step, || {
+        gateway.count(1, Operation::DepthOpen(DepthSymbol::Tsla)) == 1
+    })
+    .await;
+    let calls = gateway.calls();
+    let cancel = calls
+        .iter()
+        .position(|call| call.operation == Operation::DepthCancel(DepthSymbol::Nvda))
+        .unwrap();
+    let open = calls
+        .iter()
+        .position(|call| call.operation == Operation::DepthOpen(DepthSymbol::Tsla))
+        .unwrap();
+    assert!(cancel < open);
+    assert_eq!(gateway.count(1, Operation::DepthOpen(DepthSymbol::Qqq)), 1);
+    assert_eq!(gateway.count(1, Operation::DepthOpen(DepthSymbol::Aapl)), 1);
+    assert!(frames.latest(DepthSymbol::Tsla).is_some());
+
+    gateway.disconnect(0);
+    until(20, step, || {
+        gateway.count(2, Operation::DepthOpen(DepthSymbol::Tsla)) == 1
+    })
+    .await;
+    assert!(frames.latest(DepthSymbol::Nvda).is_none());
+    handle.replace(SubscriptionDemand::default()).unwrap();
+    until(20, step, || {
+        gateway.count(2, Operation::DepthCancel(DepthSymbol::Tsla)) == 1
+    })
+    .await;
+    assert_eq!(
+        gateway.count(2, Operation::DepthCancel(DepthSymbol::Aapl)),
+        0
+    );
+    assert_eq!(
+        gateway.count(2, Operation::DepthCancel(DepthSymbol::Qqq)),
+        0
+    );
+    stop.send(true).unwrap();
+    task.await.unwrap().unwrap();
+    assert!(frames.latest(DepthSymbol::Tsla).is_none());
+    assert!(handle.current().is_none());
+}
+
+fn start_demand_owner(
+    scheduler: LineScheduler,
+    gateway: &Gateway,
+    depth: bool,
+) -> (
+    SubscriptionDemandHandle,
+    watch::Sender<bool>,
+    JoinHandle<Result<(), MarketError>>,
+) {
+    let (scheduler, demand) = scheduler.with_subscription_demand(depth.then(|| {
+        (
+            DepthFrames::default(),
+            DepthPermissions {
+                equity_l1_confirmed: true,
+                totalview_confirmed: true,
+                eds_confirmed: true,
+            },
+        )
+    }));
+    let (stop, stopped) = watch::channel(false);
+    let fake = gateway.clone();
+    let task = tokio::spawn(scheduler.run(move |pacing| fake.clone().open(pacing), stopped));
+    (demand, stop, task)
+}
+
+async fn verify_depth_teardown_during_cooldown(disconnect: bool) {
+    let config = compact_config();
+    let step = config.request_interval;
+    let cooldown = config.pacing_cooldown;
+    let gateway = Gateway::new(0, &config);
+    // The synthetic contracts use the real SDK subscription, Drop and message
+    // bus over in-memory IO. No broker address or account is involved.
+    let (replay, client) = MarketReplay::open().unwrap();
+    gateway.state.lock().unwrap().depth_client = Some(Arc::new(client));
+    let scheduler = LineScheduler::new(config, vec![watchlist().remove(0)]).unwrap();
+    let (demand, stop, task) = start_demand_owner(scheduler, &gateway, true);
+    let focus = |symbol: &str| {
+        SubscriptionInstrumentRegistry::default()
+            .validate(Vec::new(), Some(symbol.parse().unwrap()))
+            .unwrap()
+    };
+    demand.replace(focus("NVDA.NASDAQ")).unwrap();
+    until(20, step, || {
+        gateway.count(1, Operation::DepthOpen(DepthSymbol::Nvda)) == 1
+    })
+    .await;
+    let opened = replay.writes();
+    assert_eq!(opened.len(), 3);
+    for (packet, id) in opened.iter().zip([1, 3, 5]) {
+        let MarketWrite::SubscribeDepth {
+            con_id,
+            exchange,
+            smart_depth,
+            ..
+        } = packet
+        else {
+            panic!("unexpected depth request: {packet:?}");
+        };
+        assert_eq!(
+            (*con_id, exchange.as_deref(), *smart_depth),
+            (Some(id), Some("ISLAND"), false)
+        );
+    }
+    let (held_write, deadline) = if disconnect {
+        // The old page cancel is already on the wire but its write has not returned.
+        let hold = replay.hold_next_write();
+        demand.replace(focus("TSLA.NASDAQ")).unwrap();
+        until(8, step, || {
+            matches!(
+                replay.writes().last(),
+                Some(MarketWrite::CancelDepth { .. })
+            )
+        })
+        .await;
+        assert_eq!(replay.writes().len(), 4);
+        (Some(hold), gateway.global_pacing() + cooldown)
+    } else {
+        let deadline = gateway.global_pacing() + cooldown;
+        demand.replace(focus("TSLA.NASDAQ")).unwrap();
+        (None, deadline)
+    };
+    let before = replay.writes();
+    tick(step).await;
+    assert_eq!(replay.writes(), before);
+
+    let stop_after_reconnect = if disconnect {
+        // A terminal farm notice can invalidate an otherwise writable connection.
+        gateway.disconnect(0);
+        until(4, step, || gateway.count(1, Operation::Close) == 1).await;
+        Some(stop)
+    } else {
+        // finance-api signals shutdown by dropping this sender.
+        drop(stop);
+        until(4, step, || task.is_finished()).await;
+        None
+    };
+    assert!(
+        Instant::now() < deadline,
+        "session teardown waited for cooldown"
+    );
+    assert!(replay.is_closed());
+    if let Some(hold) = held_write {
+        assert!(hold.send(()).is_err(), "old write survived session close");
+    }
+    assert_eq!(gateway.count(1, Operation::Close), 1);
+    assert_eq!(gateway.count(2, Operation::Open), 0);
+    tick(deadline - Instant::now() - step).await;
+    assert_eq!(gateway.count(2, Operation::Open), 0);
+    if let Some(stop) = stop_after_reconnect {
+        until(20, step, || {
+            gateway.count(2, Operation::DepthOpen(DepthSymbol::Tsla)) == 1
+        })
+        .await;
+        stop.send(true).unwrap();
+    }
+    task.await.unwrap().unwrap();
+    tick(cooldown).await; // Flush any SDK cancellation still queued after teardown.
+    assert_eq!(
+        replay.writes(),
+        before,
+        "SDK Drop wrote an unpaced depth cancel"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn stop_during_focus_cooldown_closes_the_session_before_sdk_depth_drop() {
+    verify_depth_teardown_during_cooldown(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn disconnect_during_focus_cooldown_retires_parked_sdk_write_before_reconnect() {
+    verify_depth_teardown_during_cooldown(true).await;
+}
+
+#[derive(Clone, Copy)]
+enum PendingDepthWrite {
+    Cancel,
+    Confirm,
+    Subscribe,
+}
+
+async fn supersede_depth_focus(pending: PendingDepthWrite, replacement: Option<DepthSymbol>) {
+    // Fixed watchlist IDs and virtual time drive the same owner channel as GET/PUT.
+    let config = compact_config();
+    let step = config.request_interval;
+    let cooldown = config.pacing_cooldown;
+    let gateway = Gateway::new(0, &config);
+    let scheduler = LineScheduler::new(config, vec![watchlist().remove(0)]).unwrap();
+    let frames = DepthFrames::default();
+    let (scheduler, demand) = scheduler.with_subscription_demand(Some((
+        frames.clone(),
+        DepthPermissions {
+            equity_l1_confirmed: true,
+            totalview_confirmed: true,
+            eds_confirmed: true,
+        },
+    )));
+    let registry = SubscriptionInstrumentRegistry::default();
+    let select = |symbol: Option<DepthSymbol>| {
+        let id = symbol.map(|symbol| format!("{}.NASDAQ", symbol.as_str()).parse().unwrap());
+        let snapshot = registry.validate(Vec::new(), id).unwrap();
+        assert_eq!(demand.replace(snapshot).unwrap().depth_focus(), symbol);
+        assert_eq!(demand.current().unwrap().depth_focus(), symbol);
+    };
+    let confirmations = |symbol| {
+        gateway
+            .state
+            .lock()
+            .unwrap()
+            .depth_confirmations
+            .iter()
+            .filter(|&&s| s == symbol)
+            .count()
+    };
+    select(Some(DepthSymbol::Nvda));
+    let (stop, stopped) = watch::channel(false);
+    let fake = gateway.clone();
+    let task = tokio::spawn(scheduler.run(move |pacing| fake.clone().open(pacing), stopped));
+    until(24, step, || {
+        gateway.count(1, Operation::DepthOpen(DepthSymbol::Nvda)) == 1
+    })
+    .await;
+
+    if matches!(pending, PendingDepthWrite::Cancel) {
+        gateway.global_pacing();
+    }
+    select(Some(DepthSymbol::Tsla));
+    let old_cancel = Operation::DepthCancel(DepthSymbol::Nvda);
+    until(20, step, || match pending {
+        PendingDepthWrite::Cancel => frames
+            .latest(DepthSymbol::Nvda)
+            .is_some_and(|frame| frame.state == DepthState::Inactive),
+        PendingDepthWrite::Confirm => gateway.count(1, old_cancel) == 1,
+        PendingDepthWrite::Subscribe => confirmations(DepthSymbol::Tsla) == 1,
+    })
+    .await;
+    assert_eq!(
+        gateway.count(1, old_cancel),
+        usize::from(!matches!(pending, PendingDepthWrite::Cancel))
+    );
+    let confirmed_before = usize::from(matches!(pending, PendingDepthWrite::Subscribe));
+    assert_eq!(confirmations(DepthSymbol::Tsla), confirmed_before);
+    assert_eq!(gateway.count(1, Operation::DepthOpen(DepthSymbol::Tsla)), 0);
+    let before = gateway.calls().len();
+    gateway.global_pacing();
+    select(replacement);
+    tick(cooldown - step).await;
+    assert_eq!(
+        gateway.calls().len(),
+        before,
+        "request sent during cooldown"
+    );
+    // Let the scheduler run past the cooldown and several shared write slots.
+    for _ in 0..24 {
+        tick(step).await;
+    }
+    assert_eq!(gateway.count(1, old_cancel), 1);
+    assert_eq!(
+        confirmations(DepthSymbol::Tsla),
+        confirmed_before,
+        "confirmed superseded focus"
+    );
+    assert_eq!(
+        gateway.count(1, Operation::DepthOpen(DepthSymbol::Tsla)),
+        0,
+        "opened superseded focus"
+    );
+    assert_eq!(
+        gateway.count(1, Operation::DepthCancel(DepthSymbol::Tsla)),
+        0
+    );
+    assert!(
+        frames
+            .latest(DepthSymbol::Tsla)
+            .is_none_or(|frame| frame.state == DepthState::Inactive)
+    );
+    if let Some(latest) = replacement {
+        assert_eq!(confirmations(latest), 1);
+        assert_eq!(gateway.count(1, Operation::DepthOpen(latest)), 1);
+    }
+    for pin in [DepthSymbol::Qqq, DepthSymbol::Aapl] {
+        assert_eq!(gateway.count(1, Operation::DepthOpen(pin)), 1);
+        assert_eq!(gateway.count(1, Operation::DepthCancel(pin)), 0);
+    }
+    assert_eq!(gateway.count(1, Operation::Close), 0);
+    check_request_spacing(&gateway, step);
+    stop.send(true).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn superseded_focus_cleared_while_old_depth_cancel_waits_for_cooldown() {
+    supersede_depth_focus(PendingDepthWrite::Cancel, None).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn superseded_focus_replaced_while_depth_confirmation_waits_for_a_slot() {
+    supersede_depth_focus(PendingDepthWrite::Confirm, Some(DepthSymbol::Meta)).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn superseded_focus_replaced_after_confirmation_before_depth_subscribe() {
+    supersede_depth_focus(PendingDepthWrite::Subscribe, Some(DepthSymbol::Msft)).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn demand_focus_and_option_rotation_share_spacing_and_extended_global_cooldown() {
+    let config = BudgetConfig {
+        rotation_dwell: Duration::from_secs(1),
+        pacing_cooldown: Duration::from_secs(2),
+        ..compact_config()
+    };
+    let step = config.request_interval;
+    let cooldown = config.pacing_cooldown;
+    let gateway = Gateway::new(2, &config);
+    let scheduler = LineScheduler::new(config, vec![watchlist().remove(0)]).unwrap();
+    let (demand, stop, task) = start_demand_owner(scheduler, &gateway, true);
+    let focus = |symbol: &str| {
+        SubscriptionInstrumentRegistry::default()
+            .validate(Vec::new(), Some(symbol.parse().unwrap()))
+            .unwrap()
+    };
+    demand.replace(focus("NVDA.NASDAQ")).unwrap();
+    let rotation = option_key(FIRST_OPTION);
+    until(30, step, || {
+        gateway.count(1, Operation::DepthOpen(DepthSymbol::Nvda)) == 1
+            && gateway.count(1, Operation::Subscribe(rotation)) == 1
+    })
+    .await;
+
+    let prior = gateway.calls().len();
+    gateway.global_pacing();
+    demand.replace(focus("TSLA.NASDAQ")).unwrap();
+    tick(cooldown / 2).await;
+    assert_eq!(gateway.calls().len(), prior, "focus wrote during cooldown");
+    let extended = gateway.global_pacing() + cooldown;
+    tick(cooldown - step).await;
+    assert_eq!(
+        gateway.calls().len(),
+        prior,
+        "a second notice extended cooldown"
+    );
+
+    until(20, step, || {
+        gateway.count(1, Operation::DepthOpen(DepthSymbol::Tsla)) == 1
+            && gateway.count(1, Operation::Cancel(rotation)) >= 1
+    })
+    .await;
+    let calls = gateway.calls();
+    assert!(calls[prior..].iter().all(|call| call.time >= extended));
+    assert_eq!(
+        gateway.count(1, Operation::DepthCancel(DepthSymbol::Nvda)),
+        1
+    );
+    assert_eq!(gateway.count(1, Operation::Close), 0);
+    // The trace includes L1 and depth confirmations as well as subscribe and cancel.
+    check_request_spacing(&gateway, step);
+    stop.send(true).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn depth_stream_pacing_delays_its_cancel_and_pending_line_requests() {
+    let config = BudgetConfig {
+        pacing_cooldown: Duration::from_secs(2),
+        ..compact_config()
+    };
+    let step = config.request_interval;
+    let cooldown = config.pacing_cooldown;
+    let gateway = Gateway::new(2, &config);
+    let (notice, received) = oneshot::channel();
+    gateway.state.lock().unwrap().depth_pacing = Some(notice);
+    let scheduler = LineScheduler::new(config, vec![watchlist().remove(0)]).unwrap();
+    let (_demand, stop, task) = start_demand_owner(scheduler, &gateway, true);
+    let (symbol, at, before) = tokio::time::timeout(20 * step, received)
+        .await
+        .unwrap()
+        .unwrap();
+    tick(cooldown - step).await;
+    assert_eq!(gateway.calls().len(), before);
+    until(20, step, || {
+        gateway.count(1, Operation::DepthCancel(symbol)) == 1
+            && gateway.count(1, Operation::Subscribe(option_key(FIRST_OPTION))) == 1
+    })
+    .await;
+    let calls = gateway.calls();
+    assert!(
+        calls[before..]
+            .iter()
+            .all(|call| call.time >= at + cooldown)
+    );
+    assert_eq!(gateway.count(1, Operation::Close), 0);
+    check_request_spacing(&gateway, step);
+    stop.send(true).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn demanded_stock_with_short_retry_yields_to_first_confirmation_and_option_chain() {
+    let config = BudgetConfig {
+        account_lines: 6,
+        stock_lines: 2,
+        request_interval: Duration::from_millis(250),
+        reconnect_initial: Duration::from_millis(100),
+        reconnect_max: Duration::from_millis(100),
+        ..compact_config()
+    };
+    let step = config.request_interval;
+    let gateway = Gateway::new(1, &config);
+    {
+        let mut state = gateway.state.lock().unwrap();
+        state.first_equity_timeouts = usize::MAX;
+        state.option_underlying = Some(2);
+    }
+    // Put SPY first in the base queue so the first QQQ timeout proves demand priority.
+    let stocks = watchlist().into_iter().take(2).rev().collect();
+    let scheduler = LineScheduler::new(config, stocks).unwrap();
+    let lines = scheduler.handle();
+    let (demand, stop, task) = start_demand_owner(scheduler, &gateway, false);
+    demand
+        .replace(
+            SubscriptionInstrumentRegistry::default()
+                .validate(vec!["QQQ.NASDAQ".parse().unwrap()], None)
+                .unwrap(),
+        )
+        .unwrap();
+    until(5, step, || {
+        gateway.count(1, Operation::Subscribe(stock_key(2))) == 1
+    })
+    .await;
+    assert_eq!(gateway.count(1, Operation::Confirm), 2);
+    until(20, step, || lines.status().observed_options == 1).await;
+    assert!(gateway.count(1, Operation::Confirm) > 2);
+    assert_eq!(gateway.count(1, Operation::Subscribe(stock_key(1))), 0);
+    assert_eq!(gateway.count(1, Operation::Close), 0);
+    assert!(!lines.status().discovery_complete);
+    check_request_spacing(&gateway, step);
+    stop.send(true).unwrap();
+    task.await.unwrap().unwrap();
 }
 
 #[tokio::test(start_paused = true)]

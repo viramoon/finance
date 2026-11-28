@@ -7,33 +7,12 @@ use axum::{
 use chrono::{DateTime, Utc};
 use finance_collector::market_ingress::ProductPolicy;
 use finance_ib::depth::{
-    DepthError, DepthFrame, DepthLevel, DepthPermissions, DepthState, DepthSymbol,
-    permission::PRODUCT,
+    DepthError, DepthLevel, DepthPermissions, DepthState, DepthSymbol, permission::PRODUCT,
 };
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
 use utoipa::{IntoParams, ToSchema};
 
-/// Attach `publish` to the existing depth owner's callback. Each symbol only
-/// retains its latest frame, including the reset or inactive frame.
-#[derive(Clone, Default)]
-pub struct DepthFrames(Arc<RwLock<HashMap<DepthSymbol, DepthFrame>>>);
-
-impl DepthFrames {
-    pub fn publish(&self, frame: DepthFrame) {
-        self.0
-            .write()
-            .expect("depth frames")
-            .insert(frame.symbol, frame);
-    }
-
-    fn latest(&self, symbol: DepthSymbol) -> Option<DepthFrame> {
-        self.0.read().expect("depth frames").get(&symbol).cloned()
-    }
-}
+pub use finance_collector::line_budget::DepthFrames;
 
 #[derive(Deserialize, IntoParams)]
 #[serde(deny_unknown_fields)]

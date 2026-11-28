@@ -1,13 +1,16 @@
 //! Shared, read-only IBKR L1 subscriptions and option-chain rotation.
 
 mod coverage;
+mod demand;
 mod depth;
+mod pacing;
 mod policy;
 mod session;
 mod worker;
 
 pub use coverage::{CoverageInterval, CoverageReport};
-pub use depth::{DepthAllocation, DepthBudget, DepthBudgetError};
+pub use demand::{SubscriptionDemand, SubscriptionDemandHandle, SubscriptionInstrumentRegistry};
+pub use depth::{DepthAllocation, DepthBudget, DepthBudgetError, DepthFrames};
 pub use policy::{BudgetConfig, BudgetConfigError, watchlist};
 
 use std::{
@@ -17,13 +20,14 @@ use std::{
 
 use anyhow::{Result, ensure};
 use chrono::{DateTime, NaiveDate, TimeDelta, Utc};
+use finance_ib::depth::DepthPermissions;
 use finance_ib::market::{
     ConfirmedContract, ContractKind, ContractQuery, MarketEvent, RequestKey, option_market_date,
 };
 use finance_market_protocol::DecimalText;
 use serde::Serialize;
 use tokio::{
-    sync::{Notify, broadcast},
+    sync::{Notify, broadcast, watch},
     time::Instant,
 };
 use utoipa::ToSchema;
@@ -223,6 +227,8 @@ impl LineHandle {
 pub struct LineScheduler {
     shared: Arc<Shared>,
     stocks: Vec<ContractQuery>,
+    demand: Option<watch::Receiver<SubscriptionDemand>>,
+    depth: Option<(DepthFrames, DepthPermissions)>,
 }
 
 impl LineScheduler {
@@ -249,10 +255,10 @@ impl LineScheduler {
             selection: Selection::default(),
             discovery_complete: false,
             generation: 0,
-            cooldown: None,
         };
         Ok(Self {
             shared: Arc::new(Shared {
+                pacing: pacing::RequestPacing::new(&config),
                 config,
                 updates,
                 changed: Notify::new(),
@@ -261,7 +267,20 @@ impl LineScheduler {
                 clock: Instant::now(),
             }),
             stocks,
+            demand: None,
+            depth: None,
         })
+    }
+
+    /// Attach the demand stream to this scheduler's verified paper sessions.
+    pub fn with_subscription_demand(
+        mut self,
+        depth: Option<(DepthFrames, DepthPermissions)>,
+    ) -> (Self, SubscriptionDemandHandle) {
+        let (handle, receiver) = SubscriptionDemandHandle::channel();
+        self.demand = Some(receiver);
+        self.depth = depth;
+        (self, handle)
     }
 
     pub fn handle(&self) -> LineHandle {
@@ -271,6 +290,7 @@ impl LineScheduler {
 
 struct Shared {
     config: BudgetConfig,
+    pacing: pacing::RequestPacing,
     updates: broadcast::Sender<LineUpdate>,
     changed: Notify,
     state: Mutex<State>,
@@ -299,7 +319,6 @@ struct State {
     selection: Selection,
     discovery_complete: bool,
     generation: u64,
-    cooldown: Option<Instant>,
 }
 
 impl State {

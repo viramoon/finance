@@ -1,9 +1,11 @@
-//! Private REST views of the shared market owner's read-only data.
+//! Private REST views and subscription demand for the shared market owner.
 
 pub(crate) mod analytics;
+pub(crate) mod demand;
 pub(crate) mod depth;
 pub(crate) mod flow;
 pub(crate) mod lines;
+mod owner;
 
 use analytics::{exposure, history};
 use depth::book;
@@ -16,6 +18,7 @@ pub use flow::{
     OptionFlowWindow,
 };
 pub use lines::OptionLineSource;
+pub use owner::PaperSubscriptionOwner;
 
 use crate::{ApiError, AppState, error, option_flow_stream::OptionFlowStream};
 use axum::{
@@ -24,7 +27,10 @@ use axum::{
     http::StatusCode,
     routing::get,
 };
-use finance_collector::market_ingress::ProductPolicy;
+use finance_collector::{
+    line_budget::{SubscriptionDemandHandle, SubscriptionInstrumentRegistry},
+    market_ingress::ProductPolicy,
+};
 use finance_market_protocol::Token;
 use serde::de::DeserializeOwned;
 use std::{path::PathBuf, sync::Arc};
@@ -39,6 +45,8 @@ pub struct MarketReadSources {
     pub flow_observations: Option<OptionFlowSource<FlowObservationSource>>,
     pub flow_verifications: Option<OptionFlowSource<FlowVerificationSource>>,
     pub flow_stream: Option<Arc<OptionFlowStream>>,
+    pub subscription_demand: Option<SubscriptionDemandHandle>,
+    pub subscription_registry: SubscriptionInstrumentRegistry,
 }
 
 /// Attach a product already authorized by the owner for private display.
@@ -77,6 +85,10 @@ pub(crate) fn routes(sources: MarketReadSources) -> Router<AppState> {
         .route("/api/v1/market/book", get(book))
         .route("/api/v1/market/subscriptions", get(subscriptions))
         .route("/api/v1/market/subscriptions/coverage", get(coverage))
+        .route(
+            "/api/v1/market/subscriptions/demand",
+            get(demand::get_subscription_demand).put(demand::put_subscription_demand),
+        )
         .route("/api/v1/options/chain", get(chain))
         .route("/api/v1/options/exposure", get(exposure))
         .route("/api/v1/options/history", get(history))
