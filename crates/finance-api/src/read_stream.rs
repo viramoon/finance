@@ -4,7 +4,10 @@
 //! status SSE envelope maps its three fields to the SSE event, id and data
 //! lines. Delivery and resume retention are handled by the transport.
 
-use crate::market::{InstrumentStatus, MarketStatus};
+use crate::{
+    market::{InstrumentStatus, MarketStatus},
+    option_flow_stream::wire,
+};
 use axum::response::sse::Event as AxumSseEvent;
 use chrono::DateTime;
 use finance_market_protocol::{
@@ -126,7 +129,7 @@ pub fn export(directory: &Path) -> Result<(), Box<dyn Error>> {
         ),
     ];
     fs::create_dir_all(directory)?;
-    for (name, mut document) in documents {
+    for (name, mut document) in documents.into_iter().chain(wire::documents()?) {
         // Keep export order independent of the workspace's serde_json features.
         document.sort_all_objects();
         let mut bytes = serde_json::to_vec_pretty(&document)?;

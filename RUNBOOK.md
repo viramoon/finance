@@ -113,6 +113,18 @@ cargo test --locked --offline -p finance-collector option_flow
 
 已获本地记录许可的 `ibkr/opra-history` 核验报告可用 `durable_through` 对照同一数据根和产品的 F3 水位。仅展示模式从进程内读取，核验水位为空。按[接口导出流程](docs/api.md#openapi-与契约)取用同一提交生成的 OpenAPI 和已有的流产物。[第四批接口与权限](docs/api.md#第四批期权流读契约)
 
+## 期权流推送与续传验收
+
+```sh
+cargo test --locked --offline -p finance-api --lib option_flow_stream
+cargo test --locked --offline -p finance-api --test option_flow_stream --test option_flow_stream_contract --test option_flow --test read_stream
+cargo run --locked --offline -q -p finance-api -- export-read-stream /tmp/finance-read-stream
+```
+
+测试在进程内用固定合成观察验证 WS 握手、SSE 帧、快照接续、失效游标、停用状态、精度及导出漂移。收到 `status` 的 `disabled` 时，检查共享行情所有者是否已将获准展示的 OPRA 发布器接入 API。未接入时订阅保持空闲，快照查询返回 `503 / market_read_source_unavailable`。状态为 `live` 时可用事件的预算和覆盖核对接收时段。
+
+收到 `reset_required` 时终止旧连接，按同一合约和所需时窗读取恢复快照，用快照游标重连。重启或保留窗淘汰会使旧游标失效。若重连后再次收到重置，从新快照重试。核对 web 已转发续传游标且未缓存响应或缓冲 SSE。独立 API 收到 SIGTERM 或 SIGINT 时结束 WS 和 SSE 连接。日志和联测记录仅保留状态及脱敏错误。[接口和续传规则](docs/api.md#期权流观察推送与续传)
+
 ## 行情订阅需求验收
 
 `GET /api/v1/market/subscriptions/demand` 查看状态。`PUT` 同一路径提交完整快照，JSON `{}` 清除全部追加需求。独立 API 默认对有效请求返回 `200` 和 `state: disabled`，忽略该次需求，零公网请求。已有 `GET /api/v1/market/subscriptions` 继续查询实际行数。

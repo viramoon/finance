@@ -32,6 +32,19 @@ pub struct OptionFlowWindow {
     pub end: DateTime<Utc>,
 }
 
+impl OptionFlowWindow {
+    pub(crate) fn checked(
+        con_id: i32,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Self, ApiError> {
+        if con_id <= 0 || start >= end {
+            return Err(invalid());
+        }
+        Ok(Self { con_id, start, end })
+    }
+}
+
 pub struct FlowObservationSnapshot {
     pub as_of: DateTime<Utc>,
     /// Matching observations in the owner's retained order, including equal receipt times.
@@ -59,13 +72,15 @@ impl<T: ?Sized> OptionFlowSource<T> {
     }
 
     fn display_access(&self, product: &str) -> Option<&ProductPolicy> {
-        let access = &self.access;
-        (access.source.as_str() == IBKR
-            && access.product.as_str() == product
-            && access.display_live
-            && (!access.backup_personal_drive || access.record_local))
-            .then_some(access)
+        is_display_access(&self.access, product).then_some(&self.access)
     }
+}
+
+pub(crate) fn is_display_access(access: &ProductPolicy, product: &str) -> bool {
+    access.source.as_str() == IBKR
+        && access.product.as_str() == product
+        && access.display_live
+        && (!access.backup_personal_drive || access.record_local)
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -84,14 +99,10 @@ pub(crate) struct OptionFlowQuery {
 
 impl OptionFlowQuery {
     fn window(&self) -> Result<OptionFlowWindow, ApiError> {
-        if self.con_id <= 0 || self.start >= self.end || !(1..=100).contains(&self.limit()) {
+        if !(1..=100).contains(&self.limit()) {
             return Err(invalid());
         }
-        Ok(OptionFlowWindow {
-            con_id: self.con_id,
-            start: self.start,
-            end: self.end,
-        })
+        OptionFlowWindow::checked(self.con_id, self.start, self.end)
     }
 
     fn limit(&self) -> usize {
@@ -106,11 +117,24 @@ impl OptionFlowQuery {
 }
 
 #[derive(Serialize, ToSchema)]
-struct OptionFlowObservation {
+pub(crate) struct OptionFlowObservation {
     clue: FlowObservation,
     budget: BudgetStatus,
     #[schema(required = true)]
     coverage: Option<SubscriptionCoverage>,
+}
+
+impl OptionFlowObservation {
+    pub(crate) fn from_record(record: &ObservedFlow) -> Self {
+        Self {
+            clue: record.clue.clone(),
+            budget: record.budget.clone(),
+            coverage: record
+                .coverage
+                .as_ref()
+                .map(|report| SubscriptionCoverage::from_report(record.access.clone(), report)),
+        }
+    }
 }
 
 #[derive(Serialize, ToSchema)]
@@ -123,6 +147,26 @@ pub(crate) struct OptionFlowObservationPage {
     items: Vec<OptionFlowObservation>,
     #[schema(required = true)]
     next_offset: Option<usize>,
+}
+
+impl OptionFlowObservationPage {
+    pub(crate) fn new(
+        window: OptionFlowWindow,
+        access: &ProductPolicy,
+        as_of: DateTime<Utc>,
+        records: impl IntoIterator<Item = OptionFlowObservation>,
+        next_offset: Option<usize>,
+    ) -> Self {
+        Self {
+            access: access.clone(),
+            as_of,
+            con_id: window.con_id,
+            start: window.start,
+            end: window.end,
+            items: records.into_iter().collect(),
+            next_offset,
+        }
+    }
 }
 
 /// Retained OPRA L1 clues by receipt time in [start, end).
@@ -157,26 +201,13 @@ pub(crate) async fn observations(
         validate_coverage_key(record.coverage.as_ref(), window.con_id)?;
     }
     let (records, next_offset) = query.page(&snapshot.records);
-    let items = records
-        .iter()
-        .map(|record| OptionFlowObservation {
-            clue: record.clue.clone(),
-            budget: record.budget.clone(),
-            coverage: record
-                .coverage
-                .as_ref()
-                .map(|report| SubscriptionCoverage::from_report(access.clone(), report)),
-        })
-        .collect();
-    Ok(Json(OptionFlowObservationPage {
-        access: access.clone(),
-        as_of: snapshot.as_of,
-        con_id: window.con_id,
-        start: window.start,
-        end: window.end,
-        items,
+    Ok(Json(OptionFlowObservationPage::new(
+        window,
+        access,
+        snapshot.as_of,
+        records.iter().map(OptionFlowObservation::from_record),
         next_offset,
-    }))
+    )))
 }
 
 #[derive(Serialize, ToSchema)]
@@ -266,7 +297,10 @@ pub(crate) async fn verification(
     }))
 }
 
-fn validate_coverage_key(report: Option<&CoverageReport>, con_id: i32) -> Result<(), ApiError> {
+pub(crate) fn validate_coverage_key(
+    report: Option<&CoverageReport>,
+    con_id: i32,
+) -> Result<(), ApiError> {
     if report
         .is_some_and(|report| report.key.product != Product::Opra || report.key.con_id != con_id)
     {

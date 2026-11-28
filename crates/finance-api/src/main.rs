@@ -2,7 +2,7 @@ use finance_api::{
     ApiDoc, AppState,
     config::Settings,
     market_options::{MarketReadSources, PaperSubscriptionOwner},
-    read_stream, router_with_market_reads,
+    option_flow_stream, read_stream, router_with_market_reads,
 };
 use finance_market_protocol::{
     SchemaVersion,
@@ -162,23 +162,29 @@ async fn serve(
     } else {
         eprintln!("finance-api listening on {}", listener.local_addr()?);
     }
-    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let (stop_owner, owner_shutdown) = tokio::sync::watch::channel(false);
+    let (stop_streams, stream_shutdown) = tokio::sync::watch::channel(false);
     let owner = owner.map(|owner| {
         tokio::spawn(async move {
-            if let Err(error) = owner.run(shutdown).await {
+            if let Err(error) = owner.run(owner_shutdown).await {
                 eprintln!("paper subscription owner stopped: {error}");
             }
         })
     });
-    let result = axum::serve(listener, router_with_market_reads(state, sources))
+    let router = option_flow_stream::with_shutdown(
+        router_with_market_reads(state, sources),
+        stream_shutdown,
+    );
+    let result = axum::serve(listener, router)
         .with_graceful_shutdown(async move {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {},
                 _ = terminate.recv() => {},
             }
+            stop_streams.send_replace(true);
         })
         .await;
-    drop(stop);
+    drop(stop_owner);
     if let Some(owner) = owner {
         owner.await?;
     }

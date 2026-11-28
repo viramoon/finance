@@ -20,7 +20,7 @@ pub use flow::{
 pub use lines::OptionLineSource;
 pub use owner::PaperSubscriptionOwner;
 
-use crate::{ApiError, AppState, error};
+use crate::{ApiError, AppState, error, option_flow_stream::OptionFlowStream};
 use axum::{
     Extension, Router,
     extract::{Query, rejection::QueryRejection},
@@ -44,6 +44,7 @@ pub struct MarketReadSources {
     pub history: Option<Licensed<Arc<HistorySource>>>,
     pub flow_observations: Option<OptionFlowSource<FlowObservationSource>>,
     pub flow_verifications: Option<OptionFlowSource<FlowVerificationSource>>,
+    pub flow_stream: Option<Arc<OptionFlowStream>>,
     pub subscription_demand: Option<SubscriptionDemandHandle>,
     pub subscription_registry: SubscriptionInstrumentRegistry,
 }
@@ -93,16 +94,19 @@ pub(crate) fn routes(sources: MarketReadSources) -> Router<AppState> {
         .route("/api/v1/options/history", get(history))
         .route("/api/v1/options/flow/observations", get(flow::observations))
         .route("/api/v1/options/flow/verification", get(flow::verification))
+        .merge(crate::option_flow_stream::routes())
         .layer(Extension(Arc::new(sources)))
 }
 
-type ReadSources = Extension<Arc<MarketReadSources>>;
+pub(crate) type ReadSources = Extension<Arc<MarketReadSources>>;
 
-fn parse<T: DeserializeOwned>(query: Result<Query<T>, QueryRejection>) -> Result<T, ApiError> {
+pub(crate) fn parse<T: DeserializeOwned>(
+    query: Result<Query<T>, QueryRejection>,
+) -> Result<T, ApiError> {
     query.map(|Query(query)| query).map_err(|_| invalid())
 }
 
-fn invalid() -> ApiError {
+pub(crate) fn invalid() -> ApiError {
     error(
         StatusCode::BAD_REQUEST,
         "market_read_query_invalid",
@@ -118,7 +122,7 @@ fn missing() -> ApiError {
     )
 }
 
-fn unavailable() -> ApiError {
+pub(crate) fn unavailable() -> ApiError {
     error(
         StatusCode::SERVICE_UNAVAILABLE,
         "market_read_source_unavailable",

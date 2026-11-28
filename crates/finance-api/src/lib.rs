@@ -9,6 +9,7 @@ pub mod jobs;
 pub mod market;
 pub mod market_options;
 mod market_read;
+pub mod option_flow_stream;
 mod read_store;
 pub mod read_stream;
 pub mod research;
@@ -265,7 +266,10 @@ fn router_with_read_sources(
         market_options::analytics::exposure,
         market_options::analytics::history,
         market_options::flow::observations,
-        market_options::flow::verification
+        market_options::flow::verification,
+        option_flow_stream::ws,
+        option_flow_stream::sse,
+        option_flow_stream::snapshot
     ),
     components(schemas(
         BacktestSummary,
